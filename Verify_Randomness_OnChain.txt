@@ -1,0 +1,18 @@
+// Verifying randomness on-chain
+async function verifyRandomness(txHash) {
+  // Fetch the transaction receipt
+  const receipt = await provider.getTransactionReceipt(txHash);
+  
+  // Extract the RandomnessRequested event
+  const randomnessEvent = receipt.logs
+    .filter(log => log.topics[0] === RANDOMNESS_REQUESTED_TOPIC)
+    .map(log => temporalGradientInterface.parseLog(log))[0];
+  
+  // The randomness can be verified by anyone
+  console.log("Verified Random Values:", randomnessEvent.args.randomWords);
+  
+  // The beacon output that generated this randomness
+  console.log("Source Beacon Output:", randomnessEvent.args.beaconOutput);
+  
+  return randomnessEvent.args.randomWords;
+}
