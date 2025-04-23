@@ -16,15 +16,13 @@ import { BloomFilterLib } from "./BloomFilterLib.sol";
 import { MiningLib } from "./MiningLib.sol";
 import { TokenomicsLib } from "./TokenomicsLib.sol";
 import { StorageLib } from "./StorageLib.sol";
+import { GovernanceLib } from "./GovernanceLib.sol";
+import { RandomnessHandlerLib } from "./RandomnessHandlerLib.sol";
 
 /**
  * @title EnhancedTemporalGradientBeacon
  * @notice A temporal gradient beacon with randomness, multi-pool support, staking, meta-transactions, and optimized bloom filter integration
- * @dev Deploy using UUPS proxy pattern to handle contract size:
- *      1. Deploy implementation
- *      2. Deploy ERC1967/UUPSProxy pointing to implementation
- *      3. Call initialize() on proxy
- *      4. Interact via proxy
+ * @dev Deploy using UUPS proxy pattern to handle contract size
  */
 contract EnhancedTemporalGradientBeacon is
     Initializable,
@@ -42,6 +40,8 @@ contract EnhancedTemporalGradientBeacon is
     using MiningLib for MiningLib.RevealParams;
     using TokenomicsLib for TokenomicsLib.EpochState;
     using StorageLib for StorageLib.HistoricalStorage;
+    using GovernanceLib for GovernanceLib.GovernanceContext;
+    using RandomnessHandlerLib for RandomnessHandlerLib.RandomnessContext;
 
     // Constants
     bytes32 private constant _GOVERNANCE_ROLE_HASH = keccak256("GOVERNANCE_ROLE");
@@ -69,20 +69,11 @@ contract EnhancedTemporalGradientBeacon is
     uint256 public rewardAmount;
     uint256 public targetDifficulty;
 
-    // Replace with TokenomicsLib.EpochState struct
+    // Library storage contexts
     TokenomicsLib.EpochState internal epochState;
-    
-    // Mining pools - replaced with MiningLib structures
-    mapping(uint256 => MiningLib.MiningPool) public miningPools;
-    uint256 public poolCount;
-    uint256 public constant MAX_POOLS = 5;
-    uint256 public totalMined;
-
-    // Commitments - replaced with MiningLib structures
-    mapping(address => MiningLib.Commitment) public minerCommitments;
-
-    // Historical storage - replaced with StorageLib structure
     StorageLib.HistoricalStorage internal historicalStorage;
+    GovernanceLib.GovernanceContext internal governanceContext;
+    RandomnessHandlerLib.RandomnessContext internal randomnessContext;
 
     // Staking
     uint256 public constant REQUIRED_TSTAKE_AMOUNT = 100 ether;
@@ -97,52 +88,8 @@ contract EnhancedTemporalGradientBeacon is
     bytes32 public genesisBlockOutput;
     uint256 public genesisBlockTimestamp;
 
-    // Entropy
-    uint256 public entropyAccumulator;
-    bytes32 public entropyMerkleRoot;
-
-    // Thresholds
-    uint256 public minSubmissionsPerBlock;
-    uint256 public consensusThreshold;
-
-    // Tokenomics
-    uint256 public constant TOTAL_SUPPLY_CAP = 2_000_000_000 ether;
-    uint256 public constant MINING_ALLOCATION = 700_000_000 ether;
-    uint256 public initialBlockReward;
-    uint256 public currentEpoch;
-    uint256 public blocksPerEpoch;
-    uint256 public epochStartBlock;
-    uint256 public lastHalvingBlock;
-    uint256 public halvingInterval;
-
-    // Multi-pool
-    struct MiningPool {
-        uint256 targetDifficulty;
-        uint256 emissionBucket;
-        uint256 totalMined;
-        bool active;
-    }
-
-    // Commitments
-    struct CommitmentFlags {
-        bool revealed;
-    }
-    struct Commitment {
-        bytes32 commitHash;
-        uint64 timestamp;
-        CommitmentFlags flags;
-        bytes32 revealedValue;
-        uint256 poolId;
-    }
-
     // Mining parameters
-    uint256 public minCommitmentAge;
-    uint256 public maxCommitmentAge;
-    uint256 public bonusMultiplier = 150;
-    uint256 public bonusThreshold = 2;
-    uint256 public outputExpiryBlocks;
     uint256 public constant MIN_EXPIRY_BLOCKS = 40000;
-    uint256 public minBlockInterval;
     mapping(address => uint256) public lastMinerBlock;
 
     // Bloom filter
@@ -150,8 +97,10 @@ contract EnhancedTemporalGradientBeacon is
     mapping(bytes32 => uint256) public usedOutputs;
     uint256 public outputCount;
 
-    // Randomness
-    RandomnessLib.State public randomnessState;
+    // Tokenomics
+    uint256 public constant TOTAL_SUPPLY_CAP = 2_000_000_000 ether;
+    uint256 public constant MINING_ALLOCATION = 700_000_000 ether;
+    uint256 public initialBlockReward;
 
     // EIP-712
     bytes32 private constant MINING_COMMITMENT_TYPEHASH =
@@ -162,35 +111,21 @@ contract EnhancedTemporalGradientBeacon is
         );
     mapping(address => uint256) public nonces;
 
+    // Used anonymous IDs for stealth mining rewards
+    mapping(bytes32 => bool) public usedAnonymousIds;
+
     // Events
     event BeaconBlockMined(address indexed miner, bytes32 hmacOutput, uint256 reward, uint64 nonce, uint256 timestamp, uint256 poolId);
     event CommitmentSubmitted(address indexed miner, bytes32 commitHash, uint256 poolId);
     event CommitmentRevealed(address indexed miner, bytes32 revealedValue, uint256 poolId);
-    event EntropyContributed(uint256 indexed requestId, address contributor, bytes32 contribution);
-    event RandomnessRequested(uint256 indexed requestId, address indexed requester, bytes32 userSeed);
-    event RandomnessFulfilled(uint256 indexed requestId, bytes32 result);
-    event RandomnessFeeChanged(uint256 oldFee, uint256 newFee);
-    event RandomnessExpiryChanged(uint256 blocks);
     event OutputHistoryUpdated(bytes32 newOutput, uint256 index);
-    event GovernanceParameterChanged(string paramName, uint256 newValue);
-    event MerkleRootUpdated(bytes32 newRoot);
-    event TokenUpdated(address newToken);
     event OutputsPruned(uint256 count);
     event BatchProcessed(uint256 startId, uint256 endId, uint256 fulfilledCount);
-    event EpochChanged(uint256 indexed newEpoch, uint256 blockReward);
-    event Halving(uint256 indexed epochNumber, uint256 newBlockReward, uint256 blockNumber);
-    event MiningPoolCreated(uint256 indexed poolId, uint256 targetDifficulty, uint256 emissionBucket);
-    event MiningPoolUpdated(uint256 indexed poolId, uint256 targetDifficulty, uint256 emissionBucket);
-    event MiningPoolDeactivated(uint256 indexed poolId);
-    event BloomFilterReset(uint256 size, uint256 numHashes);
     event GenesisBlockCreated(bytes32 indexed output, uint256 timestamp);
-    event HistoricalStorageConfigChanged(bool enabled, uint256 maxBlocks);
-    event BlockArchived(uint256 indexed blockIndex, bytes32 output, address indexed miner);
     event StealthSolutionSubmitted(bytes32 indexed anonymousId, address indexed recipient, uint256 reward);
 
     // Errors
     error ZeroToken();
-    error InvalidDifficulty();
     error InsufficientStake();
     error ActiveCommitmentExists();
     error MiningTooFrequently();
@@ -200,58 +135,16 @@ contract EnhancedTemporalGradientBeacon is
     error CommitmentExpired();
     error InvalidCommitment();
     error InvalidPreviousOutput();
-    error InvalidSigner();
-    error SolutionTooEasy();
-    error OutputAlreadyUsed();
-    error FeeNotSet();
-    error InvalidRequestID();
-    error InvalidRequest();
-    error RequestFulfilled();
-    error RequestExpired();
-    error AlreadyContributed();
-    error MaxContributionsReached();
-    error RequestDoesNotExist();
-    error RequestNotFulfilled();
-    error ExpiryTooShort();
-    error InvalidThreshold();
-    error InvalidMinSubmissions();
-    error MinAgeTooLow();
-    error MaxAgeTooLow();
-    error MaxAgeTooHigh();
-    error InvalidMultiplier();
-    error InvalidThresholdValue();
-    error ZeroAddress();
-    error MinContributionsTooLow();
-    error MaxLessThanMin();
-    error MaxContributionsTooHigh();
-    error ArrayLengthMismatch();
-    error BatchTooLarge();
-    error InvalidBatchSize();
     error SizeMustBePowerOf2();
     error InvalidSizeRange();
     error InvalidNumHashes();
     error BloomFilterNotInitialized();
-    error MiningCapReached();
-    error InvalidEpochParameters();
-    error InvalidPoolId();
-    error PoolNotActive();
-    error PoolEmissionExhausted();
-    error MaxPoolsReached();
-    error InvalidSignature();
+    error OutputAlreadyUsed();
     error DeadlineExpired();
     error InvalidNonce();
 
-    // Used anonymous IDs for stealth mining rewards
-    mapping(bytes32 => bool) public usedAnonymousIds;
-
     /**
-     * @notice Initializes the contract with token, reward, difficulty, and epoch settings
-     * @param _tgbtToken TGBT token address
-     * @param _tstakeToken TSTAKE token address
-     * @param _initialReward Initial block reward
-     * @param _difficulty Target difficulty
-     * @param _blocksPerEpoch Blocks per epoch
-     * @param _halvingInterval Blocks between halvings
+     * @notice Initializes the contract
      */
     function initialize(
         address _tgbtToken,
@@ -269,7 +162,7 @@ contract EnhancedTemporalGradientBeacon is
         __EIP712_init("EnhancedTemporalGradientBeacon", "1");
 
         // Verify RandomnessLib.State compatibility
-        RandomnessLib.State storage state = randomnessState;
+        RandomnessLib.State storage state = randomnessContext.state;
         state.fee = 100 ether;
         state.maxContributions = 10;
         require(state.fee == 100 ether, "RandomnessLib.State layout mismatch");
@@ -329,11 +222,11 @@ contract EnhancedTemporalGradientBeacon is
         maxCommitmentAge = 100;
 
         // Randomness state
-        randomnessState.fee = 100 ether;
-        randomnessState.expiryBlocks = 50000;
-        randomnessState.minContributions = 3;
-        randomnessState.maxContributions = 10;
-        randomnessState.maxBatchSize = 10;
+        randomnessContext.state.fee = 100 ether;
+        randomnessContext.state.expiryBlocks = 50000;
+        randomnessContext.state.minContributions = 3;
+        randomnessContext.state.maxContributions = 10;
+        randomnessContext.state.maxBatchSize = 10;
 
         // Bloom filter
         bloomFilter = BloomFilterLib.createFilter(1024, 3);
@@ -774,7 +667,7 @@ contract EnhancedTemporalGradientBeacon is
     // Randomness Functions
     function _processRandomnessAndUpdateMerkle() internal {
         bytes32 historicalHash = _getHistoricalOutputsHash();
-        randomnessState.processPendingRequests(historicalHash, entropyAccumulator);
+        randomnessContext.state.processPendingRequests(historicalHash, entropyAccumulator);
 
         bytes32 newRoot = keccak256(abi.encodePacked(entropyMerkleRoot, entropyAccumulator, historicalHash, block.timestamp, block.prevrandao));
         entropyMerkleRoot = newRoot;
@@ -790,9 +683,9 @@ contract EnhancedTemporalGradientBeacon is
     }
 
     function requestRandomness(bytes32 userSeed) external nonReentrant whenNotPaused returns (uint256 requestId) {
-        if (randomnessState.fee == 0) revert FeeNotSet();
-        tgbtToken.burnFrom(msg.sender, randomnessState.fee);
-        requestId = randomnessState.createRequest(msg.sender, userSeed);
+        if (randomnessContext.state.fee == 0) revert FeeNotSet();
+        tgbtToken.burnFrom(msg.sender, randomnessContext.state.fee);
+        requestId = randomnessContext.state.createRequest(msg.sender, userSeed);
         emit RandomnessRequested(requestId, msg.sender, userSeed);
         return requestId;
     }
@@ -806,7 +699,7 @@ contract EnhancedTemporalGradientBeacon is
         address recovered = messageHash.toEthSignedMessageHash().recover(entropySignature);
         if (recovered != msg.sender) revert InvalidSigner();
 
-        bool shouldFulfill = randomnessState.addContribution(requestId, msg.sender, entropyContribution);
+        bool shouldFulfill = randomnessContext.state.addContribution(requestId, msg.sender, entropyContribution);
         emit EntropyContributed(requestId, msg.sender, entropyContribution);
 
         if (shouldFulfill) {
@@ -815,12 +708,12 @@ contract EnhancedTemporalGradientBeacon is
     }
 
     function _fulfillRandomness(uint256 requestId) internal {
-        bytes32 randomValue = randomnessState.fulfillRequest(requestId, _getHistoricalOutputsHash(), entropyAccumulator);
+        bytes32 randomValue = randomnessContext.state.fulfillRequest(requestId, _getHistoricalOutputsHash(), entropyAccumulator);
         emit RandomnessFulfilled(requestId, randomValue);
     }
 
     function getRandomness(uint256 requestId) external view returns (bytes32 randomValue) {
-        return randomnessState.getRandomness(requestId);
+        return randomnessContext.state.getRandomness(requestId);
     }
 
     function _getHistoricalOutputsHash() internal view returns (bytes32 combinedHash) {
@@ -1014,8 +907,8 @@ contract EnhancedTemporalGradientBeacon is
     }
 
     function setRandomnessFee(uint256 fee) external onlyRole(GOVERNANCE_ROLE) {
-        uint256 oldFee = randomnessState.fee;
-        randomnessState.fee = fee;
+        uint256 oldFee = randomnessContext.state.fee;
+        randomnessContext.state.fee = fee;
         emit RandomnessFeeChanged(oldFee, fee);
     }
 
@@ -1023,8 +916,8 @@ contract EnhancedTemporalGradientBeacon is
         if (minContributions < 2) revert MinContributionsTooLow();
         if (maxContributions < minContributions) revert MaxLessThanMin();
         if (maxContributions > 50) revert MaxContributionsTooHigh();
-        randomnessState.minContributions = minContributions;
-        randomnessState.maxContributions = maxContributions;
+        randomnessContext.state.minContributions = minContributions;
+        randomnessContext.state.maxContributions = maxContributions;
         emit GovernanceParameterChanged("minContributions", minContributions);
         emit GovernanceParameterChanged("maxContributions", maxContributions);
     }
