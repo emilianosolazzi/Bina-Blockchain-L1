@@ -39,7 +39,7 @@ library MiningLib {
         uint64 timestamp;
         CommitmentFlags flags;
         bytes32 revealedValue;
-        uint256 poolId;
+        uint8 poolId; // Changed from uint256
     }
     
     struct MiningPool {
@@ -57,7 +57,7 @@ library MiningLib {
         uint64 nonce;
         bytes signature;
         bytes32 secretValue;
-        uint256 poolId;
+        uint8 poolId; // Changed from uint256
     }
     
     /**
