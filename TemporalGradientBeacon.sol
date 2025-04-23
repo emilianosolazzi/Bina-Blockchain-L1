@@ -13,6 +13,9 @@ import { EIP712Upgradeable } from "@openzeppelin/contracts-upgradeable/utils/cry
 import { BytesArrayLib } from "./BytesArrayLib.sol";
 import { RandomnessLib } from "./RandomnessLib.sol";
 import { BloomFilterLib } from "./BloomFilterLib.sol";
+import { MiningLib } from "./MiningLib.sol";
+import { TokenomicsLib } from "./TokenomicsLib.sol";
+import { StorageLib } from "./StorageLib.sol";
 
 /**
  * @title EnhancedTemporalGradientBeacon
@@ -36,6 +39,9 @@ contract EnhancedTemporalGradientBeacon is
     using BytesArrayLib for bytes32[];
     using RandomnessLib for RandomnessLib.State;
     using BloomFilterLib for BloomFilterLib.Filter;
+    using MiningLib for MiningLib.RevealParams;
+    using TokenomicsLib for TokenomicsLib.EpochState;
+    using StorageLib for StorageLib.HistoricalStorage;
 
     // Constants
     bytes32 private constant _GOVERNANCE_ROLE_HASH = keccak256("GOVERNANCE_ROLE");
@@ -62,6 +68,21 @@ contract EnhancedTemporalGradientBeacon is
     ITGBT public tstakeToken;
     uint256 public rewardAmount;
     uint256 public targetDifficulty;
+
+    // Replace with TokenomicsLib.EpochState struct
+    TokenomicsLib.EpochState internal epochState;
+    
+    // Mining pools - replaced with MiningLib structures
+    mapping(uint256 => MiningLib.MiningPool) public miningPools;
+    uint256 public poolCount;
+    uint256 public constant MAX_POOLS = 5;
+    uint256 public totalMined;
+
+    // Commitments - replaced with MiningLib structures
+    mapping(address => MiningLib.Commitment) public minerCommitments;
+
+    // Historical storage - replaced with StorageLib structure
+    StorageLib.HistoricalStorage internal historicalStorage;
 
     // Staking
     uint256 public constant REQUIRED_TSTAKE_AMOUNT = 100 ether;
@@ -93,7 +114,6 @@ contract EnhancedTemporalGradientBeacon is
     uint256 public epochStartBlock;
     uint256 public lastHalvingBlock;
     uint256 public halvingInterval;
-    uint256 public totalMined;
 
     // Multi-pool
     struct MiningPool {
@@ -102,9 +122,6 @@ contract EnhancedTemporalGradientBeacon is
         uint256 totalMined;
         bool active;
     }
-    mapping(uint256 => MiningPool) public miningPools;
-    uint256 public poolCount;
-    uint256 public constant MAX_POOLS = 5;
 
     // Commitments
     struct CommitmentFlags {
@@ -117,7 +134,6 @@ contract EnhancedTemporalGradientBeacon is
         bytes32 revealedValue;
         uint256 poolId;
     }
-    mapping(address => Commitment) public minerCommitments;
 
     // Mining parameters
     uint256 public minCommitmentAge;
@@ -237,11 +253,6 @@ contract EnhancedTemporalGradientBeacon is
         uint256 poolId;
     }
 
-    // Historical storage with configurable size
-    BeaconBlock[] public historicalBlocks;
-    uint256 public maxHistoricalBlocks;
-    bool public historicalStorageEnabled;
-
     // Used anonymous IDs for stealth mining rewards
     mapping(bytes32 => bool) public usedAnonymousIds;
 
@@ -301,7 +312,7 @@ contract EnhancedTemporalGradientBeacon is
         totalMined = 0;
 
         // Default mining pool
-        miningPools[0] = MiningPool({
+        miningPools[0] = MiningLib.MiningPool({
             targetDifficulty: _difficulty,
             emissionBucket: MINING_ALLOCATION,
             totalMined: 0,
@@ -348,12 +359,12 @@ contract EnhancedTemporalGradientBeacon is
         _grantRole(TOKENOMICS_ROLE, msg.sender);
 
         // Initialize historical storage (disabled by default)
-        historicalStorageEnabled = false;
-        maxHistoricalBlocks = 1000;
+        historicalStorage.enabled = false;
+        historicalStorage.maxBlocks = 1000;
 
         // Add genesis block to historical blocks if enabled
-        if (historicalStorageEnabled) {
-            historicalBlocks.push(
+        if (historicalStorage.enabled) {
+            historicalStorage.blocks.push(
                 BeaconBlock({
                     output: genesisBlockOutput,
                     previousOutput: bytes32(0),
@@ -460,7 +471,7 @@ contract EnhancedTemporalGradientBeacon is
         if (tstakeToken.balanceOf(miner) < REQUIRED_TSTAKE_AMOUNT) revert InsufficientStake();
         if (poolId >= poolCount || !miningPools[poolId].active) revert InvalidPoolId();
 
-        Commitment storage commitment = minerCommitments[miner];
+        MiningLib.Commitment storage commitment = minerCommitments[miner];
         if (
             !(commitment.commitHash == bytes32(0) ||
                 commitment.flags.revealed ||
@@ -526,37 +537,18 @@ contract EnhancedTemporalGradientBeacon is
         _revealMiningCommitment(miner, previousOutput, temporalSeed, nonce, signature, secretValue, poolId);
     }
 
-    function _computeDerivedCommit(
-        bytes32 previousOutput,
-        bytes calldata temporalSeed,
-        uint64 nonce,
-        bytes calldata signature,
-        bytes32 secretValue,
-        address miner
-    ) internal pure returns (bytes32) {
-        return keccak256(abi.encodePacked(previousOutput, temporalSeed, nonce, signature, secretValue, miner));
-    }
-
     function _finalizeMiningReward(bytes32 hmacOutput, uint256 poolId) internal returns (uint256) {
-        uint256 _rewardAmount = rewardAmount;
-        uint256 _poolDifficulty = miningPools[poolId].targetDifficulty;
-        uint256 _bonusThreshold = bonusThreshold;
-        uint256 _bonusMultiplier = bonusMultiplier;
-
-        uint256 actualDifficulty = type(uint256).max - uint256(hmacOutput);
-        uint256 calculatedReward = _rewardAmount;
-
-        if (actualDifficulty > _poolDifficulty * _bonusThreshold) {
-            calculatedReward = (_rewardAmount * _bonusMultiplier) / 100;
-        }
-
-        if (totalMined + calculatedReward > MINING_ALLOCATION) {
-            calculatedReward = MINING_ALLOCATION - totalMined;
-        }
-        if (miningPools[poolId].totalMined + calculatedReward > miningPools[poolId].emissionBucket) {
-            calculatedReward = miningPools[poolId].emissionBucket - miningPools[poolId].totalMined;
-        }
-
+        uint256 calculatedReward = MiningLib.calculateMiningReward(
+            hmacOutput,
+            poolId,
+            rewardAmount,
+            bonusThreshold,
+            bonusMultiplier,
+            totalMined,
+            MINING_ALLOCATION,
+            miningPools[poolId]
+        );
+        
         if (calculatedReward > 0) {
             tgbtToken.mint(msg.sender, calculatedReward);
         }
@@ -565,6 +557,94 @@ contract EnhancedTemporalGradientBeacon is
         miningPools[poolId].totalMined += calculatedReward;
 
         return calculatedReward;
+    }
+
+    // Struct to group reveal parameters
+    struct RevealParams {
+        address miner;
+        bytes32 previousOutput;
+        bytes temporalSeed;
+        uint64 nonce;
+        bytes signature;
+        bytes32 secretValue;
+        uint256 poolId;
+    }
+
+    function _checkCommitmentValidity(
+        MiningLib.RevealParams memory params,
+        MiningLib.Commitment storage commitment
+    ) internal view {
+        MiningLib.checkCommitmentValidity(params, commitment);
+    }
+
+    function _validateMiningCommitment(
+        MiningLib.RevealParams memory params
+    ) internal view returns (MiningLib.Commitment storage commitment, MiningLib.MiningPool storage pool) {
+        if (bloomFilter.size == 0) revert BloomFilterNotInitialized();
+        if (totalMined >= MINING_ALLOCATION) revert MiningCapReached();
+        if (tstakeToken.balanceOf(params.miner) < REQUIRED_TSTAKE_AMOUNT) revert InsufficientStake();
+        if (params.poolId >= poolCount || !miningPools[params.poolId].active) revert InvalidPoolId();
+
+        commitment = minerCommitments[params.miner];
+        if (commitment.commitHash == bytes32(0)) revert NoCommitmentFound();
+        if (commitment.flags.revealed) revert CommitmentAlreadyRevealed();
+        if (block.number < uint256(commitment.timestamp) + minCommitmentAge) revert CommitmentTooRecent();
+        if (block.number > uint256(commitment.timestamp) + maxCommitmentAge) revert CommitmentExpired();
+        if (commitment.poolId != params.poolId) revert InvalidPoolId();
+
+        _checkCommitmentValidity(params, commitment);
+
+        pool = miningPools[params.poolId]; // Cache pool
+    }
+
+    function _processMiningRevealAndFinalize(MiningLib.RevealParams memory params) internal {
+        (MiningLib.Commitment storage commitment, MiningLib.MiningPool storage pool) = _validateMiningCommitment(params);
+
+        commitment.revealedValue = _processMiningReveal(
+            params.previousOutput,
+            params.temporalSeed,
+            params.nonce,
+            params.signature,
+            params.secretValue,
+            pool.targetDifficulty
+        );
+        commitment.flags.revealed = true;
+
+        _updateOutputHistory(commitment.revealedValue);
+        usedOutputs[commitment.revealedValue] = block.number;
+        lastMinerBlock[params.miner] = block.number;
+
+        BloomFilterLib.updateFilter(bloomFilter, commitment.revealedValue);
+        outputCount++;
+
+        entropyAccumulator = uint256(keccak256(abi.encodePacked(
+            entropyAccumulator,
+            commitment.revealedValue,
+            block.timestamp,
+            block.prevrandao
+        )));
+
+        _checkEpochTransition();
+
+        uint256 calculatedReward = _finalizeMiningReward(commitment.revealedValue, params.poolId);
+        
+        if (historicalStorage.enabled) {
+            _archiveBlock(
+                commitment.revealedValue,
+                params.previousOutput,
+                params.nonce,
+                params.miner,
+                type(uint256).max - uint256(commitment.revealedValue),
+                calculatedReward,
+                block.timestamp,
+                params.poolId
+            );
+        }
+
+        _processRandomnessRequests();
+
+        emit CommitmentRevealed(params.miner, commitment.revealedValue, params.poolId);
+        emit BeaconBlockMined(params.miner, commitment.revealedValue, calculatedReward, params.nonce, block.timestamp, params.poolId);
     }
 
     function _revealMiningCommitment(
@@ -576,59 +656,16 @@ contract EnhancedTemporalGradientBeacon is
         bytes32 secretValue,
         uint256 poolId
     ) internal {
-        if (bloomFilter.size == 0) revert BloomFilterNotInitialized();
-        if (totalMined >= MINING_ALLOCATION) revert MiningCapReached();
-        if (tstakeToken.balanceOf(miner) < REQUIRED_TSTAKE_AMOUNT) revert InsufficientStake();
-        if (poolId >= poolCount || !miningPools[poolId].active) revert InvalidPoolId();
-
-        Commitment storage commitment = minerCommitments[miner];
-        if (commitment.commitHash == bytes32(0)) revert NoCommitmentFound();
-        if (commitment.flags.revealed) revert CommitmentAlreadyRevealed();
-        if (block.number < uint256(commitment.timestamp) + minCommitmentAge) revert CommitmentTooRecent();
-        if (block.number > uint256(commitment.timestamp) + maxCommitmentAge) revert CommitmentExpired();
-        if (commitment.poolId != poolId) revert InvalidPoolId();
-
-        bytes32 derivedCommit = _computeDerivedCommit(previousOutput, temporalSeed, nonce, signature, secretValue, miner);
-        if (derivedCommit != commitment.commitHash) revert InvalidCommitment();
-
-        if (!_validatePreviousOutput(previousOutput)) revert InvalidPreviousOutput();
-
-        uint256 poolDifficulty = miningPools[poolId].targetDifficulty;
-        commitment.revealedValue = _processMiningReveal(previousOutput, temporalSeed, nonce, signature, secretValue, poolDifficulty);
-
-        commitment.flags.revealed = true;
-
-        _updateOutputHistory(commitment.revealedValue);
-        usedOutputs[commitment.revealedValue] = block.number;
-        lastMinerBlock[miner] = block.number;
-
-        BloomFilterLib.updateFilter(bloomFilter, commitment.revealedValue);
-        outputCount++;
-
-        entropyAccumulator = uint256(keccak256(abi.encodePacked(entropyAccumulator, commitment.revealedValue, block.timestamp, block.prevrandao)));
-
-        _checkEpochTransition();
-
-        uint256 calculatedReward = _finalizeMiningReward(commitment.revealedValue, poolId);
-        
-        // Store block in historical storage if enabled
-        if (historicalStorageEnabled) {
-            _archiveBlock(
-                commitment.revealedValue,
-                previousOutput,
-                nonce,
-                miner,
-                type(uint256).max - uint256(commitment.revealedValue),
-                calculatedReward,
-                block.timestamp,
-                poolId
-            );
-        }
-
-        _processRandomnessRequests();
-
-        emit CommitmentRevealed(miner, commitment.revealedValue, poolId);
-        emit BeaconBlockMined(miner, commitment.revealedValue, calculatedReward, nonce, block.timestamp, poolId);
+        MiningLib.RevealParams memory params = MiningLib.RevealParams({
+            miner: miner,
+            previousOutput: previousOutput,
+            temporalSeed: temporalSeed,
+            nonce: nonce,
+            signature: signature,
+            secretValue: secretValue,
+            poolId: poolId
+        });
+        _processMiningRevealAndFinalize(params);
     }
 
     /**
@@ -645,30 +682,17 @@ contract EnhancedTemporalGradientBeacon is
         uint256 timestamp,
         uint256 poolId
     ) internal {
-        // If we've reached max capacity, remove oldest block (index 0)
-        if (historicalBlocks.length >= maxHistoricalBlocks && maxHistoricalBlocks > 0) {
-            // Shift array elements (remove first element)
-            for (uint256 i = 0; i < historicalBlocks.length - 1; i++) {
-                historicalBlocks[i] = historicalBlocks[i + 1];
-            }
-            historicalBlocks.pop(); // Remove last duplicate
-        }
-        
-        // Add new block
-        historicalBlocks.push(
-            BeaconBlock({
-                output: output,
-                previousOutput: previousOutput,
-                nonce: nonce,
-                miner: miner,
-                actualDifficulty: actualDifficulty,
-                reward: reward,
-                timestamp: timestamp,
-                poolId: poolId
-            })
+        StorageLib.archiveBlock(
+            historicalStorage,
+            output,
+            previousOutput,
+            nonce,
+            miner,
+            actualDifficulty,
+            reward,
+            timestamp,
+            poolId
         );
-        
-        emit BlockArchived(historicalBlocks.length - 1, output, miner);
     }
 
     /**
@@ -677,26 +701,14 @@ contract EnhancedTemporalGradientBeacon is
      * @param maxBlocks Maximum number of historical blocks to store (0 for unlimited)
      */
     function configureHistoricalStorage(bool enabled, uint256 maxBlocks) external onlyRole(GOVERNANCE_ROLE) {
-        historicalStorageEnabled = enabled;
-        maxHistoricalBlocks = maxBlocks;
-        
-        // If enabling and we have no genesis block, add it
-        if (enabled && historicalBlocks.length == 0) {
-            historicalBlocks.push(
-                BeaconBlock({
-                    output: genesisBlockOutput,
-                    previousOutput: bytes32(0),
-                    nonce: 0,
-                    miner: msg.sender,
-                    actualDifficulty: 0,
-                    reward: 0, 
-                    timestamp: genesisBlockTimestamp,
-                    poolId: 0
-                })
-            );
-        }
-        
-        emit HistoricalStorageConfigChanged(enabled, maxBlocks);
+        StorageLib.configureHistoricalStorage(
+            historicalStorage,
+            enabled,
+            maxBlocks,
+            genesisBlockOutput,
+            genesisBlockTimestamp,
+            msg.sender
+        );
     }
     
     /**
@@ -704,7 +716,7 @@ contract EnhancedTemporalGradientBeacon is
      * @return count Number of historical blocks
      */
     function getHistoricalBlockCount() external view returns (uint256 count) {
-        return historicalBlocks.length;
+        return historicalStorage.blocks.length;
     }
     
     /**
@@ -718,8 +730,8 @@ contract EnhancedTemporalGradientBeacon is
         view 
         returns (BeaconBlock[] memory blocks) 
     {
-        if (endIndex > historicalBlocks.length) {
-            endIndex = historicalBlocks.length;
+        if (endIndex > historicalStorage.blocks.length) {
+            endIndex = historicalStorage.blocks.length;
         }
         if (startIndex >= endIndex) {
             return new BeaconBlock[](0);
@@ -729,7 +741,7 @@ contract EnhancedTemporalGradientBeacon is
         BeaconBlock[] memory result = new BeaconBlock[](resultLength);
         
         for (uint256 i = 0; i < resultLength; i++) {
-            result[i] = historicalBlocks[startIndex + i];
+            result[i] = historicalStorage.blocks[startIndex + i];
         }
         
         return result;
@@ -750,52 +762,36 @@ contract EnhancedTemporalGradientBeacon is
         }
     }
 
+    // Update _processMiningReveal to use MiningLib
     function _processMiningReveal(
         bytes32 previousOutput,
-        bytes calldata temporalSeed,
+        bytes memory temporalSeed,
         uint64 nonce,
-        bytes calldata signature,
+        bytes memory signature,
         bytes32 secretValue,
         uint256 poolDifficulty
     ) internal view returns (bytes32 hmacOutput) {
-        bytes memory input = abi.encodePacked(previousOutput, temporalSeed, nonce, msg.sender, block.prevrandao, block.timestamp, secretValue);
-        bytes32 inputHash = keccak256(input);
-
-        address recovered = _hashTypedDataV4(inputHash).recover(signature);
-        if (recovered != msg.sender) revert InvalidSigner();
-
-        hmacOutput = _quantumResistantHash(abi.encodePacked(signature, inputHash, secretValue));
-
-        if (uint256(hmacOutput) >= poolDifficulty) revert SolutionTooEasy();
-        if (usedOutputs[hmacOutput] != 0 || BloomFilterLib.mightContain(bloomFilter, hmacOutput)) revert OutputAlreadyUsed();
-
-        return hmacOutput;
+        return MiningLib.processMiningReveal(
+            previousOutput,
+            temporalSeed,
+            nonce,
+            signature,
+            secretValue,
+            poolDifficulty,
+            msg.sender,
+            bloomFilter,
+            usedOutputs,
+            _quantumResistantHash
+        );
     }
 
+    // Keep as gateway function to provide to MiningLib
     function _quantumResistantHash(bytes memory input) internal view returns (bytes32) {
-        bytes32 state = keccak256(input);
-        for (uint256 i = 0; i < 3; i++) {
-            state = keccak256(abi.encodePacked(state ^ bytes32(uint256(i + 1)), block.timestamp));
-            state = bytes32((uint256(state) << 7) | (uint256(state) >> 249));
-        }
-        return state;
+        return MiningLib.quantumResistantHash(input);
     }
 
     function _checkEpochTransition() internal {
-        uint256 blocksSinceEpochStart = block.number - epochStartBlock;
-        if (blocksSinceEpochStart >= blocksPerEpoch) {
-            uint256 epochsPassed = blocksSinceEpochStart / blocksPerEpoch;
-            currentEpoch += epochsPassed;
-            epochStartBlock = block.number;
-
-            if (block.number - lastHalvingBlock >= halvingInterval) {
-                rewardAmount = rewardAmount / 2;
-                lastHalvingBlock = block.number;
-                emit Halving(currentEpoch, rewardAmount, block.number);
-            }
-
-            emit EpochChanged(currentEpoch, rewardAmount);
-        }
+        rewardAmount = TokenomicsLib.checkEpochTransition(epochState);
     }
 
     // Randomness Functions
@@ -942,7 +938,7 @@ contract EnhancedTemporalGradientBeacon is
         if (emissionBucket == 0 || totalMined + emissionBucket > MINING_ALLOCATION) revert InvalidEpochParameters();
 
         uint256 poolId = poolCount++;
-        miningPools[poolId] = MiningPool({
+        miningPools[poolId] = MiningLib.MiningPool({
             targetDifficulty: _targetDifficulty,
             emissionBucket: emissionBucket,
             totalMined: 0,
@@ -972,7 +968,7 @@ contract EnhancedTemporalGradientBeacon is
 
     function getPoolInfo(uint256 poolId) external view returns (uint256 difficulty, uint256 emission, uint256 mined, bool active) {
         if (poolId >= poolCount) revert InvalidPoolId();
-        MiningPool storage pool = miningPools[poolId];
+        MiningLib.MiningPool storage pool = miningPools[poolId];
         return (pool.targetDifficulty, pool.emissionBucket, pool.totalMined, pool.active);
     }
 

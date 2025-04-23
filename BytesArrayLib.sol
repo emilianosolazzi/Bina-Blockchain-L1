@@ -77,17 +77,6 @@ library BytesArrayLib {
         return get(arr, index);
     }
 
-    /**
-     * @notice Returns the length of the array
-     * @param arr The array to read
-     * @return len Number of elements in the array
-     */
-    function length(bytes32[] memory arr) internal pure returns (uint256 len) {
-        assembly {
-            len := mload(arr)
-        }
-    }
-
     /// @notice Revert thrown when index is out of array bounds
     error IndexOutOfBounds(uint256 index, uint256 length);
 }
