@@ -115,6 +115,8 @@ contract EnhancedTemporalGradientBeacon is
     error FeeNotSet();
     error ZeroAddress();
     error MaxPoolsReached();
+    error DuplicateAnonymousId();
+    error VerificationFailed();
 
     /**
      * @notice Initializes the contract
@@ -281,6 +283,7 @@ contract EnhancedTemporalGradientBeacon is
         require(block.number >= commitment.timestamp + minCommitmentAge, "CommitmentTooRecent");
         require(block.number <= commitment.timestamp + maxCommitmentAge, "CommitmentExpired");
         require(commitment.poolId == params.poolId, "InvalidPoolId");
+        require(miningPools[params.poolId].active, "InvalidPoolId"); // Added pool activity check
 
         // Verify commitment hash matches
         bytes32 computedHash = keccak256(
@@ -301,7 +304,10 @@ contract EnhancedTemporalGradientBeacon is
             "InvalidPreviousOutput"
         );
 
-        // Process the mining reveal
+        // Define a placeholder difficulty weight function (replace with actual logic if needed)
+        function(address) view returns (uint256) difficultyWeightFn = _getDifficultyWeight; // Placeholder
+
+        // Process the mining reveal using the library function
         bytes32 hmacOutput = MiningLib.processMiningReveal(
             params.previousOutput,
             params.temporalSeed,
@@ -312,7 +318,8 @@ contract EnhancedTemporalGradientBeacon is
             params.miner,
             bloomFilter,
             usedOutputs,
-            MiningLib.quantumResistantHash
+            MiningLib.quantumResistantHash, // Explicitly pass the hash function
+            difficultyWeightFn // Pass the difficulty weight function
         );
 
         // Update commitment state
@@ -332,9 +339,9 @@ contract EnhancedTemporalGradientBeacon is
         // Update randomness accumulator
         randomnessState.entropyAccumulator = uint256(
             keccak256(abi.encodePacked(
-                randomnessState.entropyAccumulator, 
-                hmacOutput, 
-                block.timestamp, 
+                randomnessState.entropyAccumulator,
+                hmacOutput,
+                block.timestamp,
                 block.prevrandao
             ))
         );
@@ -361,14 +368,95 @@ contract EnhancedTemporalGradientBeacon is
 
         emit CommitmentRevealed(params.miner, hmacOutput, params.poolId);
         emit BeaconBlockMined(
-            params.miner, 
-            hmacOutput, 
-            calculatedReward, 
-            params.nonce, 
-            uint64(block.timestamp), 
+            params.miner,
+            hmacOutput,
+            calculatedReward,
+            params.nonce,
+            uint64(block.timestamp),
             params.poolId
         );
         emit OutputHistoryUpdated(hmacOutput, currentOutputIndex);
+    }
+
+    // Placeholder function for difficulty weight - replace with actual logic
+    function _getDifficultyWeight(address /* miner */) internal view returns (uint256) {
+        // Example: Return base weight for now. Implement logic based on stake, reputation, etc.
+        return MiningLib.BASE_WEIGHT;
+    }
+
+    /**
+     * @notice Submits a solution anonymously using a pre-derived ID and proof.
+     * @dev This allows miners to claim rewards without revealing their primary address directly on-chain during submission.
+     * @param anonymousId A unique identifier derived from the miner's identity (e.g., HMAC of public key).
+     * @param proof Data required to verify the solution's validity without revealing the original commitment details directly.
+     */
+    function submitSolution(
+        bytes32 anonymousId,
+        bytes calldata proof
+    ) external nonReentrant whenNotPaused {
+        // Use the existing mapping `usedAnonymousIds`
+        if (usedAnonymousIds[anonymousId]) revert DuplicateAnonymousId();
+        usedAnonymousIds[anonymousId] = true;
+
+        // Placeholder: Verify the proof associated with the anonymousId.
+        // This function needs to implement the logic to validate the proof
+        // without requiring the original commitment data directly linked to msg.sender.
+        // It might involve checking the proof against contract state or using zero-knowledge techniques.
+        _verifyProof(anonymousId, proof);
+
+        // Placeholder: Compute the stealth address where rewards should be sent.
+        // This function needs to implement the logic to derive a unique,
+        // miner-controlled address from the anonymousId.
+        address stealthRecipient = computeStealthAddress(anonymousId);
+        require(stealthRecipient != address(0), "ZeroAddress"); // Basic validation
+
+        // Placeholder: Determine the correct reward amount for this stealth submission.
+        // This might be a fixed amount, based on the current epoch, or derived from the proof.
+        // Using epochState.rewardAmount as a placeholder. Needs refinement.
+        uint256 reward = epochState.rewardAmount; // Placeholder reward calculation
+
+        // Ensure reward doesn't exceed allocation (basic check)
+        require(totalMined + reward <= MINING_ALLOCATION, "AllocationExceeded");
+        totalMined += reward;
+        // Note: Pool-specific allocation is not tracked here, might need adjustment.
+
+        // Mint reward to the computed stealth address
+        tgbtToken.mint(stealthRecipient, reward);
+
+        emit StealthSolutionSubmitted(anonymousId, stealthRecipient, reward);
+    }
+
+    /**
+     * @notice Placeholder internal function to verify the anonymous proof.
+     * @dev Needs implementation based on the specific proof system used.
+     * @param anonymousId The identifier submitted.
+     * @param proof The proof data.
+     */
+    function _verifyProof(bytes32 anonymousId, bytes calldata proof) internal view {
+        // --- Implementation Required ---
+        // Example: Decode proof, check against contract state, validate cryptographic elements.
+        // If verification fails, revert.
+        // require(isValidProof(anonymousId, proof), "VerificationFailed");
+        // --- Placeholder ---
+        // Avoid unused variable warnings for now
+        bytes32 ignore1 = anonymousId;
+        bytes memory ignore2 = proof;
+        // Revert("VerificationFailed"); // Uncomment and implement actual logic
+    }
+
+    /**
+     * @notice Placeholder internal function to compute the stealth recipient address.
+     * @dev Needs implementation based on the chosen stealth address scheme (e.g., using ECC).
+     * @param anonymousId The identifier submitted.
+     * @return The derived stealth address.
+     */
+    function computeStealthAddress(bytes32 anonymousId) internal pure returns (address) {
+        // --- Implementation Required ---
+        // Example: Use elliptic curve math (e.g., base_point * hash(anonymousId) + miner_pubkey)
+        // --- Placeholder ---
+        // Simple, insecure placeholder: Hash the ID to get an address-like value.
+        return address(uint160(uint256(keccak256(abi.encodePacked("STEALTH_", anonymousId)))));
+        // Replace with a proper stealth address generation mechanism.
     }
 
     /* ========== POOL MANAGEMENT ========== */
