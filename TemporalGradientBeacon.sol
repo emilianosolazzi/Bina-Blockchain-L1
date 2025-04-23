@@ -170,6 +170,7 @@ contract EnhancedTemporalGradientBeacon is
     event GenesisBlockCreated(bytes32 indexed output, uint256 timestamp);
     event HistoricalStorageConfigChanged(bool enabled, uint256 maxBlocks);
     event BlockArchived(uint256 indexed blockIndex, bytes32 output, address indexed miner);
+    event StealthSolutionSubmitted(bytes32 indexed anonymousId, address indexed recipient, uint256 reward);
 
     // Errors
     error ZeroToken();
@@ -240,6 +241,9 @@ contract EnhancedTemporalGradientBeacon is
     BeaconBlock[] public historicalBlocks;
     uint256 public maxHistoricalBlocks;
     bool public historicalStorageEnabled;
+
+    // Used anonymous IDs for stealth mining rewards
+    mapping(bytes32 => bool) public usedAnonymousIds;
 
     /**
      * @notice Initializes the contract with token, reward, difficulty, and epoch settings
@@ -598,7 +602,7 @@ contract EnhancedTemporalGradientBeacon is
         usedOutputs[commitment.revealedValue] = block.number;
         lastMinerBlock[miner] = block.number;
 
-        bloomFilter = BloomFilterLib.updateFilter(bloomFilter, commitment.revealedValue);
+        BloomFilterLib.updateFilter(bloomFilter, commitment.revealedValue);
         outputCount++;
 
         entropyAccumulator = uint256(keccak256(abi.encodePacked(entropyAccumulator, commitment.revealedValue, block.timestamp, block.prevrandao)));
@@ -865,7 +869,8 @@ contract EnhancedTemporalGradientBeacon is
     function pruneExpiredOutputs(bytes32[] calldata outputs) external returns (uint256 count) {
         if (bloomFilter.size == 0) revert BloomFilterNotInitialized();
         uint256 pruneCount = 0;
-        for (uint256 i = 0; i < outputs.length; i++) {
+        uint256 outputsLen = outputs.length; // ← use a local variable to avoid length lookup issues
+        for (uint256 i = 0; i < outputsLen; i++) {
             bytes32 output = outputs[i];
             if (output == genesisBlockOutput) continue; // Prevent pruning genesis block
             uint256 blockNum = usedOutputs[output];
@@ -1066,5 +1071,44 @@ contract EnhancedTemporalGradientBeacon is
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
+    }
+
+    /**
+     * @notice Submit a solution anonymously for stealth mining rewards.
+     * @param anonymousId HMAC of miner's public key (stealth identifier)
+     * @param proof Proof data (opaque, to be verified)
+     */
+    function submitSolution(
+        bytes32 anonymousId,
+        bytes calldata proof
+    ) external {
+        if (usedAnonymousIds[anonymousId]) revert OutputAlreadyUsed();
+        usedAnonymousIds[anonymousId] = true;
+
+        _verifyProof(anonymousId, proof);
+
+        // Example: reward is fixed or can be parameterized
+        uint256 reward = rewardAmount;
+        address stealthAddress = computeStealthAddress(anonymousId);
+        tgbtToken.mint(stealthAddress, reward);
+
+        emit StealthSolutionSubmitted(anonymousId, stealthAddress, reward);
+    }
+
+    /**
+     * @dev Internal stub for proof verification. Replace with actual logic.
+     */
+    function _verifyProof(bytes32 /*anonymousId*/, bytes calldata /*proof*/) internal pure {
+        // Implement actual proof verification logic here.
+        // For now, this is a stub that always passes.
+    }
+
+    /**
+     * @dev Computes a stealth address from the anonymousId.
+     *      Replace with actual stealth address computation as needed.
+     */
+    function computeStealthAddress(bytes32 anonymousId) public pure returns (address) {
+        // Example: take the lower 20 bytes of the anonymousId as the address
+        return address(uint160(uint256(anonymousId)));
     }
 }

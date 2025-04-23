@@ -22,6 +22,18 @@ library RandomnessLib {
         uint256 contributionsCount;
     }
     
+    // BeaconBlock definition to support archive functions
+    struct BeaconBlock {
+        bytes32 output;
+        bytes32 previousOutput;
+        uint64 nonce;
+        address miner;
+        uint256 actualDifficulty;
+        uint256 reward;
+        uint256 timestamp;
+        uint256 poolId;
+    }
+    
     struct State {
         uint256 fee;
         uint256 expiryBlocks;
@@ -33,6 +45,10 @@ library RandomnessLib {
         mapping(uint256 => Request) requests;
         mapping(uint256 => mapping(address => bool)) contributors;
         mapping(bytes32 => bool) usedValues;
+        // Historical blocks storage (optional usage)
+        BeaconBlock[] historicalBlocks;
+        uint256 maxHistoricalBlocks;
+        bool historicalStorageEnabled;
     }
     
     error InvalidRequestID();
@@ -338,8 +354,11 @@ library RandomnessLib {
                 fulfillRequest(self, i, historicalOutputsHash, entropyAccumulator);
                 fulfilledCount++;
             }
-            processedCount++;
-            remaining--;
+            
+            unchecked { // Safe as loop bounds are controlled
+                processedCount++;
+                remaining--;
+            }
         }
         
         if (processedCount > 0) {
@@ -406,30 +425,31 @@ library RandomnessLib {
         bytes32 historicalOutputsHash,
         uint256 entropyAccumulator
     ) internal returns (uint256 successCount) {
-        // Input validation
-        if (requestIds.length != entropyContributions.length || 
-            requestIds.length != entropySignatures.length) revert ArrayLengthMismatch();
-        if (requestIds.length > self.maxBatchSize) revert BatchTooLarge();
-        
-        // Process each contribution
+        // Explicitly cast to resolve ambiguity
+        uint256 requestIdsLen = requestIds.length;
+        uint256 entropyContributionsLen = (uint256[])(entropyContributions).length;
+        uint256 entropySignaturesLen = entropySignatures.length;
+
+        if (requestIdsLen != entropyContributionsLen || requestIdsLen != entropySignaturesLen) revert ArrayLengthMismatch();
+        if (requestIdsLen > self.maxBatchSize) revert BatchTooLarge();
+
         uint256 count = 0;
-        
-        for (uint256 i = 0; i < requestIds.length; i++) {
-            bool success = _processContribution(
-                self,
-                requestIds[i],
-                entropyContributions[i],
-                entropySignatures[i],
-                sender,
-                historicalOutputsHash,
-                entropyAccumulator
-            );
-            
-            if (success) {
-                count++;
+        unchecked {
+            for (uint256 i = 0; i < requestIdsLen; i++) {
+                bool success = _processContribution(
+                    self,
+                    requestIds[i],
+                    entropyContributions[i],
+                    entropySignatures[i],
+                    sender,
+                    historicalOutputsHash,
+                    entropyAccumulator
+                );
+                if (success) {
+                    count++;
+                }
             }
         }
-        
         return count;
     }
     
@@ -438,21 +458,25 @@ library RandomnessLib {
         State storage self,
         uint256[] calldata requestIds
     ) internal view returns (bytes32[] memory results, bool[] memory fulfilled) {
-        // Use optimized array creation
-        results = BytesArrayLib.createBytes32Array(requestIds.length);
-        fulfilled = new bool[](requestIds.length);
+        // Use optimized array creation - Access length directly for calldata arrays using .length
+        uint256 requestIdLen = requestIds.length;
+        results = BytesArrayLib.createBytes32Array(requestIdLen);
+        fulfilled = new bool[](requestIdLen);
         
-        for (uint256 i = 0; i < requestIds.length; i++) {
-            if (requestIds[i] >= self.requestCount) {
-                fulfilled[i] = false;
-                continue;
-            }
-            
-            Request storage request = self.requests[requestIds[i]];
-            fulfilled[i] = request.fulfilled;
-            
-            if (request.fulfilled) {
-                results[i] = request.result;
+        // Use unchecked for gas optimization in Arbitrum
+        unchecked {
+            for (uint256 i = 0; i < requestIdLen; i++) {
+                if (requestIds[i] >= self.requestCount) {
+                    fulfilled[i] = false;
+                    continue;
+                }
+                
+                Request storage request = self.requests[requestIds[i]];
+                fulfilled[i] = request.fulfilled;
+                
+                if (request.fulfilled) {
+                    results[i] = request.result;
+                }
             }
         }
         
@@ -478,5 +502,271 @@ library RandomnessLib {
         unchecked {
             return 100 * self.requestCount;
         }
+    }
+    
+    // New functions to support historical blocks without modifying main contract
+    
+    /**
+     * @notice Configures the historical block storage in the RandomnessLib
+     * @dev Can be called but won't affect the contract unless it explicitly uses these values
+     * @param self Storage reference
+     * @param enabled Whether to enable historical storage
+     * @param maxBlocks Maximum number of blocks to store
+     */
+    function configureHistoricalStorage(
+        State storage self,
+        bool enabled,
+        uint256 maxBlocks
+    ) internal {
+        self.historicalStorageEnabled = enabled;
+        self.maxHistoricalBlocks = maxBlocks;
+    }
+    
+    /**
+     * @notice Archives a block in the historical storage
+     * @dev No-op if historical storage is disabled
+     * @param self Storage reference
+     * @param output Block output
+     * @param previousOutput Previous block output
+     * @param nonce Block nonce
+     * @param miner Block miner
+     * @param difficulty Block difficulty
+     * @param reward Mining reward
+     * @param timestamp Block timestamp
+     * @param poolId Mining pool ID
+     */
+    function archiveBlock(
+        State storage self,
+        bytes32 output,
+        bytes32 previousOutput,
+        uint64 nonce,
+        address miner,
+        uint256 difficulty,
+        uint256 reward,
+        uint256 timestamp,
+        uint256 poolId
+    ) internal returns (uint256 blockIndex) {
+        // Skip if historical storage is disabled
+        if (!self.historicalStorageEnabled) return 0;
+        
+        // If we've reached max capacity, remove oldest block
+        if (self.historicalBlocks.length >= self.maxHistoricalBlocks && 
+            self.maxHistoricalBlocks > 0) {
+            // For Arbitrum, optimize array shifting by using pop and push
+            // This avoids excessive storage manipulation
+            uint256 historyLength = self.historicalBlocks.length;
+            
+            // Store the last block temporarily
+            BeaconBlock memory lastBlock = self.historicalBlocks[historyLength - 1];
+            
+            // Remove first element (shift by popping from end and manipulating indices)
+            self.historicalBlocks.pop();
+            
+            // Ensure we're not dealing with an empty array
+            if (historyLength > 1) {
+                // Copy elements one position back (pop last element)
+                for (uint256 i = 0; i < historyLength - 2; i++) {
+                    self.historicalBlocks[i] = self.historicalBlocks[i + 1];
+                }
+                // Put the last block in the second-to-last position
+                self.historicalBlocks[historyLength - 2] = lastBlock;
+            }
+        }
+        
+        // Add new block
+        self.historicalBlocks.push(
+            BeaconBlock({
+                output: output,
+                previousOutput: previousOutput,
+                nonce: nonce,
+                miner: miner,
+                actualDifficulty: difficulty,
+                reward: reward,
+                timestamp: timestamp,
+                poolId: poolId
+            })
+        );
+        
+        return self.historicalBlocks.length - 1;
+    }
+    
+    /**
+     * @notice Gets the count of historical blocks
+     * @param self Storage reference
+     * @return count Number of historical blocks
+     */
+    function getHistoricalBlockCount(
+        State storage self
+    ) internal view returns (uint256 count) {
+        return self.historicalBlocks.length;
+    }
+    
+    /**
+     * @notice Gets a single historical block
+     * @param self Storage reference
+     * @param index Block index
+     * @return blockData The historical block data
+     */
+    function getHistoricalBlock(
+        State storage self,
+        uint256 index
+    ) internal view returns (BeaconBlock memory blockData) {
+        require(index < self.historicalBlocks.length, "Invalid block index");
+        return self.historicalBlocks[index];
+    }
+    
+    /**
+     * @notice Gets multiple historical blocks
+     * @param self Storage reference
+     * @param startIndex Start index (inclusive)
+     * @param endIndex End index (exclusive)
+     * @return blocks Array of historical blocks
+     */
+    function getHistoricalBlockRange(
+        State storage self,
+        uint256 startIndex,
+        uint256 endIndex
+    ) internal view returns (BeaconBlock[] memory blocks) {
+        // Avoid unnecessary storage reads on Arbitrum by using local variables
+        uint256 historyLength = self.historicalBlocks.length;
+        
+        if (endIndex > historyLength) {
+            endIndex = historyLength;
+        }
+        if (startIndex >= endIndex) {
+            return new BeaconBlock[](0);
+        }
+        
+        uint256 resultLength = endIndex - startIndex;
+        BeaconBlock[] memory result = new BeaconBlock[](resultLength);
+        
+        // Use unchecked for gas optimization in Arbitrum
+        unchecked {
+            for (uint256 i = 0; i < resultLength; i++) {
+                result[i] = self.historicalBlocks[startIndex + i];
+            }
+        }
+        
+        return result;
+    }
+    
+    /**
+     * @notice Uses historical blocks as an additional source of randomness
+     * @dev Can be used to enhance randomness quality when historical blocks are available
+     * @param self Storage reference
+     * @param userSeed User-provided seed
+     * @param blockCount Number of recent blocks to use (0 for all available)
+     * @return enhancedSeed A seed enhanced with historical block data
+     */
+    function enhanceRandomnessWithHistory(
+        State storage self,
+        bytes32 userSeed,
+        uint256 blockCount
+    ) internal view returns (bytes32 enhancedSeed) {
+        // Early return to avoid storage reads on Arbitrum
+        if (!self.historicalStorageEnabled) return userSeed;
+        
+        uint256 historyLength = self.historicalBlocks.length;
+        if (historyLength == 0) return userSeed;
+        
+        uint256 count;
+        if (blockCount == 0) {
+            count = historyLength;
+        } else {
+            count = blockCount > historyLength ? historyLength : blockCount;
+        }
+        
+        bytes memory combinedData = abi.encodePacked(userSeed);
+        
+        // Use the most recent blocks for enhanced randomness
+        uint256 startIdx;
+        if (historyLength > count) {
+            startIdx = historyLength - count;
+        } else {
+            startIdx = 0;
+        }
+        
+        // Avoid excessive storage reads on Arbitrum by reading once per iteration
+        unchecked {
+            for (uint256 i = startIdx; i < historyLength; i++) {
+                BeaconBlock storage currentBlock = self.historicalBlocks[i];
+                combinedData = abi.encodePacked(
+                    combinedData,
+                    currentBlock.output,
+                    currentBlock.nonce,
+                    currentBlock.timestamp
+                );
+            }
+        }
+        
+        return keccak256(combinedData);
+    }
+    
+    /**
+     * @notice Clears historical blocks to save gas/storage
+     * @param self Storage reference
+     * @return count Number of blocks cleared
+     */
+    function clearHistoricalBlocks(
+        State storage self
+    ) internal returns (uint256 count) {
+        uint256 blocksCount = self.historicalBlocks.length;
+        delete self.historicalBlocks;
+        return blocksCount;
+    }
+    
+    /**
+     * @notice Optimized version of fulfillRequest specifically for Arbitrum
+     * @dev Reduces gas costs by optimizing storage access patterns
+     */
+    function fulfillRequestOptimized(
+        State storage self,
+        uint256 requestId,
+        bytes32 historicalOutputsHash,
+        uint256 entropyAccumulator
+    ) internal returns (bytes32 randomValue) {
+        // Cache request in memory to avoid multiple SLOAD operations
+        Request storage requestStorage = self.requests[requestId];
+        
+        // Validate request (combine checks to reduce jumps)
+        bool isValid = requestId < self.requestCount &&
+                      !requestStorage.fulfilled &&
+                      requestStorage.requester != address(0) &&
+                      block.number <= requestStorage.timestamp + self.expiryBlocks &&
+                      requestStorage.contributionsCount >= self.minContributions;
+        
+        if (!isValid) revert InvalidRequest();
+        
+        // Collect contributions - optimize by reading length once
+        uint256 contribCount = requestStorage.contributionsCount;
+        bytes32[] memory contributions = BytesArrayLib.createBytes32Array(contribCount);
+        
+        unchecked {
+            for (uint i = 0; i < contribCount; i++) {
+                contributions[i] = requestStorage.entropyContributions[i];
+            }
+        }
+        
+        // Generate random value (same as original function)
+        bytes memory randomnessInput = abi.encodePacked(
+            historicalOutputsHash,
+            requestStorage.userSeed,
+            requestStorage.requester,
+            requestStorage.timestamp,
+            blockhash(block.number - 1),
+            block.prevrandao,
+            block.timestamp,
+            entropyAccumulator,
+            keccak256(abi.encodePacked(contributions))
+        );
+        
+        // Generate random value
+        randomValue = _generateRandomValue(self, randomnessInput);
+        
+        // Update request
+        requestStorage.fulfilled = true;
+        requestStorage.result = randomValue;
+        
+        return randomValue;
     }
 }
