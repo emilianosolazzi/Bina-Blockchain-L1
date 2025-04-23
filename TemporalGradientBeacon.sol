@@ -15,7 +15,7 @@ import { RandomnessLib } from "./RandomnessLib.sol";
 import { BloomFilterLib } from "./BloomFilterLib.sol";
 
 /**
- * @title TemporalGradientBeacon
+ * @title EnhancedTemporalGradientBeacon
  * @notice A temporal gradient beacon with randomness, multi-pool support, staking, meta-transactions, and optimized bloom filter integration
  * @dev Deploy using UUPS proxy pattern to handle contract size:
  *      1. Deploy implementation
@@ -71,6 +71,10 @@ contract EnhancedTemporalGradientBeacon is
     bytes32[OUTPUT_HISTORY_SIZE] public outputHistory;
     uint256 public currentOutputIndex;
     uint256 public lastOutputTimestamp;
+
+    // Genesis block
+    bytes32 public genesisBlockOutput;
+    uint256 public genesisBlockTimestamp;
 
     // Entropy
     uint256 public entropyAccumulator;
@@ -163,6 +167,7 @@ contract EnhancedTemporalGradientBeacon is
     event MiningPoolUpdated(uint256 indexed poolId, uint256 targetDifficulty, uint256 emissionBucket);
     event MiningPoolDeactivated(uint256 indexed poolId);
     event BloomFilterReset(uint256 size, uint256 numHashes);
+    event GenesisBlockCreated(bytes32 indexed output, uint256 timestamp);
 
     // Errors
     error ZeroToken();
@@ -281,13 +286,20 @@ contract EnhancedTemporalGradientBeacon is
         });
         poolCount = 1;
 
-        // Output history
-        bytes32 initialOutput = keccak256(abi.encodePacked(block.prevrandao, block.timestamp, msg.sender));
-        for (uint256 i = 0; i < OUTPUT_HISTORY_SIZE; i++) {
-            outputHistory[i] = initialOutput;
+        // Genesis block initialization
+        genesisBlockOutput = keccak256(abi.encodePacked("GENESIS_BLOCK", msg.sender, block.timestamp, block.prevrandao));
+        genesisBlockTimestamp = block.timestamp;
+        outputHistory[0] = genesisBlockOutput;
+        usedOutputs[genesisBlockOutput] = block.number;
+        currentOutputIndex = 0;
+        lastOutputTimestamp = block.timestamp;
+        emit GenesisBlockCreated(genesisBlockOutput, block.timestamp);
+
+        // Initialize remaining output history
+        for (uint256 i = 1; i < OUTPUT_HISTORY_SIZE; i++) {
+            outputHistory[i] = genesisBlockOutput;
         }
 
-        lastOutputTimestamp = block.timestamp;
         minBlockInterval = 5;
         minSubmissionsPerBlock = 1;
         consensusThreshold = 70;
@@ -303,7 +315,7 @@ contract EnhancedTemporalGradientBeacon is
 
         // Bloom filter
         bloomFilter = BloomFilterLib.createFilter(1024, 3);
-        outputCount = 0;
+        outputCount = 1; // Genesis block counts as first output
 
         // Roles
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
@@ -311,6 +323,16 @@ contract EnhancedTemporalGradientBeacon is
         _grantRole(UPGRADER_ROLE, msg.sender);
         _grantRole(EMERGENCY_ROLE, msg.sender);
         _grantRole(TOKENOMICS_ROLE, msg.sender);
+    }
+
+    /**
+     * @notice Retrieves details of the genesis block
+     * @return output The genesis block output
+     * @return timestamp The timestamp of the genesis block
+     * @return index The index in outputHistory (always 0)
+     */
+    function getGenesisBlock() external view returns (bytes32 output, uint256 timestamp, uint256 index) {
+        return (genesisBlockOutput, genesisBlockTimestamp, 0);
     }
 
     /**
@@ -324,8 +346,8 @@ contract EnhancedTemporalGradientBeacon is
         if (numHashes < 1 || numHashes > MAX_BLOOM_FILTER_HASHES) revert InvalidNumHashes();
 
         bloomFilter = BloomFilterLib.createFilter(newSize, numHashes);
-        outputCount = 0;
-
+        outputCount = 1; // Preserve genesis block
+        usedOutputs[genesisBlockOutput] = block.number; // Ensure genesis block remains
         emit GovernanceParameterChanged("bloomFilterSize", newSize);
         emit GovernanceParameterChanged("bloomFilterNumHashes", numHashes);
     }
@@ -336,7 +358,8 @@ contract EnhancedTemporalGradientBeacon is
     function resetBloomFilter() external onlyRole(GOVERNANCE_ROLE) {
         if (bloomFilter.size == 0) revert BloomFilterNotInitialized();
         BloomFilterLib.clearFilter(bloomFilter);
-        outputCount = 0;
+        outputCount = 1; // Preserve genesis block
+        usedOutputs[genesisBlockOutput] = block.number; // Ensure genesis block remains
         emit BloomFilterReset(bloomFilter.size, bloomFilter.numHashes);
     }
 
@@ -687,6 +710,7 @@ contract EnhancedTemporalGradientBeacon is
         uint256 pruneCount = 0;
         for (uint256 i = 0; i < outputs.length; i++) {
             bytes32 output = outputs[i];
+            if (output == genesisBlockOutput) continue; // Prevent pruning genesis block
             uint256 blockNum = usedOutputs[output];
             if (blockNum > 0 && block.number - blockNum > outputExpiryBlocks) {
                 delete usedOutputs[output];
@@ -695,7 +719,8 @@ contract EnhancedTemporalGradientBeacon is
         }
         if (pruneCount > 0) {
             BloomFilterLib.clearFilter(bloomFilter);
-            outputCount = 0;
+            outputCount = 1; // Preserve genesis block
+            usedOutputs[genesisBlockOutput] = block.number; // Ensure genesis block remains
             emit OutputsPruned(pruneCount);
             emit BloomFilterReset(bloomFilter.size, bloomFilter.numHashes);
         }
