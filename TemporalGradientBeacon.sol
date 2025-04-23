@@ -62,11 +62,11 @@ contract EnhancedTemporalGradientBeacon is
     uint256 public constant MIN_DIFFICULTY = 1000;
     uint256 public constant MAX_DIFFICULTY = 2**220;
     uint256 public constant MAX_BONUS_MULTIPLIER = 500;
+    uint256 public constant MAX_POOLS = 5; // Add MAX_POOLS constant
 
     // Token state
     ITGBT public tgbtToken;
     ITGBT public tstakeToken;
-    uint256 public rewardAmount;
     uint256 public targetDifficulty;
 
     // Library storage contexts
@@ -100,7 +100,7 @@ contract EnhancedTemporalGradientBeacon is
     // Tokenomics
     uint256 public constant TOTAL_SUPPLY_CAP = 2_000_000_000 ether;
     uint256 public constant MINING_ALLOCATION = 700_000_000 ether;
-    uint256 public initialBlockReward;
+    uint256 public totalMined;
 
     // EIP-712
     bytes32 private constant MINING_COMMITMENT_TYPEHASH =
@@ -123,6 +123,23 @@ contract EnhancedTemporalGradientBeacon is
     event BatchProcessed(uint256 startId, uint256 endId, uint256 fulfilledCount);
     event GenesisBlockCreated(bytes32 indexed output, uint256 timestamp);
     event StealthSolutionSubmitted(bytes32 indexed anonymousId, address indexed recipient, uint256 reward);
+    event TokenomicsUpdate( // Add TokenomicsUpdate event
+        uint256 indexed epochNumber,
+        uint256 blockReward,
+        uint256 blockNumber,
+        bool isHalving
+    );
+
+    // Additional event declarations
+    event GovernanceParameterChanged(string paramName, uint256 newValue);
+    event BloomFilterReset(uint256 size, uint256 numHashes);
+    event RandomnessRequested(uint256 indexed requestId, address indexed requester, bytes32 userSeed);
+    event RandomnessFulfilled(uint256 indexed requestId, bytes32 result);
+    event MiningPoolCreated(uint256 indexed poolId, uint256 targetDifficulty, uint256 emissionBucket);
+    event MiningPoolUpdated(uint256 indexed poolId, uint256 targetDifficulty, uint256 emissionBucket);
+    event MiningPoolDeactivated(uint256 indexed poolId);
+    event TokenUpdated(address newToken);
+    event RandomnessFeeChanged(uint256 oldFee, uint256 newFee);
 
     // Errors
     error ZeroToken();
@@ -142,6 +159,38 @@ contract EnhancedTemporalGradientBeacon is
     error OutputAlreadyUsed();
     error DeadlineExpired();
     error InvalidNonce();
+
+    // Additional error declarations
+    error InvalidDifficulty();
+    error InvalidPoolId();
+    error MiningCapReached();
+    error FeeNotSet();
+    error ExpiryTooShort();
+    error InvalidThreshold();
+    error InvalidMinSubmissions();
+    error MinAgeTooLow();
+    error MaxAgeTooLow();
+    error MaxAgeTooHigh();
+    error InvalidMultiplier();
+    error InvalidThresholdValue();
+    error ZeroAddress();
+    error MinContributionsTooLow();
+    error MaxLessThanMin();
+    error MaxContributionsTooHigh();
+    error InvalidSigner(); // Add InvalidSigner error
+    error MaxPoolsReached(); // Add MaxPoolsReached error
+
+    // Additional state variables
+    uint256 public outputExpiryBlocks;
+    uint256 public poolCount;
+    uint256 public minBlockInterval;
+    uint256 public minSubmissionsPerBlock;
+    uint256 public consensusThreshold;
+    uint256 public minCommitmentAge;
+    uint256 public maxCommitmentAge;
+    mapping(address => MiningLib.Commitment) public minerCommitments;
+    uint256 public bonusThreshold;
+    uint256 public bonusMultiplier;
 
     /**
      * @notice Initializes the contract
@@ -175,22 +224,20 @@ contract EnhancedTemporalGradientBeacon is
 
         if (_tgbtToken == address(0) || _tstakeToken == address(0)) revert ZeroToken();
         if (_difficulty < MIN_DIFFICULTY || _difficulty > MAX_DIFFICULTY) revert InvalidDifficulty();
-        if (_blocksPerEpoch == 0 || _halvingInterval == 0) revert InvalidEpochParameters();
 
         tgbtToken = ITGBT(_tgbtToken);
         tstakeToken = ITGBT(_tstakeToken);
         targetDifficulty = _difficulty;
         outputExpiryBlocks = 50000;
 
-        // Tokenomics
-        initialBlockReward = _initialReward;
-        rewardAmount = _initialReward;
-        blocksPerEpoch = _blocksPerEpoch;
-        halvingInterval = _halvingInterval;
-        currentEpoch = 0;
-        epochStartBlock = block.number;
-        lastHalvingBlock = block.number;
-        totalMined = 0;
+        // Tokenomics - Initialize epochState
+        epochState.currentEpoch = 0;
+        epochState.blocksPerEpoch = _blocksPerEpoch;
+        epochState.epochStartBlock = block.number;
+        epochState.lastHalvingBlock = block.number;
+        epochState.halvingInterval = _halvingInterval;
+        epochState.rewardAmount = _initialReward;
+        totalMined = 0; // Keep totalMined initialization
 
         // Default mining pool
         miningPools[0] = MiningLib.MiningPool({
@@ -421,7 +468,7 @@ contract EnhancedTemporalGradientBeacon is
     function _finalizeMiningReward(bytes32 hmacOutput, uint256 poolId) internal returns (uint256) {
         uint256 calculatedReward = MiningLib.calculateMiningReward(
             hmacOutput,
-            rewardAmount,
+            epochState.rewardAmount,
             bonusThreshold,
             bonusMultiplier,
             totalMined,
@@ -497,8 +544,8 @@ contract EnhancedTemporalGradientBeacon is
         BloomFilterLib.updateFilter(bloomFilter, commitment.revealedValue);
         outputCount++;
 
-        entropyAccumulator = uint256(keccak256(abi.encodePacked(
-            entropyAccumulator,
+        randomnessContext.entropyAccumulator = uint256(keccak256(abi.encodePacked(
+            randomnessContext.entropyAccumulator,
             commitment.revealedValue,
             block.timestamp,
             block.prevrandao
@@ -661,25 +708,16 @@ contract EnhancedTemporalGradientBeacon is
     }
 
     function _checkEpochTransition() internal {
-        rewardAmount = TokenomicsLib.checkEpochTransition(epochState);
+        TokenomicsLib.checkEpochTransition(epochState);
     }
 
     // Randomness Functions
-    function _processRandomnessAndUpdateMerkle() internal {
-        bytes32 historicalHash = _getHistoricalOutputsHash();
-        randomnessContext.state.processPendingRequests(historicalHash, entropyAccumulator);
-
-        bytes32 newRoot = keccak256(abi.encodePacked(entropyMerkleRoot, entropyAccumulator, historicalHash, block.timestamp, block.prevrandao));
-        entropyMerkleRoot = newRoot;
-        emit MerkleRootUpdated(newRoot);
-    }
-
     function _processRandomnessRequests() internal {
-        _processRandomnessAndUpdateMerkle();
-    }
-
-    function updateEntropyMerkleRoot() external {
-        _processRandomnessAndUpdateMerkle();
+        bytes32 historicalHash = _getHistoricalOutputsHash();
+        RandomnessHandlerLib.processRandomnessAndUpdateMerkle(
+            randomnessContext,
+            historicalHash
+        );
     }
 
     function requestRandomness(bytes32 userSeed) external nonReentrant whenNotPaused returns (uint256 requestId) {
@@ -695,21 +733,18 @@ contract EnhancedTemporalGradientBeacon is
         nonReentrant
         whenNotPaused
     {
-        bytes32 messageHash = keccak256(abi.encodePacked(requestId, entropyContribution, msg.sender));
-        address recovered = messageHash.toEthSignedMessageHash().recover(entropySignature);
-        if (recovered != msg.sender) revert InvalidSigner();
-
-        bool shouldFulfill = randomnessContext.state.addContribution(requestId, msg.sender, entropyContribution);
-        emit EntropyContributed(requestId, msg.sender, entropyContribution);
-
-        if (shouldFulfill) {
-            _fulfillRandomness(requestId);
+        (bool fulfilled, bytes32 randomValue) = RandomnessHandlerLib.contributeEntropy(
+            randomnessContext,
+            requestId,
+            entropyContribution,
+            entropySignature,
+            msg.sender,
+            _getHistoricalOutputsHash()
+        );
+        
+        if (fulfilled) {
+            emit RandomnessFulfilled(requestId, randomValue);
         }
-    }
-
-    function _fulfillRandomness(uint256 requestId) internal {
-        bytes32 randomValue = randomnessContext.state.fulfillRequest(requestId, _getHistoricalOutputsHash(), entropyAccumulator);
-        emit RandomnessFulfilled(requestId, randomValue);
     }
 
     function getRandomness(uint256 requestId) external view returns (bytes32 randomValue) {
@@ -765,7 +800,7 @@ contract EnhancedTemporalGradientBeacon is
     }
 
     function getEntropyStats() external view returns (uint256 accumulator, bytes32 merkleRoot) {
-        return (entropyAccumulator, entropyMerkleRoot);
+        return (randomnessContext.entropyAccumulator, randomnessContext.entropyMerkleRoot);
     }
 
     // Tokenomics Functions
@@ -778,26 +813,21 @@ contract EnhancedTemporalGradientBeacon is
         uint256 remaining,
         uint256 nextHalvingBlock
     ) {
-        return (
+        return TokenomicsLib.getTokenomicsInfo(
+            epochState,
             TOTAL_SUPPLY_CAP,
             MINING_ALLOCATION,
-            rewardAmount,
-            currentEpoch,
-            totalMined,
-            MINING_ALLOCATION - totalMined,
-            lastHalvingBlock + halvingInterval
+            totalMined
         );
     }
 
     function setHalvingInterval(uint256 blocks) external onlyRole(TOKENOMICS_ROLE) {
-        if (blocks == 0) revert InvalidEpochParameters();
-        halvingInterval = blocks;
+        TokenomicsLib.setHalvingInterval(epochState, blocks);
         emit GovernanceParameterChanged("halvingInterval", blocks);
     }
 
     function setEpochBlocks(uint256 blocks) external onlyRole(TOKENOMICS_ROLE) {
-        if (blocks == 0) revert InvalidEpochParameters();
-        blocksPerEpoch = blocks;
+        TokenomicsLib.setEpochBlocks(epochState, blocks);
         emit GovernanceParameterChanged("blocksPerEpoch", blocks);
     }
 
@@ -844,7 +874,7 @@ contract EnhancedTemporalGradientBeacon is
 
     // Admin/Governance Functions
     function setRewardAmount(uint256 amount) external onlyRole(TOKENOMICS_ROLE) {
-        rewardAmount = amount;
+        epochState.rewardAmount = amount;
         emit GovernanceParameterChanged("rewardAmount", amount);
     }
 
@@ -954,7 +984,7 @@ contract EnhancedTemporalGradientBeacon is
         _verifyProof(anonymousId, proof);
 
         // Example: reward is fixed or can be parameterized
-        uint256 reward = rewardAmount;
+        uint256 reward = epochState.rewardAmount;
         address stealthAddress = computeStealthAddress(anonymousId);
         tgbtToken.mint(stealthAddress, reward);
 
