@@ -168,6 +168,8 @@ contract EnhancedTemporalGradientBeacon is
     event MiningPoolDeactivated(uint256 indexed poolId);
     event BloomFilterReset(uint256 size, uint256 numHashes);
     event GenesisBlockCreated(bytes32 indexed output, uint256 timestamp);
+    event HistoricalStorageConfigChanged(bool enabled, uint256 maxBlocks);
+    event BlockArchived(uint256 indexed blockIndex, bytes32 output, address indexed miner);
 
     // Errors
     error ZeroToken();
@@ -221,6 +223,23 @@ contract EnhancedTemporalGradientBeacon is
     error InvalidSignature();
     error DeadlineExpired();
     error InvalidNonce();
+
+    // BeaconBlock structure for storing comprehensive block data
+    struct BeaconBlock {
+        bytes32 output;
+        bytes32 previousOutput;
+        uint64 nonce;
+        address miner;
+        uint256 actualDifficulty;
+        uint256 reward;
+        uint256 timestamp;
+        uint256 poolId;
+    }
+
+    // Historical storage with configurable size
+    BeaconBlock[] public historicalBlocks;
+    uint256 public maxHistoricalBlocks;
+    bool public historicalStorageEnabled;
 
     /**
      * @notice Initializes the contract with token, reward, difficulty, and epoch settings
@@ -323,6 +342,26 @@ contract EnhancedTemporalGradientBeacon is
         _grantRole(UPGRADER_ROLE, msg.sender);
         _grantRole(EMERGENCY_ROLE, msg.sender);
         _grantRole(TOKENOMICS_ROLE, msg.sender);
+
+        // Initialize historical storage (disabled by default)
+        historicalStorageEnabled = false;
+        maxHistoricalBlocks = 1000;
+
+        // Add genesis block to historical blocks if enabled
+        if (historicalStorageEnabled) {
+            historicalBlocks.push(
+                BeaconBlock({
+                    output: genesisBlockOutput,
+                    previousOutput: bytes32(0),
+                    nonce: 0,
+                    miner: msg.sender,
+                    actualDifficulty: 0,
+                    reward: 0,
+                    timestamp: block.timestamp,
+                    poolId: 0
+                })
+            );
+        }
     }
 
     /**
@@ -567,11 +606,129 @@ contract EnhancedTemporalGradientBeacon is
         _checkEpochTransition();
 
         uint256 calculatedReward = _finalizeMiningReward(commitment.revealedValue, poolId);
+        
+        // Store block in historical storage if enabled
+        if (historicalStorageEnabled) {
+            _archiveBlock(
+                commitment.revealedValue,
+                previousOutput,
+                nonce,
+                miner,
+                type(uint256).max - uint256(commitment.revealedValue),
+                calculatedReward,
+                block.timestamp,
+                poolId
+            );
+        }
 
         _processRandomnessRequests();
 
         emit CommitmentRevealed(miner, commitment.revealedValue, poolId);
         emit BeaconBlockMined(miner, commitment.revealedValue, calculatedReward, nonce, block.timestamp, poolId);
+    }
+
+    /**
+     * @notice Archives a new block in the historical storage
+     * @dev Manages the historical blocks array according to configured max size
+     */
+    function _archiveBlock(
+        bytes32 output,
+        bytes32 previousOutput,
+        uint64 nonce,
+        address miner,
+        uint256 actualDifficulty,
+        uint256 reward,
+        uint256 timestamp,
+        uint256 poolId
+    ) internal {
+        // If we've reached max capacity, remove oldest block (index 0)
+        if (historicalBlocks.length >= maxHistoricalBlocks && maxHistoricalBlocks > 0) {
+            // Shift array elements (remove first element)
+            for (uint256 i = 0; i < historicalBlocks.length - 1; i++) {
+                historicalBlocks[i] = historicalBlocks[i + 1];
+            }
+            historicalBlocks.pop(); // Remove last duplicate
+        }
+        
+        // Add new block
+        historicalBlocks.push(
+            BeaconBlock({
+                output: output,
+                previousOutput: previousOutput,
+                nonce: nonce,
+                miner: miner,
+                actualDifficulty: actualDifficulty,
+                reward: reward,
+                timestamp: timestamp,
+                poolId: poolId
+            })
+        );
+        
+        emit BlockArchived(historicalBlocks.length - 1, output, miner);
+    }
+
+    /**
+     * @notice Configures the historical block storage
+     * @param enabled Whether to store historical blocks
+     * @param maxBlocks Maximum number of historical blocks to store (0 for unlimited)
+     */
+    function configureHistoricalStorage(bool enabled, uint256 maxBlocks) external onlyRole(GOVERNANCE_ROLE) {
+        historicalStorageEnabled = enabled;
+        maxHistoricalBlocks = maxBlocks;
+        
+        // If enabling and we have no genesis block, add it
+        if (enabled && historicalBlocks.length == 0) {
+            historicalBlocks.push(
+                BeaconBlock({
+                    output: genesisBlockOutput,
+                    previousOutput: bytes32(0),
+                    nonce: 0,
+                    miner: msg.sender,
+                    actualDifficulty: 0,
+                    reward: 0, 
+                    timestamp: genesisBlockTimestamp,
+                    poolId: 0
+                })
+            );
+        }
+        
+        emit HistoricalStorageConfigChanged(enabled, maxBlocks);
+    }
+    
+    /**
+     * @notice Gets the count of historical blocks stored
+     * @return count Number of historical blocks
+     */
+    function getHistoricalBlockCount() external view returns (uint256 count) {
+        return historicalBlocks.length;
+    }
+    
+    /**
+     * @notice Gets multiple historical blocks in a range
+     * @param startIndex Start index (inclusive)
+     * @param endIndex End index (exclusive)
+     * @return blocks Array of BeaconBlock structs
+     */
+    function getHistoricalBlockRange(uint256 startIndex, uint256 endIndex) 
+        external 
+        view 
+        returns (BeaconBlock[] memory blocks) 
+    {
+        if (endIndex > historicalBlocks.length) {
+            endIndex = historicalBlocks.length;
+        }
+        if (startIndex >= endIndex) {
+            return new BeaconBlock[](0);
+        }
+        
+        uint256 resultLength = endIndex - startIndex;
+        BeaconBlock[] memory result = new BeaconBlock[](resultLength);
+        
+        for (uint256 i = 0; i < resultLength; i++) {
+            result[i] = historicalBlocks[startIndex + i];
+        }
+        
+        return result;
     }
 
     function _validatePreviousOutput(bytes32 previousOutput) internal view returns (bool isValid) {
