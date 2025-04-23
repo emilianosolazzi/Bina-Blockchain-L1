@@ -2,7 +2,6 @@
 pragma solidity ^0.8.28;
 
 import { ECDSAUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/cryptography/ECDSAUpgradeable.sol";
-import { BytesArrayLib } from "./BytesArrayLib.sol";
 
 /**
  * @title RandomnessLib
@@ -10,7 +9,6 @@ import { BytesArrayLib } from "./BytesArrayLib.sol";
  */
 library RandomnessLib {
     using ECDSAUpgradeable for bytes32;
-    using BytesArrayLib for bytes32[];
     
     struct Request {
         address requester;
@@ -72,7 +70,7 @@ library RandomnessLib {
     ) internal returns (uint256 requestId) {
         requestId = self.requestCount++;
         
-        bytes32[] memory contributions = BytesArrayLib.createBytes32Array(self.maxContributions);
+        bytes32[] memory contributions = new bytes32[](self.maxContributions);
         
         self.requests[requestId] = Request({
             requester: requester,
@@ -129,7 +127,7 @@ library RandomnessLib {
         
         // Collect contributions
         uint256 contributionsCount = request.contributionsCount;
-        bytes32[] memory contributions = BytesArrayLib.createBytes32Array(contributionsCount);
+        bytes32[] memory contributions = new bytes32[](contributionsCount);
         
         for (uint i = 0; i < contributionsCount; i++) {
             contributions[i] = request.entropyContributions[i];
@@ -425,9 +423,9 @@ library RandomnessLib {
         bytes32 historicalOutputsHash,
         uint256 entropyAccumulator
     ) internal returns (uint256 successCount) {
-        // Explicitly cast to resolve ambiguity
+        bytes32[] memory contributions = entropyContributions; // Copy to memory
         uint256 requestIdsLen = requestIds.length;
-        uint256 entropyContributionsLen = (uint256[])(entropyContributions).length;
+        uint256 entropyContributionsLen = contributions.length;
         uint256 entropySignaturesLen = entropySignatures.length;
 
         if (requestIdsLen != entropyContributionsLen || requestIdsLen != entropySignaturesLen) revert ArrayLengthMismatch();
@@ -460,7 +458,7 @@ library RandomnessLib {
     ) internal view returns (bytes32[] memory results, bool[] memory fulfilled) {
         // Use optimized array creation - Access length directly for calldata arrays using .length
         uint256 requestIdLen = requestIds.length;
-        results = BytesArrayLib.createBytes32Array(requestIdLen);
+        results = new bytes32[](requestIdLen);
         fulfilled = new bool[](requestIdLen);
         
         // Use unchecked for gas optimization in Arbitrum
@@ -739,7 +737,7 @@ library RandomnessLib {
         
         // Collect contributions - optimize by reading length once
         uint256 contribCount = requestStorage.contributionsCount;
-        bytes32[] memory contributions = BytesArrayLib.createBytes32Array(contribCount);
+        bytes32[] memory contributions = new bytes32[](contribCount);
         
         unchecked {
             for (uint i = 0; i < contribCount; i++) {
