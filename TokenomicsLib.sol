@@ -74,7 +74,13 @@ library TokenomicsLib {
      * @param totalSupplyCap Total token supply cap
      * @param miningAllocation Total mining allocation
      * @param totalMined Total tokens mined so far
-     * @return Tuple of tokenomics information
+     * @return cap The total supply cap
+     * @return miningAlloc The total mining allocation
+     * @return currentBlockReward The current block reward
+     * @return epoch The current epoch number
+     * @return totalMinedToDate Total amount of tokens mined
+     * @return remaining Remaining tokens to be mined
+     * @return nextHalvingBlock Block number of next halving
      */
     function getTokenomicsInfo(
         EpochState storage state,

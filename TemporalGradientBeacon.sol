@@ -241,18 +241,6 @@ contract EnhancedTemporalGradientBeacon is
     error DeadlineExpired();
     error InvalidNonce();
 
-    // BeaconBlock structure for storing comprehensive block data
-    struct BeaconBlock {
-        bytes32 output;
-        bytes32 previousOutput;
-        uint64 nonce;
-        address miner;
-        uint256 actualDifficulty;
-        uint256 reward;
-        uint256 timestamp;
-        uint256 poolId;
-    }
-
     // Used anonymous IDs for stealth mining rewards
     mapping(bytes32 => bool) public usedAnonymousIds;
 
@@ -364,17 +352,17 @@ contract EnhancedTemporalGradientBeacon is
 
         // Add genesis block to historical blocks if enabled
         if (historicalStorage.enabled) {
-            historicalStorage.blocks.push(
-                BeaconBlock({
-                    output: genesisBlockOutput,
-                    previousOutput: bytes32(0),
-                    nonce: 0,
-                    miner: msg.sender,
-                    actualDifficulty: 0,
-                    reward: 0,
-                    timestamp: block.timestamp,
-                    poolId: 0
-                })
+            // Use the initializer method instead of direct push
+            StorageLib.archiveBlock(
+                historicalStorage,
+                genesisBlockOutput,
+                bytes32(0),
+                0,
+                msg.sender,
+                0,
+                0,
+                block.timestamp,
+                0
             );
         }
     }
@@ -540,7 +528,6 @@ contract EnhancedTemporalGradientBeacon is
     function _finalizeMiningReward(bytes32 hmacOutput, uint256 poolId) internal returns (uint256) {
         uint256 calculatedReward = MiningLib.calculateMiningReward(
             hmacOutput,
-            poolId,
             rewardAmount,
             bonusThreshold,
             bonusMultiplier,
@@ -728,23 +715,13 @@ contract EnhancedTemporalGradientBeacon is
     function getHistoricalBlockRange(uint256 startIndex, uint256 endIndex) 
         external 
         view 
-        returns (BeaconBlock[] memory blocks) 
+        returns (StorageLib.BeaconBlock[] memory blocks) 
     {
-        if (endIndex > historicalStorage.blocks.length) {
-            endIndex = historicalStorage.blocks.length;
-        }
-        if (startIndex >= endIndex) {
-            return new BeaconBlock[](0);
-        }
-        
-        uint256 resultLength = endIndex - startIndex;
-        BeaconBlock[] memory result = new BeaconBlock[](resultLength);
-        
-        for (uint256 i = 0; i < resultLength; i++) {
-            result[i] = historicalStorage.blocks[startIndex + i];
-        }
-        
-        return result;
+        return StorageLib.getHistoricalBlockRange(
+            historicalStorage,
+            startIndex,
+            endIndex
+        );
     }
 
     function _validatePreviousOutput(bytes32 previousOutput) internal view returns (bool isValid) {

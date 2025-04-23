@@ -104,7 +104,7 @@ library MiningLib {
         address sender,
         BloomFilterLib.Filter storage bloomFilter,
         mapping(bytes32 => uint256) storage usedOutputs,
-        function(bytes32) view returns (bytes32) hashFunction
+        function(bytes memory) view returns (bytes32) hashFunction  // Changed parameter type from bytes32 to bytes memory
     ) internal view returns (bytes32 hmacOutput) {
         bytes memory input = abi.encodePacked(previousOutput, temporalSeed, nonce, sender, block.prevrandao, block.timestamp, secretValue);
         bytes32 inputHash = keccak256(input);
@@ -136,11 +136,9 @@ library MiningLib {
         }
         return state;
     }
-
     /**
      * @notice Calculate mining reward based on difficulty of solution
      * @param hmacOutput The mining output hash
-     * @param poolId The mining pool ID
      * @param rewardAmount Base reward amount
      * @param bonusThreshold Minimum difficulty multiplier for bonus
      * @param bonusMultiplier Reward multiplier percentage (100 = 100%)
@@ -151,7 +149,6 @@ library MiningLib {
      */
     function calculateMiningReward(
         bytes32 hmacOutput,
-        uint256 poolId,
         uint256 rewardAmount,
         uint256 bonusThreshold,
         uint256 bonusMultiplier,
