@@ -31,7 +31,13 @@ library RandomnessHandlerLib {
         RandomnessContext storage self, 
         bytes32 historicalHash
     ) internal {
-        self.state.processPendingRequests(historicalHash, self.entropyAccumulator);
+        // Call the function correctly using direct library call
+        RandomnessLib.processBatch(
+            self.state,
+            3, // Process a small batch each time
+            historicalHash,
+            self.entropyAccumulator
+        );
 
         bytes32 newRoot = keccak256(abi.encodePacked(
             self.entropyMerkleRoot, 
@@ -57,7 +63,13 @@ library RandomnessHandlerLib {
         address recovered = messageHash.toEthSignedMessageHash().recover(entropySignature);
         if (recovered != sender) revert InvalidSigner();
 
-        bool shouldFulfill = self.state.addContribution(requestId, sender, entropyContribution);
+        // Call the function correctly using direct library call
+        bool shouldFulfill = RandomnessLib.addContribution(
+            self.state, 
+            requestId, 
+            sender, 
+            entropyContribution
+        );
         emit EntropyContributed(requestId, sender, entropyContribution);
 
         if (shouldFulfill) {
@@ -74,7 +86,13 @@ library RandomnessHandlerLib {
         uint256 requestId,
         bytes32 historicalHash
     ) internal returns (bytes32 randomValue) {
-        randomValue = self.state.fulfillRequest(requestId, historicalHash, self.entropyAccumulator);
+        // Call the function correctly using direct library call
+        randomValue = RandomnessLib.fulfillRequest(
+            self.state, 
+            requestId, 
+            historicalHash, 
+            self.entropyAccumulator
+        );
         emit RandomnessFulfilled(requestId, randomValue);
         return randomValue;
     }
@@ -86,7 +104,12 @@ library RandomnessHandlerLib {
     ) internal returns (uint256 requestId) {
         if (self.state.fee == 0) revert FeeNotSet();
         
-        requestId = self.state.createRequest(requester, userSeed);
+        // Call the function correctly using direct library call
+        requestId = RandomnessLib.createRequest(
+            self.state,
+            requester, 
+            userSeed
+        );
         emit RandomnessRequested(requestId, requester, userSeed);
         return requestId;
     }
