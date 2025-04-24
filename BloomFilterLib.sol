@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 /**
  * @title BloomFilterLib
  * @notice A gas-efficient bloom filter library for probabilistic membership testing
- * @dev Implements a bloom filter with configurable hash functions and bit manipulation for storage efficiency.
+ * @dev Implements a bloom filter with configurable hash functions, salt, and bit manipulation for storage efficiency.
  *      Optimized for use in contracts like EnhancedTemporalGradientBeacon to track used outputs.
  *      False-positive rate is approximately (1 - e^(-k*n/m))^k, where:
  *      - k: number of hash functions (numHashes)
@@ -31,24 +31,28 @@ library BloomFilterLib {
      * @param buckets Array of bytes32, each representing 256 bits
      * @param size Number of buckets (must be a power of 2)
      * @param numHashes Number of hash functions to use
+     * @param salt A random value added during hashing to prevent certain attacks
      */
     struct Filter {
         bytes32[] buckets;
         uint256 size;
         uint256 numHashes;
+        uint256 salt; // Added salt parameter
     }
 
     // Event for debugging and monitoring
     event FilterUpdated(bytes32 indexed entry, uint256 indexed bucketIndex);
     event FilterCleared(uint256 size, uint256 numHashes);
+    event FilterReset(uint256 newSize, uint256 newNumHashes, uint256 newSalt); // Added event
 
     /**
-     * @notice Creates a new bloom filter with the specified size and number of hash functions
+     * @notice Creates a new bloom filter with the specified size, number of hash functions, and salt
      * @param size The number of buckets (must be a power of 2 and non-zero)
      * @param numHashes The number of hash functions (1 to MAX_HASHES)
+     * @param salt A value used to randomize hash functions (e.g., block timestamp or random number)
      * @return filter The newly created filter
      */
-    function createFilter(uint256 size, uint256 numHashes) internal pure returns (Filter memory filter) {
+    function createFilter(uint256 size, uint256 numHashes, uint256 salt) internal pure returns (Filter memory filter) {
         if (size == 0) revert ZeroSize();
         if ((size & (size - 1)) != 0) revert InvalidFilterSize();
         if (numHashes == 0 || numHashes > MAX_HASHES) revert InvalidNumHashes();
@@ -68,6 +72,7 @@ library BloomFilterLib {
         filter.buckets = buckets;
         filter.size = size;
         filter.numHashes = numHashes;
+        filter.salt = salt; // Store the salt
     }
 
     /**
@@ -78,11 +83,12 @@ library BloomFilterLib {
     function updateFilter(Filter storage filter, bytes32 entry) internal {
         uint256 size = filter.size;
         uint256 numHashes = filter.numHashes;
+        uint256 salt = filter.salt; // Load salt
 
         // Generate hashes and set bits in buckets
         for (uint256 i = 0; i < numHashes; i++) {
-            // Use deterministic seed for each hash function
-            uint256 hash = uint256(keccak256(abi.encodePacked(entry, i + 1))) % (size * 256); // 256 bits per bucket
+            // Incorporate salt into hash calculation
+            uint256 hash = uint256(keccak256(abi.encodePacked(entry, i + 1, salt))) % (size * 256); // 256 bits per bucket
             uint256 bucketIndex = hash / 256;
             uint256 bitIndex = hash % 256;
 
@@ -105,10 +111,12 @@ library BloomFilterLib {
     function mightContain(Filter storage filter, bytes32 entry) internal view returns (bool exists) {
         uint256 size = filter.size;
         uint256 numHashes = filter.numHashes;
+        uint256 salt = filter.salt; // Load salt
 
         // Cache buckets to minimize SLOADs
         for (uint256 i = 0; i < numHashes; i++) {
-            uint256 hash = uint256(keccak256(abi.encodePacked(entry, i + 1))) % (size * 256);
+            // Incorporate salt into hash calculation
+            uint256 hash = uint256(keccak256(abi.encodePacked(entry, i + 1, salt))) % (size * 256);
             uint256 bucketIndex = hash / 256;
             uint256 bitIndex = hash % 256;
 
@@ -136,29 +144,104 @@ library BloomFilterLib {
     }
 
     /**
-     * @notice Estimates the false-positive rate of the filter
-     * @param filter The filter to analyze
-     * @param numEntries The number of entries added to the filter
-     * @return rate The approximate false-positive rate (as a percentage, scaled by 1e18)
+     * @notice Resets the filter with new parameters (size, hashes, salt), effectively creating a new empty filter.
+     * @dev This is generally preferred over dynamic resizing due to the complexity of re-hashing.
+     * @param filter The filter storage reference to reset.
+     * @param newSize The new number of buckets (must be power of 2, non-zero).
+     * @param newNumHashes The new number of hash functions (1 to MAX_HASHES).
+     * @param newSalt The new salt value.
      */
-    function estimateFalsePositiveRate(Filter storage filter, uint256 numEntries) internal view returns (uint256 rate) {
+    function resetFilter(Filter storage filter, uint256 newSize, uint256 newNumHashes, uint256 newSalt) internal {
+        if (newSize == 0) revert ZeroSize();
+        if ((newSize & (newSize - 1)) != 0) revert InvalidFilterSize();
+        if (newNumHashes == 0 || newNumHashes > MAX_HASHES) revert InvalidNumHashes();
+
+        // Deallocate old buckets (important for storage refunds if applicable)
+        delete filter.buckets;
+
+        // Allocate new buckets (assembly might be slightly cheaper but less clear here)
+        filter.buckets = new bytes32[](newSize);
+        // Note: New array elements are zero-initialized by default.
+
+        filter.size = newSize;
+        filter.numHashes = newNumHashes;
+        filter.salt = newSalt;
+
+        emit FilterReset(newSize, newNumHashes, newSalt);
+    }
+
+    /**
+     * @notice Counts the total number of set bits in the filter.
+     * @dev Gas intensive: Use primarily for off-chain analysis or infrequent on-chain checks.
+     * @param filter The filter to analyze.
+     * @return count The total number of set bits.
+     */
+    function countSetBits(Filter storage filter) internal view returns (uint256 count) {
+        uint256 size = filter.size;
+        count = 0;
+        // Use unchecked block for potential gas savings on loop counters
+        unchecked {
+            for (uint256 i = 0; i < size; i++) {
+                bytes32 bucket = filter.buckets[i];
+                // Iterate through the 256 bits of the bucket
+                for (uint256 j = 0; j < 256; j++) {
+                    if ((bucket & bytes32(1 << j)) != 0) {
+                        count++;
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * @notice Estimates the false-positive rate of the filter.
+     * @param filter The filter to analyze.
+     * @param numEntries The number of entries added to the filter.
+     * @return rateBps The approximate false-positive rate in basis points (1 bps = 0.01%).
+     */
+    function estimateFalsePositiveRate(Filter storage filter, uint256 numEntries) internal view returns (uint256 rateBps) {
         uint256 m = filter.size * 256; // Total bits
         uint256 k = filter.numHashes;
         uint256 n = numEntries;
 
-        // Approximate false-positive rate: (1 - e^(-k*n/m))^k
-        // Use simplified approximation for gas efficiency: (k*n/m)^k
-        // Scale to avoid floating-point arithmetic
-        uint256 kn = k * n * 1e18;
-        uint256 mScaled = m * 1e18;
-        uint256 fraction = kn / mScaled;
-        uint256 result = fraction;
+        if (m == 0) return 10000; // 100% FP rate if filter size is zero
 
-        // Raise to power k (approximate for small k)
-        for (uint256 i = 1; i < k; i++) {
-            result = (result * fraction) / 1e18;
+        // Approximate false-positive rate: (1 - e^(-k*n/m))^k
+        // Using simplified approximation for gas efficiency: (k*n/m)^k
+        // Scale to basis points (10000 = 100%)
+        uint256 scale = 10000; // Basis points scale
+        uint256 kn = k * n;
+
+        // Calculate (kn / m) scaled by `scale`
+        // Use uint256 division, ensuring intermediate multiplication doesn't overflow easily
+        // (kn * scale) / m
+        uint256 fractionScaled;
+        if (kn > type(uint256).max / scale) {
+             // Handle potential overflow if kn * scale is too large
+             // Divide first, then multiply (loses precision but safer)
+             fractionScaled = (kn / m) * scale;
+        } else {
+             fractionScaled = (kn * scale) / m;
         }
 
-        return result;
+        uint256 result = fractionScaled;
+
+        // Raise to power k (approximate for small k)
+        // Use unchecked block for potential gas savings
+        unchecked {
+            for (uint256 i = 1; i < k; i++) {
+                // (result * fractionScaled) / scale
+                if (result > type(uint256).max / fractionScaled) {
+                     // Handle potential overflow
+                     result = (result / scale) * fractionScaled; // Divide first
+                } else {
+                     result = (result * fractionScaled) / scale;
+                }
+
+            }
+        }
+
+        // Ensure rate doesn't exceed 100% (10000 bps)
+        return result > scale ? scale : result;
     }
 }
