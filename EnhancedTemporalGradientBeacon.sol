@@ -17,11 +17,11 @@ import { TokenomicsLib } from "./TokenomicsLib.sol";
 import { StorageLib } from "./StorageLib.sol";
 
 /**
- * @title EnhancedTemporalGradientBeacon
+ * @title TemporalGradientBeacon
  * @notice A temporal gradient beacon with mining, randomness generation, and governance features
  * @dev Uses UUPS upgrade pattern with role-based access control
  */
-contract EnhancedTemporalGradientBeacon is
+contract TemporalGradientBeacon is
     Initializable,
     Ownable2StepUpgradeable,
     ReentrancyGuardUpgradeable,
@@ -140,7 +140,7 @@ contract EnhancedTemporalGradientBeacon is
         __Pausable_init();
         __UUPSUpgradeable_init();
         __AccessControl_init();
-        __EIP712_init("EnhancedTemporalGradientBeacon", "1");
+        __EIP712_init("TemporalGradientBeacon", "1");
 
         require(_tgbtToken != address(0) && _tstakeToken != address(0), "ZeroToken");
         require(_difficulty >= MIN_DIFFICULTY && _difficulty <= MAX_DIFFICULTY, "InvalidDifficulty");

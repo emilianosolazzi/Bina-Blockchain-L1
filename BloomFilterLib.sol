@@ -10,6 +10,8 @@ pragma solidity ^0.8.28;
  *      - k: number of hash functions (numHashes)
  *      - n: number of inserted elements
  *      - m: number of bits (size * 256, as each bucket is a bytes32 with 256 bits)
+ *      Note: This library does not dynamically adjust 'numHashes' based on the number of entries to maintain an optimal FPR.
+ *      Note: Dynamic resizing while preserving entries is not supported; `resetFilter` clears all existing data.
  */
 library BloomFilterLib {
     // Custom errors for gas-efficient error handling
@@ -160,7 +162,8 @@ library BloomFilterLib {
 
     /**
      * @notice Resets the filter with new parameters (size, hashes, salt), effectively creating a new empty filter.
-     * @dev This is generally preferred over dynamic resizing due to the complexity of re-hashing.
+     * @dev This clears all existing entries in the filter. It does not resize while preserving data.
+     *      This is generally preferred over dynamic resizing due to the complexity and gas cost of re-hashing all previous entries.
      * @param filter The filter storage reference to reset.
      * @param newSize The new number of buckets (must be power of 2, non-zero).
      * @param newNumHashes The new number of hash functions (1 to MAX_HASHES).
@@ -212,9 +215,11 @@ library BloomFilterLib {
     }
 
     /**
-     * @notice Estimates the false-positive rate of the filter.
+     * @notice Estimates the false-positive rate (FPR) of the filter based on current parameters and an estimated number of entries.
+     * @dev This provides an approximation. The actual FPR depends on the distribution of hash values.
+     *      The library uses a fixed number of hash functions ('k') set during creation/reset. It does not dynamically adjust 'k' to optimize FPR as 'n' changes.
      * @param filter The filter to analyze.
-     * @param numEntries The number of entries added to the filter.
+     * @param numEntries The estimated number of entries added to the filter ('n').
      * @return rateBps The approximate false-positive rate in basis points (1 bps = 0.01%).
      */
     function estimateFalsePositiveRate(Filter storage filter, uint256 numEntries) internal view returns (uint256 rateBps) {
