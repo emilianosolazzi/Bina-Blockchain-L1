@@ -43,6 +43,7 @@ library MiningLib {
         CommitmentFlags flags;
         bytes32 revealedValue;
         uint8 poolId;
+        uint256 deadline; // Added: Timestamp deadline for the commitment submission signature
     }
 
     struct MiningPool {

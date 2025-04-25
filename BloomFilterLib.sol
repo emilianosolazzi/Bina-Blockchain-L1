@@ -81,24 +81,30 @@ library BloomFilterLib {
      * @param entry The entry to add
      */
     function updateFilter(Filter storage filter, bytes32 entry) internal {
+        // --- Arbitrum Optimization: Cache storage reads ---
         uint256 size = filter.size;
         uint256 numHashes = filter.numHashes;
-        uint256 salt = filter.salt; // Load salt
+        uint256 salt = filter.salt;
+        // --- End Optimization ---
 
         // Generate hashes and set bits in buckets
-        for (uint256 i = 0; i < numHashes; i++) {
-            // Incorporate salt into hash calculation
-            uint256 hash = uint256(keccak256(abi.encodePacked(entry, i + 1, salt))) % (size * 256); // 256 bits per bucket
-            uint256 bucketIndex = hash / 256;
-            uint256 bitIndex = hash % 256;
+        // Use unchecked for loop counter
+        unchecked {
+            for (uint256 i = 0; i < numHashes; i++) { // Use cached numHashes
+                // Incorporate salt into hash calculation
+                uint256 hash = uint256(keccak256(abi.encodePacked(entry, i + 1, salt))) % (size * 256); // Use cached size, salt
+                uint256 bucketIndex = hash / 256;
+                uint256 bitIndex = hash % 256;
 
-            if (bucketIndex >= size) revert IndexOutOfBounds();
+                // Bounds check is still necessary before storage write
+                if (bucketIndex >= size) revert IndexOutOfBounds(); // Use cached size
 
-            // Set the specific bit in the bucket
-            bytes32 currentBucket = filter.buckets[bucketIndex];
-            filter.buckets[bucketIndex] = currentBucket | bytes32(1 << bitIndex);
+                // Set the specific bit in the bucket
+                bytes32 currentBucket = filter.buckets[bucketIndex];
+                filter.buckets[bucketIndex] = currentBucket | bytes32(1 << bitIndex);
 
-            emit FilterUpdated(entry, bucketIndex);
+                emit FilterUpdated(entry, bucketIndex);
+            }
         }
     }
 
@@ -109,22 +115,28 @@ library BloomFilterLib {
      * @return exists Whether the entry might exist (false positives possible, no false negatives)
      */
     function mightContain(Filter storage filter, bytes32 entry) internal view returns (bool exists) {
+        // --- Arbitrum Optimization: Cache storage reads ---
         uint256 size = filter.size;
         uint256 numHashes = filter.numHashes;
-        uint256 salt = filter.salt; // Load salt
+        uint256 salt = filter.salt;
+        bytes32[] storage buckets = filter.buckets; // Cache storage array pointer
+        // --- End Optimization ---
 
-        // Cache buckets to minimize SLOADs
-        for (uint256 i = 0; i < numHashes; i++) {
-            // Incorporate salt into hash calculation
-            uint256 hash = uint256(keccak256(abi.encodePacked(entry, i + 1, salt))) % (size * 256);
-            uint256 bucketIndex = hash / 256;
-            uint256 bitIndex = hash % 256;
+        // Use unchecked for loop counter
+        unchecked {
+            for (uint256 i = 0; i < numHashes; i++) { // Use cached numHashes
+                // Incorporate salt into hash calculation
+                uint256 hash = uint256(keccak256(abi.encodePacked(entry, i + 1, salt))) % (size * 256); // Use cached size, salt
+                uint256 bucketIndex = hash / 256;
+                uint256 bitIndex = hash % 256;
 
-            if (bucketIndex >= size) return false;
+                // Bounds check before reading from storage array
+                if (bucketIndex >= size) return false; // Use cached size
 
-            bytes32 bucket = filter.buckets[bucketIndex];
-            if ((bucket & bytes32(1 << bitIndex)) == 0) {
-                return false;
+                bytes32 bucket = buckets[bucketIndex]; // Read from cached pointer
+                if ((bucket & bytes32(1 << bitIndex)) == 0) {
+                    return false;
+                }
             }
         }
 
@@ -136,9 +148,12 @@ library BloomFilterLib {
      * @param filter The filter to clear
      */
     function clearFilter(Filter storage filter) internal {
-        uint256 size = filter.size;
-        for (uint256 i = 0; i < size; i++) {
-            filter.buckets[i] = bytes32(0);
+        uint256 size = filter.size; // Cache size
+        // Use unchecked for loop counter
+        unchecked {
+            for (uint256 i = 0; i < size; i++) {
+                filter.buckets[i] = bytes32(0);
+            }
         }
         emit FilterCleared(size, filter.numHashes);
     }
@@ -177,12 +192,15 @@ library BloomFilterLib {
      * @return count The total number of set bits.
      */
     function countSetBits(Filter storage filter) internal view returns (uint256 count) {
+        // --- Arbitrum Optimization: Cache storage reads ---
         uint256 size = filter.size;
+        bytes32[] storage buckets = filter.buckets; // Cache storage array pointer
+        // --- End Optimization ---
         count = 0;
-        // Use unchecked block for potential gas savings on loop counters
+        // Use unchecked block for loop counters
         unchecked {
-            for (uint256 i = 0; i < size; i++) {
-                bytes32 bucket = filter.buckets[i];
+            for (uint256 i = 0; i < size; i++) { // Use cached size
+                bytes32 bucket = buckets[i]; // Read from cached pointer
                 // Iterate through the 256 bits of the bucket
                 for (uint256 j = 0; j < 256; j++) {
                     if ((bucket & bytes32(1 << j)) != 0) {
@@ -200,8 +218,10 @@ library BloomFilterLib {
      * @return rateBps The approximate false-positive rate in basis points (1 bps = 0.01%).
      */
     function estimateFalsePositiveRate(Filter storage filter, uint256 numEntries) internal view returns (uint256 rateBps) {
+        // --- Arbitrum Optimization: Cache storage reads ---
         uint256 m = filter.size * 256; // Total bits
         uint256 k = filter.numHashes;
+        // --- End Optimization ---
         uint256 n = numEntries;
 
         if (m == 0) return 10000; // 100% FP rate if filter size is zero

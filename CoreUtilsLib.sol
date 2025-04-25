@@ -39,8 +39,11 @@ library CoreUtilsLib {
      */
     function getHistoricalOutputsHash(bytes32[32] storage outputHistory) internal view returns (bytes32) {
         bytes32[] memory outputs = new bytes32[](32);
-        for (uint256 i = 0; i < 32; i++) {
-            outputs[i] = outputHistory[i];
+        // Use unchecked for loop counter
+        unchecked {
+            for (uint256 i = 0; i < 32; i++) {
+                outputs[i] = outputHistory[i];
+            }
         }
         return keccak256(abi.encodePacked(outputs));
     }
@@ -109,7 +112,7 @@ library CoreUtilsLib {
         bytes32 historicalHash
     ) internal returns (bool fulfilled, bytes32 randomValue) {
         // Validate request exists
-        bytes32 requestHash = state.requests[requestId];
+        bytes32 requestHash = state.requests[requestId]; // Read once
         require(requestHash != bytes32(0), "InvalidRequestId");
 
         // Verify cryptographic signature
@@ -117,16 +120,23 @@ library CoreUtilsLib {
         address recovered = signedMessage.recover(entropySignature);
         require(recovered == contributor, "InvalidSignature");
 
+        // --- Arbitrum Optimization: Cache storage reads ---
+        uint8 maxContrib = state.maxContributions;
+        uint8 minContrib = state.minContributions;
+        uint8 contributions = state.contributionCount[requestId]; // Read count once
+        // --- End Optimization ---
+
         // Enforce contribution limits
-        uint8 contributions = state.contributionCount[requestId];
-        require(contributions < state.maxContributions, "MaxContributionsReached");
+        require(contributions < maxContrib, "MaxContributionsReached"); // Use cached values
 
         // Update state
-        state.contributionCount[requestId] = contributions + 1;
+        state.contributionCount[requestId] = contributions + 1; // Use cached value
+        // Cache accumulator before update
+        uint256 currentAccumulator = state.entropyAccumulator; // Read once
         state.entropyAccumulator = uint256(
             keccak256(
                 abi.encodePacked(
-                    state.entropyAccumulator,
+                    currentAccumulator, // Use cached value
                     entropyContribution,
                     contributor,
                     requestId
@@ -135,23 +145,23 @@ library CoreUtilsLib {
         );
         state.entropyMerkleRoot = keccak256(
             abi.encodePacked(
-                state.entropyAccumulator,
+                state.entropyAccumulator, // Read updated value
                 historicalHash
             )
         );
 
         // Check fulfillment conditions
-        if (state.contributionCount[requestId] >= state.minContributions) {
+        if (contributions + 1 >= minContrib) { // Use cached values
             randomValue = keccak256(
                 abi.encodePacked(
-                    state.entropyAccumulator,
+                    state.entropyAccumulator, // Read updated value
                     historicalHash,
                     requestId
                 )
             );
             fulfilled = true;
-            state.requests[requestId] = randomValue;
-            state.contributionCount[requestId] = 0;
+            state.requests[requestId] = randomValue; // Update request result
+            state.contributionCount[requestId] = 0; // Reset count (consider if this reset is intended logic)
         }
     }
 
@@ -180,9 +190,14 @@ library CoreUtilsLib {
         bytes32[32] storage history,
         uint256 historySize
     ) internal view returns (bool exists) {
-        for (uint256 i = 0; i < historySize; i++) {
-            if (history[i] == output) {
-                return true;
+        // Use unchecked for loop counter
+        unchecked {
+            // Ensure loop bound doesn't exceed actual array size (32)
+            uint256 bound = historySize > 32 ? 32 : historySize;
+            for (uint256 i = 0; i < bound; i++) {
+                if (history[i] == output) {
+                    return true;
+                }
             }
         }
         return false;
