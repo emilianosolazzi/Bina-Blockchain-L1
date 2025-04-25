@@ -41,10 +41,10 @@ contract TGBT is
     event MinterRemoved(address indexed minter);
     event TokensSlashed(address indexed slasher, address indexed account, uint256 amount, bytes32 reason); // Slashing event
     event TokensBurnedByBeacon(address indexed burner, address indexed account, uint256 amount, bytes32 reason); // Beacon burn event
-    event SlasherAdded(address indexed slasher); // <<< Added event
-    event SlasherRemoved(address indexed slasher); // <<< Added event
-    event BurnerAdded(address indexed burner); // <<< Added event
-    event BurnerRemoved(address indexed burner); // <<< Added event
+    event SlasherAdded(address indexed slasher); 
+    event SlasherRemoved(address indexed slasher);
+    event BurnerAdded(address indexed burner); 
+    event BurnerRemoved(address indexed burner); 
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -122,6 +122,53 @@ contract TGBT is
     }
 
     /**
+     * @notice Automatically slashes tokens based on violation metrics
+     * @dev Uses predefined rules to determine slash amounts for different violations
+     * @param account The address whose tokens will be slashed
+     * @param violationType The type of violation (mapped to predefined constants)
+     * @param severity Severity level of the violation (1-100)
+     * @return amountSlashed The amount that was actually slashed
+     */
+    function autoSlash(address account, uint8 violationType, uint8 severity) external onlyRole(SLASHER_ROLE) whenNotPaused returns (uint256 amountSlashed) {
+        require(account != address(0), "Zero address");
+        require(severity > 0 && severity <= 100, "Invalid severity");
+        
+        // Calculate slash amount based on violation type and severity
+        // Different violation types can have different base penalties
+        bytes32 reason;
+        uint256 baseAmount;
+        
+        if (violationType == 1) { // Protocol rule violation
+            baseAmount = 100 ether; // 100 tokens base penalty
+            reason = keccak256("RULE_VIOLATION");
+        } else if (violationType == 2) { // Invalid block submission
+            baseAmount = 500 ether; // 500 tokens base penalty
+            reason = keccak256("INVALID_BLOCK");
+        } else if (violationType == 3) { // Malicious behavior
+            baseAmount = 1000 ether; // 1000 tokens base penalty
+            reason = keccak256("MALICIOUS");
+        } else {
+            revert("Unknown violation type");
+        }
+        
+        // Scale by severity (1-100%)
+        amountSlashed = (baseAmount * severity) / 100;
+        
+        // Cap at actual balance
+        uint256 balance = balanceOf(account);
+        if (amountSlashed > balance) {
+            amountSlashed = balance;
+        }
+        
+        if (amountSlashed > 0) {
+            _burn(account, amountSlashed);
+            emit TokensSlashed(msg.sender, account, amountSlashed, reason);
+        }
+        
+        return amountSlashed;
+    }
+
+    /**
      * @notice Burns tokens from a specified account based on protocol rules (e.g., inactivity).
      * @dev Restricted to BURNER_ROLE. Typically called by the main protocol contract (e.g., Beacon).
      * @param account The address whose tokens will be burned.
@@ -134,6 +181,56 @@ contract TGBT is
         // The _burn function handles balance checks internally.
         _burn(account, amount);
         emit TokensBurnedByBeacon(msg.sender, account, amount, reason);
+    }
+    
+    /**
+     * @notice Automatically burn tokens based on predefined protocol rules
+     * @dev Different rule types have different burn formulas
+     * @param account The address whose tokens will be burned
+     * @param ruleType The type of protocol rule triggering the burn
+     * @param parameter Additional parameter specific to the rule type
+     * @return amountBurned The amount that was actually burned
+     */
+    function autoBurn(address account, uint8 ruleType, uint256 parameter) external onlyRole(BURNER_ROLE) whenNotPaused returns (uint256 amountBurned) {
+        require(account != address(0), "Zero address");
+        
+        bytes32 reason;
+        uint256 burnAmount;
+        
+        if (ruleType == 1) { // Inactivity burn
+            // Parameter = days of inactivity
+            uint256 inactiveDays = parameter;
+            require(inactiveDays > 30, "Inactivity period too short");
+            
+            // 1% burn per 30 days of inactivity beyond the first 30 days
+            uint256 burnPercent = (inactiveDays - 30) / 30 + 1;
+            if (burnPercent > 10) burnPercent = 10; // Cap at 10%
+            
+            burnAmount = (balanceOf(account) * burnPercent) / 100;
+            reason = keccak256("INACTIVITY");
+        } 
+        else if (ruleType == 2) { // Missed contributions
+            // Parameter = number of missed contributions
+            uint256 missed = parameter;
+            burnAmount = 5 ether * missed; // 5 tokens per missed contribution
+            reason = keccak256("MISSED_CONTRIBUTIONS");
+        }
+        else {
+            revert("Unknown rule type");
+        }
+        
+        // Cap at actual balance
+        uint256 balance = balanceOf(account);
+        if (burnAmount > balance) {
+            burnAmount = balance;
+        }
+        
+        if (burnAmount > 0) {
+            _burn(account, burnAmount);
+            emit TokensBurnedByBeacon(msg.sender, account, burnAmount, reason);
+        }
+        
+        return burnAmount;
     }
 
     // --- Admin Controls ---

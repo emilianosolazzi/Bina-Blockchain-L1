@@ -46,6 +46,8 @@ contract TemporalGradientBeacon is
     bytes32 public constant UPGRADER_ROLE = keccak256("UPGRADER_ROLE");
     bytes32 public constant EMERGENCY_ROLE = keccak256("EMERGENCY_ROLE");
     bytes32 public constant TOKENOMICS_ROLE = keccak256("TOKENOMICS_ROLE");
+    bytes32 public constant SLASHER_ROLE = keccak256("SLASHER_ROLE");
+    bytes32 public constant BURNER_ROLE = keccak256("BURNER_ROLE");
     uint256 public constant MIN_BLOOM_FILTER_SIZE = 128;
     uint256 public constant MAX_BLOOM_FILTER_SIZE = 65536;
     uint256 public constant MAX_BLOOM_FILTER_HASHES = 8;
@@ -58,6 +60,16 @@ contract TemporalGradientBeacon is
     uint256 public constant TOTAL_SUPPLY_CAP = 2_000_000_000 ether;
     uint256 public constant MINING_ALLOCATION = 700_000_000 ether;
     uint256 public constant MIN_EXPIRY_BLOCKS = 40000;
+    
+    // Auto-slashing constants
+    bytes32 public constant RULE_VIOLATION = keccak256("RULE_VIOLATION");
+    bytes32 public constant MALICIOUS_BEHAVIOR = keccak256("MALICIOUS");
+    bytes32 public constant INACTIVITY = keccak256("INACTIVITY");
+    bytes32 public constant MISSED_ENTROPY = keccak256("MISSED_ENTROPY");
+    uint8 public constant VIOLATION_TYPE_RULE = 1;
+    uint8 public constant VIOLATION_TYPE_MALICIOUS = 2;
+    uint8 public constant BURN_TYPE_INACTIVITY = 1;
+    uint8 public constant BURN_TYPE_MISSED = 2;
 
     // State variables
     ITGBT public tgbtToken;
@@ -90,7 +102,9 @@ contract TemporalGradientBeacon is
     mapping(uint8 => MiningLib.MiningPool) public miningPools;
     uint256 public bonusThreshold;
     uint16 public bonusMultiplier;
-    GovernanceLib.GovernanceContext internal governanceContext; // <<< Added Governance Context
+    GovernanceLib.GovernanceContext internal governanceContext; 
+    mapping(address => uint256) public lastActivityBlock;  
+    mapping(address => uint256) public missedContributions; 
 
     // Events
     event BeaconBlockMined(address indexed miner, bytes32 hmacOutput, uint256 reward, uint64 nonce, uint64 timestamp, uint8 poolId);
@@ -110,6 +124,8 @@ contract TemporalGradientBeacon is
     event TokenUpdated(address newToken);
     event EmergencyFeeParametersChanged(uint256 baseFee, uint256 feePerContributor); // <<< Added event
     event TokenomicsUpdate(uint256 indexed epochNumber, uint256 blockReward, uint256 blockNumber, bool isHalving);
+    event AutoSlashed(address indexed account, uint8 violationType, uint8 severity, uint256 amount);
+    event AutoBurned(address indexed account, uint8 burnType, uint256 parameter, uint256 amount);
 
     // Errors
     error ZeroToken();
@@ -169,15 +185,15 @@ contract TemporalGradientBeacon is
         __UUPSUpgradeable_init();
         __AccessControl_init();
         __EIP712_init("TemporalGradientBeacon", "1");
-
+        __AccessControl_init();
         require(_tgbtToken != address(0) && _tstakeToken != address(0), "ZeroToken");
         require(_difficulty >= MIN_DIFFICULTY && _difficulty <= MAX_DIFFICULTY, "InvalidDifficulty");
-
+        require(_tgbtToken != address(0) && _tstakeToken != address(0), "ZeroToken");
         tgbtToken = ITGBT(_tgbtToken);
         tstakeToken = ITGBT(_tstakeToken);
         targetDifficulty = _difficulty;
         outputExpiryBlocks = 50000;
-
+        targetDifficulty = _difficulty;
         // Initialize tokenomics
         epochState.currentEpoch = 0;
         epochState.blocksPerEpoch = _blocksPerEpoch;
@@ -186,7 +202,7 @@ contract TemporalGradientBeacon is
         epochState.halvingInterval = _halvingInterval;
         epochState.rewardAmount = _initialReward;
         totalMined = 0;
-
+        epochState.rewardAmount = _initialReward;
         // Initialize default mining pool
         governanceContext.miningPools[0] = MiningLib.MiningPool({
             targetDifficulty: _difficulty,
@@ -196,7 +212,7 @@ contract TemporalGradientBeacon is
         });
         governanceContext.poolCount = 1; // Use governance context pool count
         poolCount = 1; // Keep legacy poolCount for compatibility? Re-evaluate if needed.
-
+        governanceContext.poolCount = 1; // Use governance context pool count
         // Initialize genesis block
         genesisBlockOutput = keccak256(abi.encodePacked("GENESIS_BLOCK", msg.sender, block.timestamp, block.prevrandao));
         genesisBlockTimestamp = uint64(block.timestamp);
@@ -205,12 +221,14 @@ contract TemporalGradientBeacon is
         currentOutputIndex = 0;
         lastOutputTimestamp = uint64(block.timestamp);
         emit GenesisBlockCreated(genesisBlockOutput, genesisBlockTimestamp);
-
+        lastOutputTimestamp = uint64(block.timestamp);
         // Initialize output history
         for (uint256 i = 1; i < OUTPUT_HISTORY_SIZE; i++) {
             outputHistory[i] = genesisBlockOutput;
         }
-
+        for (uint256 i = 1; i < OUTPUT_HISTORY_SIZE; i++) {
+            outputHistory[i] = genesisBlockOutput;
+        }
         // Set mining parameters
         governanceContext.minBlockInterval = 5;
         governanceContext.minSubmissionsPerBlock = 1;
@@ -223,7 +241,7 @@ contract TemporalGradientBeacon is
         consensusThreshold = 70;
         minCommitmentAge = 5;
         maxCommitmentAge = 100;
-
+        minCommitmentAge = 5;
         // Initialize randomness system using RandomnessLib.State
         randomnessState.tgbtTokenAddress = _tgbtToken; // <<< Set token address
         randomnessState.baseEmergencyFee = 100 ether; // <<< Set base fee
@@ -232,17 +250,19 @@ contract TemporalGradientBeacon is
         randomnessState.minContributions = 3;
         randomnessState.maxContributions = 10;
         randomnessState.maxBatchSize = 20; // <<< Example batch size
-
+        randomnessState.maxContributions = 10;
         // Initialize bloom filter with size, numHashes, and salt
         bloomFilter = BloomFilterLib.createFilter(1024, 3, block.timestamp); // Added block.timestamp as salt
         outputCount = 1;
-
+        bloomFilter = BloomFilterLib.createFilter(1024, 3, block.timestamp); // Added block.timestamp as salt
         // Setup roles
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
         _grantRole(GOVERNANCE_ROLE, msg.sender);
         _grantRole(UPGRADER_ROLE, msg.sender);
         _grantRole(EMERGENCY_ROLE, msg.sender);
         _grantRole(TOKENOMICS_ROLE, msg.sender);
+        _grantRole(SLASHER_ROLE, msg.sender); 
+        _grantRole(BURNER_ROLE, msg.sender); 
     }
 
     /* ========== MINING FUNCTIONS ========== */
@@ -328,6 +348,8 @@ contract TemporalGradientBeacon is
         bytes32 secretValue,
         uint8 poolId
     ) external nonReentrant whenNotPaused {
+        _updateActivity(msg.sender);
+        
         MiningLib.RevealParams memory params = MiningLib.RevealParams({
             miner: msg.sender,
             previousOutput: previousOutput,
@@ -501,7 +523,7 @@ contract TemporalGradientBeacon is
      * @param proof The proof data.
      */
     function _verifyProof(bytes32 anonymousId, bytes calldata proof) internal pure { // Changed to pure for placeholder
-        // --- Implementation Required ---
+        // --- Implementation Required ----
         // Example: Decode proof, check against contract state, validate cryptographic elements.
         // If verification fails, revert.
         // require(isValidProof(anonymousId, proof), "VerificationFailed");
@@ -590,6 +612,7 @@ contract TemporalGradientBeacon is
      * @return requestId The ID of the newly created randomness request.
      */
     function requestRandomness(bytes32 userSeed) external nonReentrant whenNotPaused returns (uint256 requestId) {
+        _updateActivity(msg.sender);
         requestId = RandomnessLib.createRequest(randomnessState, msg.sender, userSeed);
         emit RandomnessRequested(requestId, msg.sender, userSeed);
         return requestId;
@@ -601,6 +624,7 @@ contract TemporalGradientBeacon is
      * @param entropyContribution The contributor's entropy value.
      */
     function contributeEntropy(uint256 requestId, bytes32 entropyContribution) external nonReentrant whenNotPaused {
+        _updateActivity(msg.sender);
         bool shouldFulfill = RandomnessLib.addContribution(randomnessState, requestId, msg.sender, entropyContribution);
 
         // If enough contributions are met, automatically try to fulfill
@@ -777,6 +801,7 @@ contract TemporalGradientBeacon is
      */
     function setEmergencyFeeParams(uint256 baseFee, uint256 perContributorFee) external onlyRole(GOVERNANCE_ROLE) {
         GovernanceLib.setEmergencyFeeParameters(randomnessState, baseFee, perContributorFee);
+        emit EmergencyFeeParametersChanged(baseFee, perContributorFee);
     }
 
     /**
@@ -786,6 +811,119 @@ contract TemporalGradientBeacon is
      */
     function setRandomnessContributionParams(uint256 minContributions, uint256 maxContributions) external onlyRole(GOVERNANCE_ROLE) {
         GovernanceLib.setContributionParameters(randomnessState, minContributions, maxContributions);
+    }
+
+    /* ========== AUTO SLASHING & BURNING ========== */
+
+    /**
+     * @notice Automatically slashes a miner's tokens based on violation metrics
+     * @param account The address to slash
+     * @param violationType The type of violation (mapped to constants)
+     * @param severity How severe the violation is (1-100)
+     * @return amount The amount slashed
+     */
+    function autoSlash(
+        address account, 
+        uint8 violationType, 
+        uint8 severity
+    ) external onlyRole(SLASHER_ROLE) whenNotPaused returns (uint256) {
+        require(severity > 0 && severity <= 100, "Invalid severity");
+        
+        bytes32 reason;
+        uint256 baseAmount;
+        
+        // Determine base penalty amount based on violation type
+        if (violationType == VIOLATION_TYPE_RULE) {
+            baseAmount = 100 ether; // 100 tokens base for rule violation
+            reason = RULE_VIOLATION;
+        } else if (violationType == VIOLATION_TYPE_MALICIOUS) {
+            baseAmount = 1000 ether; // 1000 tokens base for malicious behavior  
+            reason = MALICIOUS_BEHAVIOR;
+        } else {
+            revert("Invalid violation type");
+        }
+        
+        // Calculate actual slash amount based on severity
+        uint256 amountToSlash = (baseAmount * severity) / 100;
+        
+        // Slash tokens (will be capped at account balance by _burn)
+        uint256 balance = tgbtToken.balanceOf(account);
+        uint256 actualAmount = amountToSlash > balance ? balance : amountToSlash;
+        
+        if (actualAmount > 0) {
+            tgbtToken.slash(account, actualAmount, reason);
+            emit AutoSlashed(account, violationType, severity, actualAmount);
+        }
+           
+        return actualAmount;
+    }
+    
+    /**
+     * @notice Updates last activity timestamp for an account
+     * @dev Call this whenever an account interacts with the protocol
+     */
+    function _updateActivity(address account) internal {
+        lastActivityBlock[account] = block.number;
+    }
+    
+    /**
+     * @notice Check and potentially burn tokens due to inactivity
+     * @param account The address to check
+     */
+    function checkInactivity(address account) external whenNotPaused {
+        uint256 inactiveBlocks = block.number - lastActivityBlock[account];
+        uint256 inactiveDays = inactiveBlocks * 15 / 86400; // Approximate days (15s blocks)
+        
+        // Only burn if inactive for more than 30 days
+        if (inactiveDays <= 30) return;
+        
+        // Calculate 1% burn per 30 days of inactivity beyond the first 30
+        uint256 burnPercent = ((inactiveDays - 30) / 30) + 1;
+        if (burnPercent > 10) burnPercent = 10; // Cap at 10%
+        
+        uint256 balance = tgbtToken.balanceOf(account);
+        uint256 burnAmount = (balance * burnPercent) / 100;
+        
+        if (burnAmount > 0) {
+            tgbtToken.burnFromBeacon(account, burnAmount, INACTIVITY);
+            emit AutoBurned(account, BURN_TYPE_INACTIVITY, inactiveDays, burnAmount);
+        }
+        
+        // Reset activity counter
+        _updateActivity(account);
+    }
+    
+    /**
+     * @notice Record a missed entropy contribution and potentially burn tokens
+     * @param contributor Address that missed a contribution
+     */
+    function recordMissedContribution(address contributor) external onlyRole(BURNER_ROLE) whenNotPaused {
+        missedContributions[contributor]++;
+        
+        // Burn tokens if missed more than 3 contributions
+        if (missedContributions[contributor] >= 3) {
+            uint256 missedCount = missedContributions[contributor];
+            uint256 burnAmount = 5 ether * missedCount; // 5 tokens per miss
+            
+            uint256 balance = tgbtToken.balanceOf(contributor);
+            uint256 actualBurn = burnAmount > balance ? balance : burnAmount;
+            
+            if (actualBurn > 0) {
+                tgbtToken.burnFromBeacon(contributor, actualBurn, MISSED_ENTROPY);
+                emit AutoBurned(contributor, BURN_TYPE_MISSED, missedCount, actualBurn);
+            }
+            
+            // Reset missed counter after burning
+            missedContributions[contributor] = 0;
+        }
+    }
+    
+    /**
+     * @notice Reset missed contributions counter (governance function)
+     * @param account Address to reset counter for
+     */
+    function resetMissedContributions(address account) external onlyRole(GOVERNANCE_ROLE) {
+        missedContributions[account] = 0;
     }
 
     /* ========== UTILITY FUNCTIONS ========== */
