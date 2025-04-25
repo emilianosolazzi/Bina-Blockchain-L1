@@ -6,6 +6,7 @@ import axios from 'axios';
 
 const BEACON_API_URL = process.env.BEACON_API_URL || 'http://localhost:3000/api/v1/slot-spin';
 const PORT = process.env.BRIDGE_PORT || 7070;
+const GOVERNANCE_MODE = process.env.GOVERNANCE_MODE || 'active'; // Example: Read governance status
 
 // Start WebSocket server for physical machines
 const wss = new WebSocket.Server({ port: PORT }, () => {
@@ -20,6 +21,13 @@ wss.on('connection', (socket, req) => {
     try {
       const payload = JSON.parse(message);
       const { machineId, reels = 3, symbols = 10, seed, signature, address } = payload;
+
+      console.log(`ℹ️ Received spin request from ${machineId}. Governance Mode: ${GOVERNANCE_MODE}`); // Log governance mode
+
+      // Example: Check governance status before processing
+      if (GOVERNANCE_MODE !== 'active') {
+        throw new Error(`Bridge governance mode is '${GOVERNANCE_MODE}', rejecting request.`);
+      }
 
       // Forward to Beacon API
       const response = await axios.post(BEACON_API_URL, {

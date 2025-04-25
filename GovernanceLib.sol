@@ -18,7 +18,7 @@ library GovernanceLib {
     event MiningPoolUpdated(uint256 indexed poolId, uint256 targetDifficulty, uint256 emissionBucket);
     event MiningPoolDeactivated(uint256 indexed poolId);
     event BloomFilterReset(uint256 size, uint256 numHashes);
-    event RandomnessFeeChanged(uint256 oldFee, uint256 newFee);
+    event EmergencyFeeParametersChanged(uint256 baseFee, uint256 feePerContributor);
     
     // Errors
     error ZeroAddress();
@@ -156,13 +156,19 @@ library GovernanceLib {
         emit GovernanceParameterChanged("maxContributions", maxContributions);
     }
     
-    function setRandomnessFee(
+    /**
+     * @notice Sets the parameters for calculating the dynamic emergency fulfillment fee.
+     * @param state Storage reference to RandomnessLib state
+     * @param baseFee The base fee required for any emergency fulfillment.
+     * @param perContributorFee The additional fee charged per contributor to the request.
+     */
+    function setEmergencyFeeParameters(
         RandomnessLib.State storage state,
-        uint256 fee
-    ) internal returns (uint256 oldFee) {
-        oldFee = state.fee;
-        state.fee = fee;
-        emit RandomnessFeeChanged(oldFee, fee);
-        return oldFee;
+        uint256 baseFee,
+        uint256 perContributorFee
+    ) internal {
+        state.baseEmergencyFee = baseFee;
+        state.feePerContributor = perContributorFee;
+        emit EmergencyFeeParametersChanged(baseFee, perContributorFee);
     }
 }

@@ -15,13 +15,16 @@ import { BloomFilterLib } from "./BloomFilterLib.sol";
 import { MiningLib } from "./MiningLib.sol";
 import { TokenomicsLib } from "./TokenomicsLib.sol";
 import { StorageLib } from "./StorageLib.sol";
+import { RandomnessLib } from "./RandomnessLib.sol"; // <<< Added import
+import { GovernanceLib } from "./GovernanceLib.sol"; // <<< Added import (Needed for setting fee params)
+import { IERC20Upgradeable } from "@openzeppelin/contracts-upgradeable/token/ERC20/IERC20Upgradeable.sol"; // <<< Added import
 
 /**
- * @title EnhancedTemporalGradientBeacon
+ * @title TemporalGradientBeacon
  * @notice A temporal gradient beacon with mining, randomness generation, and governance features
  * @dev Uses UUPS upgrade pattern with role-based access control
  */
-contract EnhancedTemporalGradientBeacon is
+contract TemporalGradientBeacon is
     Initializable,
     Ownable2StepUpgradeable,
     ReentrancyGuardUpgradeable,
@@ -31,8 +34,7 @@ contract EnhancedTemporalGradientBeacon is
     EIP712Upgradeable
 {
     using ECDSAUpgradeable for bytes32;
-    using CoreUtilsLib for bytes32[];
-    using CoreUtilsLib for CoreUtilsLib.RandomnessState;
+    using RandomnessLib for RandomnessLib.State; // <<< Added line
     using BloomFilterLib for BloomFilterLib.Filter;
     using MiningLib for MiningLib.RevealParams;
     using TokenomicsLib for TokenomicsLib.EpochState;
@@ -62,7 +64,7 @@ contract EnhancedTemporalGradientBeacon is
     ITGBT public tstakeToken;
     uint256 public targetDifficulty;
     TokenomicsLib.EpochState internal epochState;
-    CoreUtilsLib.RandomnessState internal randomnessState;
+    RandomnessLib.State internal randomnessState; // <<< Changed type
     bytes32[OUTPUT_HISTORY_SIZE] public outputHistory;
     uint64 public currentOutputIndex;
     uint64 public lastOutputTimestamp;
@@ -88,6 +90,7 @@ contract EnhancedTemporalGradientBeacon is
     mapping(uint8 => MiningLib.MiningPool) public miningPools;
     uint256 public bonusThreshold;
     uint16 public bonusMultiplier;
+    GovernanceLib.GovernanceContext internal governanceContext; // <<< Added Governance Context
 
     // Events
     event BeaconBlockMined(address indexed miner, bytes32 hmacOutput, uint256 reward, uint64 nonce, uint64 timestamp, uint8 poolId);
@@ -105,7 +108,7 @@ contract EnhancedTemporalGradientBeacon is
     event MiningPoolUpdated(uint8 indexed poolId, uint256 targetDifficulty, uint256 emissionBucket);
     event MiningPoolDeactivated(uint8 indexed poolId);
     event TokenUpdated(address newToken);
-    event RandomnessFeeChanged(uint256 oldFee, uint256 newFee);
+    event EmergencyFeeParametersChanged(uint256 baseFee, uint256 feePerContributor); // <<< Added event
     event TokenomicsUpdate(uint256 indexed epochNumber, uint256 blockReward, uint256 blockNumber, bool isHalving);
 
     // Errors
@@ -117,6 +120,31 @@ contract EnhancedTemporalGradientBeacon is
     error MaxPoolsReached();
     error DuplicateAnonymousId();
     error VerificationFailed();
+    error InvalidDifficulty(); // <<< Added missing error from GovernanceLib usage
+    error InvalidEmission(); // <<< Added missing error from GovernanceLib usage
+    error InvalidMultiplier(); // <<< Added missing error from GovernanceLib usage
+    error InvalidThreshold(); // <<< Added missing error from GovernanceLib usage
+    error MinAgeTooLow(); // <<< Added missing error from GovernanceLib usage
+    error MaxAgeTooLow(); // <<< Added missing error from GovernanceLib usage
+    error MaxAgeTooHigh(); // <<< Added missing error from GovernanceLib usage
+    error ExpiryTooShort(); // <<< Added missing error from GovernanceLib usage
+    error InvalidTGBTAddress(); // <<< Added missing error from RandomnessLib usage
+    error TGBTTransferFailed(); // <<< Added missing error from RandomnessLib usage
+    error InvalidRequestID(); // <<< Added missing error from RandomnessLib usage
+    error RequestFulfilled(); // <<< Added missing error from RandomnessLib usage
+    error RequestExpired(); // <<< Added missing error from RandomnessLib usage
+    error AlreadyContributed(); // <<< Added missing error from RandomnessLib usage
+    error MaxContributionsReached(); // <<< Added missing error from RandomnessLib usage
+    error RequestDoesNotExist(); // <<< Added missing error from RandomnessLib usage
+    error RequestNotFulfilled(); // <<< Added missing error from RandomnessLib usage
+    error InvalidRequest(); // <<< Added missing error from RandomnessLib usage
+    error BatchTooLarge(); // <<< Added missing error from RandomnessLib usage
+    error ArrayLengthMismatch(); // <<< Added missing error from RandomnessLib usage
+    error InvalidSigner(); // <<< Added missing error from RandomnessLib usage
+    error InvalidBatchSize(); // <<< Added missing error from RandomnessLib usage
+    error MinContributionsTooLow(); // <<< Added missing error from GovernanceLib usage
+    error MaxLessThanMin(); // <<< Added missing error from GovernanceLib usage
+    error MaxContributionsTooHigh(); // <<< Added missing error from GovernanceLib usage
 
     /**
      * @notice Initializes the contract
@@ -140,7 +168,7 @@ contract EnhancedTemporalGradientBeacon is
         __Pausable_init();
         __UUPSUpgradeable_init();
         __AccessControl_init();
-        __EIP712_init("EnhancedTemporalGradientBeacon", "1");
+        __EIP712_init("TemporalGradientBeacon", "1");
 
         require(_tgbtToken != address(0) && _tstakeToken != address(0), "ZeroToken");
         require(_difficulty >= MIN_DIFFICULTY && _difficulty <= MAX_DIFFICULTY, "InvalidDifficulty");
@@ -160,13 +188,14 @@ contract EnhancedTemporalGradientBeacon is
         totalMined = 0;
 
         // Initialize default mining pool
-        miningPools[0] = MiningLib.MiningPool({
+        governanceContext.miningPools[0] = MiningLib.MiningPool({
             targetDifficulty: _difficulty,
             emissionBucket: MINING_ALLOCATION,
             totalMined: 0,
             active: true
         });
-        poolCount = 1;
+        governanceContext.poolCount = 1; // Use governance context pool count
+        poolCount = 1; // Keep legacy poolCount for compatibility? Re-evaluate if needed.
 
         // Initialize genesis block
         genesisBlockOutput = keccak256(abi.encodePacked("GENESIS_BLOCK", msg.sender, block.timestamp, block.prevrandao));
@@ -183,20 +212,29 @@ contract EnhancedTemporalGradientBeacon is
         }
 
         // Set mining parameters
+        governanceContext.minBlockInterval = 5;
+        governanceContext.minSubmissionsPerBlock = 1;
+        governanceContext.consensusThreshold = 70;
+        governanceContext.minCommitmentAge = 5;
+        governanceContext.maxCommitmentAge = 100;
+        // Set legacy vars for compatibility? Re-evaluate if needed.
         minBlockInterval = 5;
         minSubmissionsPerBlock = 1;
         consensusThreshold = 70;
         minCommitmentAge = 5;
         maxCommitmentAge = 100;
 
-        // Initialize randomness system
-        randomnessState.fee = 100 ether;
+        // Initialize randomness system using RandomnessLib.State
+        randomnessState.tgbtTokenAddress = _tgbtToken; // <<< Set token address
+        randomnessState.baseEmergencyFee = 100 ether; // <<< Set base fee
+        randomnessState.feePerContributor = 10 ether; // <<< Set per contributor fee (example value)
         randomnessState.expiryBlocks = 50000;
         randomnessState.minContributions = 3;
         randomnessState.maxContributions = 10;
+        randomnessState.maxBatchSize = 20; // <<< Example batch size
 
-        // Initialize bloom filter
-        bloomFilter = BloomFilterLib.createFilter(1024, 3);
+        // Initialize bloom filter with size, numHashes, and salt
+        bloomFilter = BloomFilterLib.createFilter(1024, 3, block.timestamp); // Added block.timestamp as salt
         outputCount = 1;
 
         // Setup roles
@@ -210,18 +248,49 @@ contract EnhancedTemporalGradientBeacon is
     /* ========== MINING FUNCTIONS ========== */
 
     /**
-     * @notice Submits a mining commitment
-     * @param commitHash Hash of the commitment parameters
+     * @notice Submits a mining commitment using an EIP-712 signature
+     * @param commitHash Hash of the commitment parameters (previousOutput, temporalSeed, nonce, signature, secretValue, miner)
      * @param poolId ID of the mining pool
+     * @param nonce Unique nonce for this commitment signature, obtained from the contract's `nonces` mapping for the miner
+     * @param deadline Unix timestamp after which the signature is invalid
+     * @param signature EIP-712 signature of the MiningCommitment struct
      */
-    function submitMiningCommitment(bytes32 commitHash, uint8 poolId) external nonReentrant whenNotPaused {
+    function submitMiningCommitment(
+        bytes32 commitHash,
+        uint8 poolId,
+        uint256 nonce,
+        uint256 deadline,
+        bytes calldata signature
+    ) external nonReentrant whenNotPaused {
         require(tstakeToken.balanceOf(msg.sender) >= REQUIRED_TSTAKE_AMOUNT, "InsufficientStake");
         require(poolId < poolCount && miningPools[poolId].active, "InvalidPoolId");
+        require(block.timestamp <= deadline, "DeadlineExpired");
+
+        // Verify EIP-712 signature
+        bytes32 digest = _hashTypedDataV4(
+            keccak256(
+                abi.encode(
+                    MINING_COMMITMENT_TYPEHASH,
+                    msg.sender,
+                    commitHash,
+                    poolId,
+                    nonce,
+                    deadline
+                )
+            )
+        );
+        address recoveredSigner = ECDSAUpgradeable.recover(digest, signature);
+        require(recoveredSigner == msg.sender, "InvalidSignature");
+        require(recoveredSigner != address(0), "ZeroAddressSigner"); // Ensure non-zero address recovery
+
+        // Check and increment nonce to prevent signature replay
+        require(nonces[msg.sender] == nonce, "InvalidNonce");
+        nonces[msg.sender]++; // Increment nonce after successful verification
 
         MiningLib.Commitment storage commitment = minerCommitments[msg.sender];
         require(
             commitment.commitHash == bytes32(0) ||
-            commitment.flags.revealed || // Changed from commitment.revealed
+            commitment.flags.revealed ||
             block.number > commitment.timestamp + maxCommitmentAge,
             "ActiveCommitmentExists"
         );
@@ -234,9 +303,10 @@ contract EnhancedTemporalGradientBeacon is
 
         commitment.commitHash = commitHash;
         commitment.timestamp = uint64(block.number);
-        commitment.flags.revealed = false; // Changed from commitment.revealed
+        commitment.flags.revealed = false;
         commitment.revealedValue = bytes32(0);
         commitment.poolId = poolId;
+        commitment.deadline = deadline; // Store deadline
 
         emit CommitmentSubmitted(msg.sender, commitHash, poolId);
     }
@@ -279,11 +349,19 @@ contract EnhancedTemporalGradientBeacon is
         // Validate commitment exists and is valid
         MiningLib.Commitment storage commitment = minerCommitments[params.miner];
         require(commitment.commitHash != bytes32(0), "NoCommitmentFound");
-        require(!commitment.flags.revealed, "CommitmentAlreadyRevealed"); // Changed from commitment.revealed
+        require(!commitment.flags.revealed, "CommitmentAlreadyRevealed");
         require(block.number >= commitment.timestamp + minCommitmentAge, "CommitmentTooRecent");
         require(block.number <= commitment.timestamp + maxCommitmentAge, "CommitmentExpired");
         require(commitment.poolId == params.poolId, "InvalidPoolId");
-        require(miningPools[params.poolId].active, "InvalidPoolId"); // Added pool activity check
+        require(miningPools[params.poolId].active, "InvalidPoolId");
+
+        // --- Potential Rate Limiting Enhancement ---
+        // Consider adding mechanisms here to mitigate DoS from excessive failed reveals, if needed:
+        // 1. Track failed reveal attempts per miner per time window.
+        // 2. Introduce a small TGBT cost for failed reveals (revert if balance insufficient).
+        // 3. Adjust min/maxCommitmentAge via governance based on observed behavior.
+        // Current checks (commit age, revealed status) provide baseline protection.
+        // ---
 
         // Verify commitment hash matches
         bytes32 computedHash = keccak256(
@@ -336,16 +414,6 @@ contract EnhancedTemporalGradientBeacon is
         BloomFilterLib.updateFilter(bloomFilter, hmacOutput);
         outputCount++;
 
-        // Update randomness accumulator
-        randomnessState.entropyAccumulator = uint256(
-            keccak256(abi.encodePacked(
-                randomnessState.entropyAccumulator,
-                hmacOutput,
-                block.timestamp,
-                block.prevrandao
-            ))
-        );
-
         // Check for epoch transition
         epochState.rewardAmount = TokenomicsLib.checkEpochTransition(epochState);
 
@@ -379,7 +447,7 @@ contract EnhancedTemporalGradientBeacon is
     }
 
     // Placeholder function for difficulty weight - replace with actual logic
-    function _getDifficultyWeight(address /* miner */) internal view returns (uint256) {
+    function _getDifficultyWeight(address /* miner */) internal pure returns (uint256) { // Changed to pure
         // Example: Return base weight for now. Implement logic based on stake, reputation, etc.
         return MiningLib.BASE_WEIGHT;
     }
@@ -428,19 +496,19 @@ contract EnhancedTemporalGradientBeacon is
 
     /**
      * @notice Placeholder internal function to verify the anonymous proof.
-     * @dev Needs implementation based on the specific proof system used.
+     * @dev Needs implementation based on the specific proof system used. Placeholder is 'pure', but real implementation likely needs 'view' to read state.
      * @param anonymousId The identifier submitted.
      * @param proof The proof data.
      */
-    function _verifyProof(bytes32 anonymousId, bytes calldata proof) internal view {
+    function _verifyProof(bytes32 anonymousId, bytes calldata proof) internal pure { // Changed to pure for placeholder
         // --- Implementation Required ---
         // Example: Decode proof, check against contract state, validate cryptographic elements.
         // If verification fails, revert.
         // require(isValidProof(anonymousId, proof), "VerificationFailed");
         // --- Placeholder ---
-        // Avoid unused variable warnings for now
-        bytes32 ignore1 = anonymousId;
-        bytes memory ignore2 = proof;
+        // Silence unused parameter warnings until implemented
+        anonymousId;
+        proof;
         // Revert("VerificationFailed"); // Uncomment and implement actual logic
     }
 
@@ -459,63 +527,128 @@ contract EnhancedTemporalGradientBeacon is
         // Replace with a proper stealth address generation mechanism.
     }
 
-    /* ========== POOL MANAGEMENT ========== */
+    /* ========== POOL MANAGEMENT (Using GovernanceLib) ========== */
 
     /**
-     * @notice Creates a new mining pool
-     * @param _targetDifficulty Initial difficulty target for the pool // Renamed parameter
+     * @notice Creates a new mining pool using GovernanceLib
+     * @param _targetDifficulty Initial difficulty target for the pool
      * @param emissionBucket Token allocation for this pool
      */
     function createMiningPool(
-        uint256 _targetDifficulty, // Renamed parameter
+        uint256 _targetDifficulty,
         uint256 emissionBucket
     ) external onlyRole(GOVERNANCE_ROLE) {
-        require(poolCount < MAX_POOLS, "MaxPoolsReached");
-        require(_targetDifficulty >= MIN_DIFFICULTY && _targetDifficulty <= MAX_DIFFICULTY, "InvalidDifficulty"); // Use renamed parameter
-        require(emissionBucket > 0 && totalMined + emissionBucket <= MINING_ALLOCATION, "InvalidEmission");
-
-        uint8 poolId = poolCount++;
-        miningPools[poolId] = MiningLib.MiningPool({
-            targetDifficulty: _targetDifficulty, // Use renamed parameter
-            emissionBucket: emissionBucket,
-            totalMined: 0,
-            active: true
-        });
-
-        emit MiningPoolCreated(poolId, _targetDifficulty, emissionBucket); // Use renamed parameter
+        // Delegate to GovernanceLib, passing necessary context and constants
+        uint256 poolId = GovernanceLib.createMiningPool(
+            governanceContext,
+            _targetDifficulty,
+            emissionBucket,
+            MAX_POOLS,
+            MIN_DIFFICULTY,
+            MAX_DIFFICULTY,
+            MINING_ALLOCATION
+        );
+        // Optionally update legacy poolCount if needed for compatibility
+        poolCount = uint8(governanceContext.poolCount);
+        // Copy pool data to legacy mapping if needed for compatibility
+        miningPools[uint8(poolId)] = governanceContext.miningPools[poolId];
     }
 
     /**
-     * @notice Updates mining pool parameters
+     * @notice Updates mining pool parameters using GovernanceLib
      * @param poolId ID of the pool to update
-     * @param _targetDifficulty New difficulty target // Renamed parameter
+     * @param _targetDifficulty New difficulty target
      * @param emissionBucket New emission bucket size
      * @param active Whether the pool should be active
      */
     function updateMiningPool(
-        uint8 poolId,
-        uint256 _targetDifficulty, // Renamed parameter
+        uint8 poolId, // Keep as uint8 for legacy compatibility?
+        uint256 _targetDifficulty,
         uint256 emissionBucket,
         bool active
     ) external onlyRole(GOVERNANCE_ROLE) {
-        require(poolId < poolCount, "InvalidPoolId");
-        require(_targetDifficulty >= MIN_DIFFICULTY && _targetDifficulty <= MAX_DIFFICULTY, "InvalidDifficulty"); // Use renamed parameter
-        require(emissionBucket > 0 && totalMined + emissionBucket <= MINING_ALLOCATION, "InvalidEmission");
+        // Delegate to GovernanceLib
+        GovernanceLib.updateMiningPool(
+            governanceContext,
+            poolId, // Pass uint8, GovernanceLib handles comparison correctly
+            _targetDifficulty,
+            emissionBucket,
+            active,
+            MIN_DIFFICULTY,
+            MAX_DIFFICULTY,
+            MINING_ALLOCATION
+        );
+        // Update legacy mapping if needed
+        miningPools[poolId] = governanceContext.miningPools[poolId];
+    }
 
-        miningPools[poolId].targetDifficulty = _targetDifficulty; // Use renamed parameter
-        miningPools[poolId].emissionBucket = emissionBucket;
-        miningPools[poolId].active = active;
+    /* ========== RANDOMNESS FUNCTIONS (Using RandomnessLib) ========== */
 
-        emit MiningPoolUpdated(poolId, _targetDifficulty, emissionBucket); // Use renamed parameter
-        if (!active) {
-            emit MiningPoolDeactivated(poolId);
+    /**
+     * @notice Requests a new random value.
+     * @param userSeed An arbitrary seed provided by the user.
+     * @return requestId The ID of the newly created randomness request.
+     */
+    function requestRandomness(bytes32 userSeed) external nonReentrant whenNotPaused returns (uint256 requestId) {
+        requestId = RandomnessLib.createRequest(randomnessState, msg.sender, userSeed);
+        emit RandomnessRequested(requestId, msg.sender, userSeed);
+        return requestId;
+    }
+
+    /**
+     * @notice Adds an entropy contribution to a pending randomness request.
+     * @param requestId The ID of the request to contribute to.
+     * @param entropyContribution The contributor's entropy value.
+     */
+    function contributeEntropy(uint256 requestId, bytes32 entropyContribution) external nonReentrant whenNotPaused {
+        bool shouldFulfill = RandomnessLib.addContribution(randomnessState, requestId, msg.sender, entropyContribution);
+
+        // If enough contributions are met, automatically try to fulfill
+        if (shouldFulfill) {
+            bytes32 historicalHash = CoreUtilsLib.getHistoricalOutputsHash(outputHistory); // Use CoreUtilsLib directly
+            // Note: entropyAccumulator is now managed within RandomnessLib state/functions
+            // We might need to pass it explicitly if fulfillRequest requires it, or adjust RandomnessLib
+            // Assuming fulfillRequest uses internal state for now.
+            bytes32 result = RandomnessLib.fulfillRequest(randomnessState, requestId, historicalHash, 0); // Pass 0 for accumulator for now
+            emit RandomnessFulfilled(requestId, result);
         }
+    }
+
+     /**
+     * @notice Retrieves the result for a fulfilled randomness request.
+     * @param requestId The ID of the request.
+     * @return The generated random value. Reverts if the request is not found or not fulfilled.
+     */
+    function getRandomResult(uint256 requestId) external view returns (bytes32) {
+        return RandomnessLib.getRandomness(randomnessState, requestId);
+    }
+
+    /**
+     * @notice Allows emergency fulfillment of a request by paying a TGBT fee.
+     * @param requestId The ID of the request to fulfill.
+     * @param entropyMerkleRoot A merkle root representing entropy state (if applicable).
+     */
+    function emergencyRandomnessFulfill(uint256 requestId, bytes32 entropyMerkleRoot) external nonReentrant onlyRole(EMERGENCY_ROLE) {
+        bytes32 historicalHash = CoreUtilsLib.getHistoricalOutputsHash(outputHistory);
+        // Note: entropyAccumulator is managed within RandomnessLib state/functions
+        // Pass 0 for accumulator for now, adjust if RandomnessLib requires external value
+        bytes32 result = RandomnessLib.emergencyFulfill(
+            randomnessState,
+            requestId,
+            historicalHash,
+            0, // Pass 0 for accumulator
+            entropyMerkleRoot,
+            address(this),
+            IERC20Upgradeable(randomnessState.tgbtTokenAddress), // Cast token address
+            msg.sender // Caller pays the fee
+        );
+        emit RandomnessFulfilled(requestId, result);
     }
 
     /* ========== VIEW FUNCTIONS ========== */
 
     /**
-     * @notice Gets information about a mining pool
+     * @notice Gets information about a mining pool (using legacy mapping for now)
      * @param poolId ID of the pool to query
      * @return difficulty Current difficulty target
      * @return emission Remaining emission allocation
@@ -528,8 +661,8 @@ contract EnhancedTemporalGradientBeacon is
         uint256 mined, 
         bool active
     ) {
-        require(poolId < poolCount, "InvalidPoolId");
-        MiningLib.MiningPool storage pool = miningPools[poolId];
+        require(poolId < poolCount, "InvalidPoolId"); // Use legacy poolCount
+        MiningLib.MiningPool storage pool = miningPools[poolId]; // Use legacy mapping
         return (
             pool.targetDifficulty,
             pool.emissionBucket - pool.totalMined,
@@ -539,7 +672,7 @@ contract EnhancedTemporalGradientBeacon is
     }
 
     /**
-     * @notice Gets the current mining challenge
+     * @notice Gets the current mining challenge (using legacy mapping for now)
      * @param poolId ID of the pool
      * @return outputs Array of recent outputs
      * @return difficulty Current difficulty target
@@ -548,27 +681,44 @@ contract EnhancedTemporalGradientBeacon is
         bytes32[] memory outputs, 
         uint256 difficulty
     ) {
-        require(poolId < poolCount && miningPools[poolId].active, "InvalidPoolId");
+        require(poolId < poolCount && miningPools[poolId].active, "InvalidPoolId"); // Use legacy mapping/count
         bytes32[] memory history = new bytes32[](OUTPUT_HISTORY_SIZE);
         for (uint256 i = 0; i < OUTPUT_HISTORY_SIZE; i++) {
             history[i] = outputHistory[i];
         }
-        return (history, miningPools[poolId].targetDifficulty);
+        return (history, miningPools[poolId].targetDifficulty); // Use legacy mapping
     }
 
-    /* ========== GOVERNANCE FUNCTIONS ========== */
+    /**
+     * @notice Gets the state of a randomness request.
+     * @param requestId The ID of the request.
+     * @return requester The address that initiated the request.
+     * @return timestamp The block timestamp when the request was made.
+     * @return fulfilled Whether the request has been fulfilled.
+     * @return contributionsCount The number of contributions received so far.
+     */
+    function getRandomRequestState(uint256 requestId)
+        external
+        view
+        returns (address requester, uint256 timestamp, bool fulfilled, uint256 contributionsCount)
+    {
+        return RandomnessLib.getRequestState(randomnessState, requestId);
+    }
+
+    /* ========== GOVERNANCE FUNCTIONS (Using GovernanceLib where applicable) ========== */
 
     /**
-     * @notice Sets bonus parameters for mining rewards
+     * @notice Sets bonus parameters for mining rewards (using GovernanceLib context)
      * @param multiplier Bonus multiplier (percentage)
      * @param threshold Difficulty threshold for bonus
      */
     function setBonusParameters(
-        uint16 multiplier, 
+        uint16 multiplier,
         uint256 threshold
     ) external onlyRole(GOVERNANCE_ROLE) {
-        require(multiplier >= 100 && multiplier <= MAX_BONUS_MULTIPLIER, "InvalidMultiplier");
-        require(threshold > 1, "InvalidThreshold");
+        // Delegate to GovernanceLib
+        GovernanceLib.setBonusParameters(governanceContext, multiplier, threshold, MAX_BONUS_MULTIPLIER);
+        // Update legacy vars if needed
         bonusMultiplier = multiplier;
         bonusThreshold = threshold;
     }
@@ -580,6 +730,7 @@ contract EnhancedTemporalGradientBeacon is
     function setTGBTToken(address newToken) external onlyRole(GOVERNANCE_ROLE) {
         require(newToken != address(0), "ZeroAddress");
         tgbtToken = ITGBT(newToken);
+        randomnessState.tgbtTokenAddress = newToken; // <<< Also update in randomness state
         emit TokenUpdated(newToken);
     }
 
@@ -594,16 +745,17 @@ contract EnhancedTemporalGradientBeacon is
     }
 
     /**
-     * @notice Sets output expiry blocks
+     * @notice Sets output expiry blocks (using GovernanceLib context)
      * @param blocks Number of blocks before outputs expire
      */
     function setOutputExpiryBlocks(uint64 blocks) external onlyRole(GOVERNANCE_ROLE) {
         require(blocks >= MIN_EXPIRY_BLOCKS, "ExpiryTooShort");
-        outputExpiryBlocks = blocks;
+        governanceContext.outputExpiryBlocks = blocks; // Use governance context
+        outputExpiryBlocks = blocks; // Update legacy var if needed
     }
 
     /**
-     * @notice Sets commit-reveal parameters
+     * @notice Sets commit-reveal parameters (using GovernanceLib context)
      * @param minAge Minimum blocks before reveal
      * @param maxAge Maximum blocks before commitment expires
      */
@@ -611,11 +763,29 @@ contract EnhancedTemporalGradientBeacon is
         uint8 minAge, 
         uint16 maxAge
     ) external onlyRole(GOVERNANCE_ROLE) {
-        require(minAge >= 3, "MinAgeTooLow");
-        require(maxAge >= minAge * 2, "MaxAgeTooLow");
-        require(maxAge <= 1000, "MaxAgeTooHigh");
+        // Delegate to GovernanceLib
+        GovernanceLib.setCommitRevealParameters(governanceContext, minAge, maxAge);
+        // Update legacy vars if needed
         minCommitmentAge = minAge;
         maxCommitmentAge = maxAge;
+    }
+
+    /**
+     * @notice Sets the parameters for the dynamic emergency randomness fulfillment fee.
+     * @param baseFee The base fee in TGBT.
+     * @param perContributorFee The additional fee per contributor in TGBT.
+     */
+    function setEmergencyFeeParams(uint256 baseFee, uint256 perContributorFee) external onlyRole(GOVERNANCE_ROLE) {
+        GovernanceLib.setEmergencyFeeParameters(randomnessState, baseFee, perContributorFee);
+    }
+
+    /**
+     * @notice Sets the contribution parameters for randomness requests.
+     * @param minContributions Minimum required contributions.
+     * @param maxContributions Maximum allowed contributions.
+     */
+    function setRandomnessContributionParams(uint256 minContributions, uint256 maxContributions) external onlyRole(GOVERNANCE_ROLE) {
+        GovernanceLib.setContributionParameters(randomnessState, minContributions, maxContributions);
     }
 
     /* ========== UTILITY FUNCTIONS ========== */

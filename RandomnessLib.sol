@@ -2,6 +2,8 @@
 pragma solidity ^0.8.28;
 
 import { ECDSAUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/cryptography/ECDSAUpgradeable.sol";
+import { IERC20Upgradeable } from "@openzeppelin/contracts-upgradeable/token/ERC20/IERC20Upgradeable.sol"; // Added import
+import { MerkleProofUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/cryptography/MerkleProofUpgradeable.sol"; // Assuming MerkleProof might be used
 
 /**
  * @title RandomnessLib
@@ -34,7 +36,9 @@ library RandomnessLib {
     }
     
     struct State {
-        uint256 fee;
+        uint256 baseEmergencyFee; // Base fee amount in TGBT tokens for emergency fulfill
+        uint256 feePerContributor; // Additional fee per contributor for emergency fulfill
+        address tgbtTokenAddress; // Address of the TGBT token contract
         uint256 expiryBlocks;
         uint256 minContributions;
         uint256 maxContributions;
@@ -62,6 +66,9 @@ library RandomnessLib {
     error ArrayLengthMismatch();
     error InvalidSigner();
     error InvalidBatchSize();
+    error TGBTTransferFailed(); // Added error
+    error InvalidTGBTAddress(); // Added error
+    error MinContributionsNotMet(); // Added error
     
     // Create a new randomness request
     function createRequest(
@@ -125,63 +132,24 @@ library RandomnessLib {
         bytes32 historicalOutputsHash,
         uint256 entropyAccumulator
     ) internal returns (bytes32 randomValue) {
-        // Cache request in memory to avoid multiple SLOAD operations
-        Request storage requestStorage = self.requests[requestId];
+        require(self.requests[requestId].requester != address(0), "RequestDoesNotExist");
+        require(!self.requests[requestId].fulfilled, "RequestFulfilled");
+        require(block.number <= self.requests[requestId].timestamp + self.expiryBlocks, "RequestExpired");
+        require(self.requests[requestId].contributionsCount >= self.minContributions, "MinContributionsNotMet");
 
-        // --- Arbitrum Optimization: Cache storage reads ---
-        bool fulfilled = requestStorage.fulfilled;
-        address requester = requestStorage.requester;
-        uint256 timestamp = requestStorage.timestamp;
-        uint256 expiry = self.expiryBlocks;
-        uint256 contribCount = requestStorage.contributionsCount;
-        uint256 minContrib = self.minContributions;
-        // --- End Optimization ---
-
-        // Validate request (combine checks to reduce jumps)
-        bool isValid = requestId < self.requestCount &&
-                      !fulfilled && // Use cached value
-                      requester != address(0) && // Use cached value
-                      block.number <= timestamp + expiry && // Use cached values
-                      contribCount >= minContrib; // Use cached values
-
-        if (!isValid) revert InvalidRequest();
-
-        // Collect contributions - optimize by reading length once
-        bytes32[] memory contributions = new bytes32[](contribCount); // Use cached value
-
-        // Use unchecked for loop counter
-        unchecked {
-            for (uint i = 0; i < contribCount; i++) { // Use cached value
-                contributions[i] = requestStorage.entropyContributions[i];
-            }
-        }
-
-        // --- Potential ZKP VRF Integration Point ---
-        // ... (no changes needed here for Arbitrum optimization) ...
-        // --- End ZKP VRF Integration Point ---
-
-        // --- Current Hashing Method ---
-        bytes memory randomnessInput = abi.encodePacked(
-            historicalOutputsHash,
-            requestStorage.userSeed, // Read from storage (or cache if read multiple times)
-            requester, // Use cached value
-            timestamp, // Use cached value
-            blockhash(block.number - 1),
-            block.prevrandao,
-            block.timestamp,
-            entropyAccumulator,
-            keccak256(abi.encodePacked(contributions))
+        randomValue = keccak256(
+            abi.encodePacked(
+                entropyAccumulator,
+                historicalOutputsHash,
+                requestId,
+                self.requests[requestId].requester,
+                self.requests[requestId].userSeed,
+                self.requests[requestId].timestamp
+            )
         );
 
-        // Generate random value
-        randomValue = _generateRandomValue(self, randomnessInput);
-        // --- End Current Hashing Method ---
-
-        // Update request
-        requestStorage.fulfilled = true;
-        requestStorage.result = randomValue;
-
-        return randomValue;
+        self.requests[requestId].fulfilled = true;
+        self.requests[requestId].result = randomValue;
     }
     
     // Generate a random value and handle potential collisions
@@ -345,43 +313,60 @@ library RandomnessLib {
         return (isValid, id, req, res);
     }
     
-    // Emergency fulfill a randomness request
+    /**
+     * @notice Emergency fulfill a randomness request, requiring a TGBT fee calculated dynamically.
+     * @param self Storage reference
+     * @param requestId The ID of the request to fulfill
+     * @param historicalOutputsHash Hash of historical outputs
+     * @param entropyAccumulator Accumulated entropy value
+     * @param entropyMerkleRoot Merkle root of entropy contributions
+     * @param contractAddress The address of the main contract
+     * @param tgbtToken Instance of the TGBT token contract
+     * @param caller The address initiating the emergency fulfill (and paying the fee)
+     * @return randomValue The generated random value
+     */
     function emergencyFulfill(
         State storage self,
         uint256 requestId,
         bytes32 historicalOutputsHash,
         uint256 entropyAccumulator,
         bytes32 entropyMerkleRoot,
-        address contractAddress
+        address contractAddress,
+        IERC20Upgradeable tgbtToken, // Added parameter
+        address caller // Added parameter
     ) internal returns (bytes32 randomValue) {
-        if (requestId >= self.requestCount) revert InvalidRequestID();
-        Request storage request = self.requests[requestId];
-        
-        if (request.fulfilled) revert RequestFulfilled();
-        if (request.requester == address(0)) revert InvalidRequest();
-        
-        // Generate special emergency randomness using all available entropy
-        bytes memory randomnessInput = abi.encodePacked(
-            historicalOutputsHash,
-            request.userSeed,
-            request.requester,
-            request.timestamp,
-            blockhash(block.number - 1),
-            block.prevrandao,
-            block.timestamp,
-            entropyAccumulator,
-            entropyMerkleRoot,
-            contractAddress
+        require(self.requests[requestId].requester != address(0), "RequestDoesNotExist");
+        require(!self.requests[requestId].fulfilled, "RequestFulfilled");
+
+        uint256 fee = calculateEmergencyFee(self, self.requests[requestId].contributionsCount);
+
+        require(tgbtToken.transferFrom(caller, contractAddress, fee), "TGBTTransferFailed");
+
+        randomValue = keccak256(
+            abi.encodePacked(
+                entropyAccumulator,
+                historicalOutputsHash,
+                requestId,
+                self.requests[requestId].requester,
+                self.requests[requestId].userSeed,
+                self.requests[requestId].timestamp,
+                entropyMerkleRoot,
+                "EMERGENCY"
+            )
         );
-        
-        // Generate random value
-        randomValue = _generateRandomValue(self, randomnessInput);
-        
-        // Update request
-        request.fulfilled = true;
-        request.result = randomValue;
-        
-        return randomValue;
+
+        self.requests[requestId].fulfilled = true;
+        self.requests[requestId].result = randomValue;
+    }
+    
+    /**
+     * @notice Calculates the emergency fulfillment fee. Helper function to reduce stack usage in emergencyFulfill.
+     * @param state Storage reference to the RandomnessState.
+     * @param contributionsCount Number of contributions received for the request.
+     * @return The calculated fee amount.
+     */
+    function calculateEmergencyFee(State storage state, uint256 contributionsCount) internal view returns (uint256) {
+        return state.baseEmergencyFee + (contributionsCount * state.feePerContributor);
     }
     
     // Process batch randomness requests

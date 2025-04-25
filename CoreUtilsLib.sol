@@ -6,22 +6,10 @@ import { ECDSAUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/cryp
 /**
  * @title CoreUtilsLib
  * @notice Consolidated utility functions for EnhancedTemporalGradientBeacon
- * @dev Provides core utilities for randomness generation, output history management, and cryptographic operations
+ * @dev Provides core utilities for output history management and cryptographic operations
  */
 library CoreUtilsLib {
     using ECDSAUpgradeable for bytes32;
-
-    struct RandomnessState {
-        uint256 fee;
-        uint64 expiryBlocks;
-        uint8 minContributions;
-        uint8 maxContributions;
-        uint256 entropyAccumulator;
-        bytes32 entropyMerkleRoot;
-        mapping(uint256 => bytes32) requests;
-        mapping(uint256 => uint8) contributionCount;
-        uint256 requestCount;
-    }
 
     /**
      * @notice Creates a new bytes32 array of specified size
@@ -63,119 +51,6 @@ library CoreUtilsLib {
         uint64 newIndex = (currentOutputIndex + 1) % 32;
         outputHistory[newIndex] = newOutput;
         return newIndex;
-    }
-
-    /**
-     * @notice Creates a new randomness request
-     * @param state Storage reference to the RandomnessState
-     * @param requester Address of the requesting account
-     * @param userSeed User-provided seed value
-     * @param historicalHash Hash of current output history
-     * @return requestId The ID of the new request
-     */
-    function createRequest(
-        RandomnessState storage state,
-        address requester,
-        bytes32 userSeed,
-        bytes32 historicalHash
-    ) internal returns (uint256) {
-        uint256 requestId = state.requestCount++;
-        state.requests[requestId] = keccak256(
-            abi.encodePacked(
-                requester,
-                userSeed,
-                block.timestamp,
-                historicalHash
-            )
-        );
-        state.contributionCount[requestId] = 0;
-        return requestId;
-    }
-
-    /**
-     * @notice Processes an entropy contribution for a randomness request
-     * @param state Storage reference to the RandomnessState
-     * @param requestId ID of the request being contributed to
-     * @param entropyContribution The entropy value being contributed
-     * @param entropySignature Cryptographic signature of the contribution
-     * @param contributor Address of the contributing account
-     * @param historicalHash Hash of current output history
-     * @return fulfilled Whether the request is now fulfilled
-     * @return randomValue The final random value if fulfilled
-     */
-    function contributeEntropy(
-        RandomnessState storage state,
-        uint256 requestId,
-        bytes32 entropyContribution,
-        bytes calldata entropySignature,
-        address contributor,
-        bytes32 historicalHash
-    ) internal returns (bool fulfilled, bytes32 randomValue) {
-        // Validate request exists
-        bytes32 requestHash = state.requests[requestId]; // Read once
-        require(requestHash != bytes32(0), "InvalidRequestId");
-
-        // Verify cryptographic signature
-        bytes32 signedMessage = entropyContribution.toEthSignedMessageHash();
-        address recovered = signedMessage.recover(entropySignature);
-        require(recovered == contributor, "InvalidSignature");
-
-        // --- Arbitrum Optimization: Cache storage reads ---
-        uint8 maxContrib = state.maxContributions;
-        uint8 minContrib = state.minContributions;
-        uint8 contributions = state.contributionCount[requestId]; // Read count once
-        // --- End Optimization ---
-
-        // Enforce contribution limits
-        require(contributions < maxContrib, "MaxContributionsReached"); // Use cached values
-
-        // Update state
-        state.contributionCount[requestId] = contributions + 1; // Use cached value
-        // Cache accumulator before update
-        uint256 currentAccumulator = state.entropyAccumulator; // Read once
-        state.entropyAccumulator = uint256(
-            keccak256(
-                abi.encodePacked(
-                    currentAccumulator, // Use cached value
-                    entropyContribution,
-                    contributor,
-                    requestId
-                )
-            )
-        );
-        state.entropyMerkleRoot = keccak256(
-            abi.encodePacked(
-                state.entropyAccumulator, // Read updated value
-                historicalHash
-            )
-        );
-
-        // Check fulfillment conditions
-        if (contributions + 1 >= minContrib) { // Use cached values
-            randomValue = keccak256(
-                abi.encodePacked(
-                    state.entropyAccumulator, // Read updated value
-                    historicalHash,
-                    requestId
-                )
-            );
-            fulfilled = true;
-            state.requests[requestId] = randomValue; // Update request result
-            state.contributionCount[requestId] = 0; // Reset count (consider if this reset is intended logic)
-        }
-    }
-
-    /**
-     * @notice Retrieves the result of a randomness request
-     * @param state Storage reference to the RandomnessState
-     * @param requestId ID of the request to query
-     * @return The random value if available, or zero if not fulfilled
-     */
-    function getRandomness(
-        RandomnessState storage state,
-        uint256 requestId
-    ) internal view returns (bytes32) {
-        return state.requests[requestId];
     }
 
     /**
