@@ -219,9 +219,13 @@ library BloomFilterLib {
         
         // Use assembly for efficient loop zeroing
         assembly {
-            let slot := filter.buckets.slot
+            // Calculate the slot for the dynamic array
+            mstore(0x0, 0) // First slot of the struct Filter (buckets field is at index 0)
+            let bucketsSlot := keccak256(0x0, 0x20) // Get array's slot
+            
+            // Zero out all buckets in the array
             for { let i := 0 } lt(i, size) { i := add(i, 1) } {
-                sstore(add(slot, i), 0)
+                sstore(add(bucketsSlot, i), 0)
             }
         }
         
@@ -241,28 +245,32 @@ library BloomFilterLib {
      */
     function resetFilter(Filter storage filter, uint256 newSize, uint256 newNumHashes, uint256 newSalt) internal {
         validateFilterParams(newSize, newNumHashes);
-        uint256 oldSize = filter.size;
 
         // Delete old buckets for gas refund (critical at large scales)
         assembly {
-            let slot := filter.buckets.slot
+            // Calculate the slot for the dynamic array
+            mstore(0x0, 0) // First slot of the struct Filter (buckets field is at index 0)
+            let bucketsSlot := keccak256(0x0, 0x20) // Get array's slot
+            
             // Get current array length
-            let length := sload(slot)
+            let length := sload(bucketsSlot)
             
             // Delete length value
-            sstore(slot, 0)
+            sstore(bucketsSlot, 0)
             
             // Delete array elements
             for { let i := 0 } lt(i, length) { i := add(i, 1) } {
-                sstore(add(slot, add(i, 1)), 0)
+                sstore(add(bucketsSlot, add(i, 1)), 0)
             }
         }
 
         // Create and store new buckets
         bytes32[] storage buckets = filter.buckets;
         assembly {
-            // Set new length
-            sstore(buckets.slot, newSize)
+            // Set new length - Calculate the slot again for consistency
+            mstore(0x0, 0) // First slot of the struct Filter (buckets field is at index 0)
+            let bucketsSlot := keccak256(0x0, 0x20) // Get array's slot
+            sstore(bucketsSlot, newSize) // Set new length
         }
         
         // Initialize new array elements to zero
