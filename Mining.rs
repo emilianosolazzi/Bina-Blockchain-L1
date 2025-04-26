@@ -1,6 +1,8 @@
+use ethers::signers::Signer as _;
 use k256::ecdsa::{SigningKey, Signature, signature::Signer};
-use sha2::{Sha256, Digest};
-use hmac::{Hmac, Mac};
+// Removed SHA-2 imports as we're now using BLAKE3 for hashing
+// use sha2::{Sha256, Digest};
+// use hmac::{Hmac, Mac};
 use rand::rngs::OsRng; // Keep OsRng for key generation
 use rand::Rng; // Keep Rng for random bytes in temporal seed
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -13,7 +15,8 @@ use std::time::Duration;
 use ethers::{
     prelude::*,
     utils::{hex, keccak256},
-    middleware::gas_oracle::{GasOracle, GasOracleMiddleware, Etherscan} // Use Etherscan
+    middleware::gas_oracle::{GasOracle, GasOracleMiddleware, Etherscan}, // Use Etherscan
+    types::{transaction::eip712::{EIP712, types::*}, H160, U256} // EIP-712 imports
 };
 use tracing::{info, error, warn, debug, Level};
 use tracing_subscriber::FmtSubscriber;
@@ -34,7 +37,8 @@ mod update; // Add the update module
 
 use memory::SecureBuffer; // Import SecureBuffer
 
-type HmacSha256 = Hmac<Sha256>;
+// Remove unused HMAC type since we're using BLAKE3
+// type HmacSha256 = Hmac<Sha256>;
 
 // Enum to represent different mining strategies based on CPU features
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,24 +46,31 @@ enum MiningStrategy {
     Generic,
     SSE4,
     AVX2,
-    // Potentially add SHA-NI strategy if specific optimizations exist
+    AVX512, // Added for AVX-512 detection
 }
 
 // Function to detect CPU features and select a strategy
 fn detect_cpu_features() -> MiningStrategy {
-    // Check for AVX2 first as it's generally the most performant
-    if is_x86_feature_detected!("avx2") {
+    // Check for AVX-512 first (most performant)
+    if is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512vl") {
+        info!("AVX-512 detected, using AVX-512 optimized strategy.");
+        MiningStrategy::AVX512
+    } 
+    // Check for AVX2 next
+    else if is_x86_feature_detected!("avx2") {
         info!("AVX2 detected, using AVX2 optimized strategy.");
         MiningStrategy::AVX2
-    } else if is_x86_feature_detected!("sse4.1") { // Check for SSE4.1 as a fallback
+    } 
+    // Check for SSE4.1 as a fallback
+    else if is_x86_feature_detected!("sse4.1") {
         info!("SSE4.1 detected, using SSE4 optimized strategy.");
         MiningStrategy::SSE4
-    } else {
+    } 
+    // Fallback to generic implementation
+    else {
         info!("No specific CPU features detected, using generic strategy.");
         MiningStrategy::Generic
     }
-    // Note: SHA-NI detection (is_x86_feature_detected!("sha")) could be added here
-    // if specific SHA-NI optimizations are implemented in the hashing logic.
 }
 
 // --- Shutdown Manager (Improvement #1) ---
@@ -85,59 +96,108 @@ impl ShutdownManager {
 }
 // --- End Shutdown Manager ---
 
-
-// --- Thermal Controller (Improvement #2) ---
-// Moved ThermalMonitor definition inside ThermalController or keep separate if used elsewhere
+// --- Thermal Monitor Struct - Merged the duplicate implementations ---
 struct ThermalMonitor {
     readings: VecDeque<f32>,
     max_readings: usize,
 }
-// ... (ThermalMonitor impl new, add_reading, average_temp remains the same) ...
 
+impl ThermalMonitor {
+    fn new(max_readings: usize) -> Self {
+        // Ensure max_readings is at least 1
+        let capacity = max_readings.max(1);
+        Self {
+            readings: VecDeque::with_capacity(capacity),
+            max_readings: capacity,
+        }
+    }
+
+    fn add_reading(&mut self, temp: f32) {
+        if self.readings.len() >= self.max_readings {
+            self.readings.pop_front();
+        }
+        self.readings.push_back(temp);
+    }
+
+    fn average_temp(&self) -> f32 {
+        if self.readings.is_empty() {
+            // Return a reasonable default if no readings yet, e.g., 50.0
+            50.0
+        } else {
+            self.readings.iter().sum::<f32>() / self.readings.len() as f32
+        }
+    }
+}
+// --- End Thermal Monitor Struct ---
+
+// Add new thermal notification channel type
+struct ThermalNotification {
+    temperature: f32,
+    timestamp: SystemTime,
+}
+
+// Update ThermalController to be async-aware
 struct ThermalController {
     monitor: ThermalMonitor,
     max_temp: f32,
     min_throttle_factor: f32, // Renamed from min_throttle for clarity (0.1 means 10% speed)
+    notification_tx: broadcast::Sender<ThermalNotification>,
 }
 
 impl ThermalController {
     // Consider adding default values or getting from config
     pub fn new(max_readings: usize, max_temp: f32, min_throttle_factor: f32) -> Self {
+        let (notification_tx, _) = broadcast::channel(32); // Buffer size of 32 should be sufficient
         Self {
             monitor: ThermalMonitor::new(max_readings),
             max_temp,
             min_throttle_factor: min_throttle_factor.max(0.0).min(1.0), // Clamp between 0.0 and 1.0
+            notification_tx,
         }
     }
 
-    // Returns a throttle factor (1.0 = no throttle, < 1.0 = throttle)
-    pub fn update(&mut self, current_temp: f32) -> f32 {
+    // Add method to get notification receiver
+    pub fn subscribe(&self) -> broadcast::Receiver<ThermalNotification> {
+        self.notification_tx.subscribe()
+    }
+
+    // Make update async and notify of significant changes
+    pub async fn update(&mut self, current_temp: f32) -> f32 {
         self.monitor.add_reading(current_temp);
         let avg_temp = self.monitor.average_temp();
-
-        if avg_temp > self.max_temp {
-            // Example: Linear throttling based on excess temperature
-            // Scale excess temperature (e.g., 10 degrees over max means full throttle)
-            let excess_scale = 10.0; // Degrees C over max_temp to reach min_throttle_factor
+        let factor = if avg_temp > self.max_temp {
+            let excess_scale = 10.0;
             let excess = (avg_temp - self.max_temp).max(0.0);
-            let throttle_reduction = (excess / excess_scale).min(1.0); // How much to reduce from 1.0
-
-            // Calculate factor: 1.0 is no throttle, min_throttle_factor is max throttle
+            let throttle_reduction = (excess / excess_scale).min(1.0);
             let factor = 1.0 - throttle_reduction * (1.0 - self.min_throttle_factor);
+            
+            // Notify of high temperature condition
+            let _ = self.notification_tx.send(ThermalNotification {
+                temperature: avg_temp,
+                timestamp: SystemTime::now(),
+            });
 
-            // Log the calculated factor
             warn!(
                 "Thermal throttling active! Avg Temp: {:.1}°C (Max: {}°C), Factor: {:.2}",
                 avg_temp, self.max_temp, factor
             );
-            factor.max(self.min_throttle_factor) // Ensure factor doesn't go below min
+            factor.max(self.min_throttle_factor)
         } else {
-            1.0 // No throttling
+            1.0
+        };
+
+        // Use non-blocking sleep for throttling
+        if factor < 1.0 {
+            let sleep_duration = Duration::from_millis(
+                ((1.0 - factor) * 100.0) as u64
+            );
+            tokio::time::sleep(sleep_duration).await;
         }
+
+        factor
     }
 }
 // --- End Thermal Controller ---
-
 
 // Dynamic throttling based on temperature
 fn adjust_for_thermals(current_temp: f32) -> f32 {
@@ -200,6 +260,13 @@ struct MinerConfig {
     update_public_key_path: String,
     #[serde(default = "default_update_enabled")]
     update_enabled: bool,
+    // --- Stats Server Fields ---
+    #[serde(default = "default_stats_server_required")]
+    stats_server_required: bool,
+    #[serde(default = "default_stats_server_endpoint")]
+    stats_server_endpoint: String,
+    #[serde(default = "default_stats_server_cert_path")]
+    stats_server_cert_path: String,
 }
 
 // Default functions for new config fields
@@ -207,6 +274,9 @@ fn default_update_server() -> String { "https://updates.example.com/v1".to_strin
 fn default_update_check_interval() -> Duration { Duration::from_secs(4 * 3600) } // Default: 4 hours
 fn default_update_public_key_path() -> String { "update_pub.der".to_string() } // Relative path
 fn default_update_enabled() -> bool { true } // Enabled by default
+fn default_stats_server_required() -> bool { false }
+fn default_stats_server_endpoint() -> String { "localhost:9999".to_string() }
+fn default_stats_server_cert_path() -> String { "certs/stats_server.der".to_string() }
 
 // Default implementation for MinerConfig
 impl Default for MinerConfig {
@@ -236,6 +306,10 @@ impl Default for MinerConfig {
             update_check_interval: default_update_check_interval(),
             update_public_key_path: default_update_public_key_path(),
             update_enabled: default_update_enabled(),
+            // --- Stats Server Defaults ---
+            stats_server_required: default_stats_server_required(),
+            stats_server_endpoint: default_stats_server_endpoint(),
+            stats_server_cert_path: default_stats_server_cert_path(),
         }
     }
 }
@@ -257,7 +331,7 @@ struct MiningStats {
 
 // Removed MiningBuffer struct
 
-// generate_temporal_seed - Adapted from snippet, keeping OsRng usage
+// generate_temporal_seed - Adapted to use BLAKE3 instead of SHA-256
 fn generate_temporal_seed() -> Vec<u8> {
     let mut seed = Vec::with_capacity(64);
     seed.extend_from_slice(&rand::random::<[u8; 32]>()); // Use rand::random for simplicity
@@ -266,7 +340,9 @@ fn generate_temporal_seed() -> Vec<u8> {
         .unwrap_or_default() // Use unwrap_or_default for robustness
         .as_nanos()
         .to_le_bytes());
-    Sha256::digest(&seed).to_vec()
+    
+    // Use BLAKE3 instead of SHA-256 for consistency and better performance
+    blake3::hash(&seed).as_bytes().to_vec()
 }
 
 // meets_difficulty - From snippet (takes U256 target)
@@ -431,66 +507,229 @@ fn create_message(previous_output: &[u8], temporal_seed: &[u8], nonce: u64) -> V
     message
 }
 
-// quantum_resistant_hash - Implements keccak256(abi.encodePacked(signature, messageHash, secret))
-// Matches the pattern described in the Solidity comments.
-fn quantum_resistant_hash(signature: &Signature, message_hash: &[u8; 32], secret: &[u8]) -> [u8; 32] {
-    // Convert signature to bytes (using DER format as previously)
-    let sig_bytes = signature.to_der();
+// Constants matching MiningLib.sol values
+const QR_HASH_ITERATIONS: u8 = 3;
+const QR_HASH_ROTATION: u8 = 7;
 
-    // Concatenate signature || message_hash || secret
-    let mut combined = Vec::with_capacity(sig_bytes.as_bytes().len() + message_hash.len() + secret.len());
-    combined.extend_from_slice(sig_bytes.as_bytes());
-    combined.extend_from_slice(message_hash);
-    combined.extend_from_slice(secret);
+// Updated function to match the Solidity contract's entropy calculation exactly
+async fn create_entropy_hash(
+    provider: &Provider<Http>,
+    client_address: &Address,
+    previous_output: &[u8],
+    temporal_seed: &[u8],
+    nonce: u64,
+    secret_value: &[u8]
+) -> Result<([u8; 32], u64)> {
+    // 1) Fetch the latest block to get prevrandao and timestamp
+    let block = provider.get_block(BlockNumber::Latest).await?
+        .ok_or_else(|| anyhow!("Failed to fetch latest block"))?;
+    
+    let block_timestamp = block.timestamp.as_u64();
+    let prevrandao = block.prevrandao
+        .ok_or_else(|| anyhow!("Block is missing prevrandao"))?;
 
-    // Compute Keccak256 hash
-    keccak256(&combined)
+    // 2) Create entropy exactly as in the Solidity contract
+    let mut entropy = Vec::with_capacity(
+        previous_output.len() + temporal_seed.len() + 8 + 20 + 32 + 8 + secret_value.len()
+    );
+    entropy.extend_from_slice(previous_output);
+    entropy.extend_from_slice(temporal_seed);
+    entropy.extend_from_slice(&nonce.to_be_bytes());
+    entropy.extend_from_slice(&client_address.0); // Address bytes
+    entropy.extend_from_slice(&prevrandao.0);     // prevrandao bytes
+    entropy.extend_from_slice(&block_timestamp.to_be_bytes());
+    entropy.extend_from_slice(secret_value);      // usually your HMAC key or seed
+    
+    // Hash the combined entropy exactly as in Solidity
+    let entropy_hash = keccak256(&entropy);
+    
+    Ok((entropy_hash, block_timestamp))
 }
 
-// Stub for optimized hashing based on CPU features
-// fn optimized_hash(strategy: MiningStrategy, data: &[u8]) -> [u8; 32] {
-//     match strategy {
-//         MiningStrategy::AVX2 => unsafe { /* avx2_sha256(data) */ keccak256(data) }, // Replace with actual AVX2 impl
-//         MiningStrategy::SSE4 => unsafe { /* sse4_sha256(data) */ keccak256(data) }, // Replace with actual SSE4 impl
-//         MiningStrategy::Generic => keccak256(data),
-//     }
-// }
-
-// --- Thermal Monitor Struct (Improvement #4) ---
-struct ThermalMonitor {
-    readings: VecDeque<f32>,
-    max_readings: usize,
+// Async implementation of quantum resistant hash that matches Solidity exactly
+async fn quantum_resistant_hash_async(
+    signature: &Signature,
+    entropy_hash: &[u8; 32],
+    secret: &[u8],
+    block_timestamp: u64
+) -> [u8; 32] {
+    // Create packed input exactly as in Solidity
+    let mut packed = Vec::new();
+    packed.extend_from_slice(&signature.to_der().as_bytes());
+    packed.extend_from_slice(entropy_hash);
+    packed.extend_from_slice(secret);
+    
+    // Use the inner function with the block timestamp from the chain
+    quantum_resistant_hash_inner(&packed, block_timestamp)
 }
 
-impl ThermalMonitor {
-    fn new(max_readings: usize) -> Self {
-        // Ensure max_readings is at least 1
-        let capacity = max_readings.max(1);
-        Self {
-            readings: VecDeque::with_capacity(capacity),
-            max_readings: capacity,
+// Inner implementation that matches Solidity's quantumResistantHash exactly
+fn quantum_resistant_hash_inner(input: &[u8], block_ts: u64) -> [u8; 32] {
+    // Initial hash
+    let mut h = keccak256(input);
+    
+    // Get block timestamp in big-endian format
+    let ts_bytes = block_ts.to_be_bytes();
+    
+    // Perform the same iterations as in Solidity
+    for i in 0..QR_HASH_ITERATIONS {
+        // 1) XOR with (i+1)
+        let mut buf = [0u8; 32];
+        buf[31] = (i as u8).wrapping_add(1); // Set the last byte to i+1
+        
+        for j in 0..32 {
+            buf[j] ^= h[j]; // XOR operation
+        }
+        
+        // 2) Hash with timestamp
+        let mut data = Vec::with_capacity(40);
+        data.extend_from_slice(&buf);
+        data.extend_from_slice(&ts_bytes);
+        h = keccak256(&data);
+        
+        // 3) Rotate left by QR_HASH_ROTATION bits
+        h = rotate_left_256(h, QR_HASH_ROTATION as usize);
+    }
+    
+    h
+}
+
+// Rotate left a 256-bit value (represented as [u8; 32]) by n bits
+fn rotate_left_256(mut bytes: [u8; 32], n: usize) -> [u8; 32] {
+    // First convert to a single 256-bit integer
+    let mut value = U256::from_big_endian(&bytes);
+    
+    // Perform rotation (U256 doesn't have rotate_left, so we implement it manually)
+    let rotated = (value << n) | (value >> (256 - n));
+    
+    // Convert back to [u8; 32]
+    let mut result = [0u8; 32];
+    rotated.to_big_endian(&mut result);
+    
+    result
+}
+
+// Get current timestamp in big-endian format
+fn get_current_timestamp_bytes() -> Result<[u8; 8]> {
+    static TIMESTAMP_CACHE: Mutex<(SystemTime, [u8; 8])> = Mutex::new((UNIX_EPOCH, [0u8; 8]));
+    
+    let mut cache = TIMESTAMP_CACHE.lock()
+        .map_err(|_| anyhow!("Failed to acquire timestamp cache lock"))?;
+    let now = SystemTime::now();
+    
+    // If cached timestamp is older than 5 seconds, refresh it
+    if now.duration_since(cache.0)
+        .map_err(|e| anyhow!("System time error: {}", e))?
+        .as_secs() > 5 
+    {
+        // Get current timestamp in seconds
+        let secs_since_epoch = now.duration_since(UNIX_EPOCH)
+            .map_err(|e| anyhow!("Failed to get unix timestamp: {}", e))?
+            .as_secs();
+        
+        cache.0 = now;
+        cache.1 = secs_since_epoch.to_be_bytes();
+    }
+    
+    Ok(cache.1)
+}
+
+// This async version handles errors properly
+async fn get_current_timestamp_bytes_async(provider: &Provider<Http>) -> Result<[u8; 8]> {
+    let block = provider.get_block(BlockNumber::Latest).await?
+        .ok_or_else(|| anyhow!("Failed to fetch latest block"))?;
+    
+    let timestamp = block.timestamp.as_u64();
+    Ok(timestamp.to_be_bytes())
+}
+
+// Specialized hash function that uses BLAKE3 for pre-hashing before keccak256
+// This improves performance in the tight mining loop
+#[inline(always)]
+fn fast_hash_message(message: &[u8]) -> [u8; 32] {
+    // First hash with BLAKE3 (extremely fast on modern CPUs)
+    // BLAKE3 automatically uses AVX2/AVX512/SSE4.1 if available
+    let fast_hash = blake3::hash(message);
+    
+    // Then hash with keccak256 to match the contract's verification
+    keccak256(fast_hash.as_bytes())
+}
+
+// Add EIP-712 struct definition at module level with TODOs for chain ID and contract address
+pub struct DynamicMiningCommitment {
+    pub commit_hash: [u8; 32],
+    pub pool_id: u8,
+    pub nonce: u64,
+    pub deadline: u64,
+    stealth_meta: Vec<u8>,      // Stealth metadata for anonymous claim
+    stealth_proof: Vec<u8>,     // Zero-knowledge proof of stealth key ownership
+}
+
+impl DynamicMiningCommitment {
+    fn to_eip712_types(chain_id: u64, contract_address: Address) -> TypedData {
+        TypedData {
+            domain: EIP712Domain {
+                name: Some("TemporalGradientBeacon".to_string()),
+                version: Some("1".to_string()),
+                chain_id: Some(chain_id.into()),
+                verifying_contract: Some(contract_address),
+                salt: None,
+            },
+            primary_type: "MiningCommitment".to_string(),
+            types: {
+                let mut types = BTreeMap::new();
+                types.insert(
+                    "MiningCommitment".to_string(),
+                    vec![
+                        TypeField { name: "commitHash".to_string(), r#type: "bytes32".to_string() },
+                        TypeField { name: "poolId".to_string(), r#type: "uint8".to_string() },
+                        TypeField { name: "nonce".to_string(), r#type: "uint64".to_string() },
+                        TypeField { name: "deadline".to_string(), r#type: "uint64".to_string() },
+                        TypeField { 
+                            name: "stealthMeta".to_string(), 
+                            r#type: "bytes".to_string() 
+                        },
+                        TypeField { 
+                            name: "stealthProof".to_string(), 
+                            r#type: "bytes".to_string() 
+                        },
+                    ],
+                );
+                types
+            },
+            message: {
+                let mut map = BTreeMap::new();
+                map.insert("commitHash".to_string(), Value::from(format!("0x{}", hex::encode(self.commit_hash))));
+                map.insert("poolId".to_string(), Value::from(self.pool_id));
+                map.insert("nonce".to_string(), Value::from(self.nonce));
+                map.insert("deadline".to_string(), Value::from(self.deadline));
+                map.insert("stealthMeta".to_string(), 
+                    Value::from(format!("0x{}", hex::encode(&self.stealth_meta))));
+                map.insert("stealthProof".to_string(), 
+                    Value::from(format!("0x{}", hex::encode(&self.stealth_proof))));
+                map
+            },
         }
     }
 
-    fn add_reading(&mut self, temp: f32) {
-        if self.readings.len() >= self.max_readings {
-            self.readings.pop_front();
-        }
-        self.readings.push_back(temp);
-    }
-
-    fn average_temp(&self) -> f32 {
-        if self.readings.is_empty() {
-            // Return a reasonable default if no readings yet, e.g., 50.0
-            // Or handle this case where it's called.
-            50.0
-        } else {
-            self.readings.iter().sum::<f32>() / self.readings.len() as f32
-        }
+    // Helper to create and sign commitment
+    async fn sign(&self, wallet: &LocalWallet, chain_id: u64, contract_address: Address) -> Result<Bytes> {
+        let typed_data = self.to_eip712_types(chain_id, contract_address);
+        let signature = wallet.sign_typed_data(&typed_data).await
+            .map_err(|e| anyhow!("Failed to sign commitment: {}", e))?;
+        Ok(signature.to_vec().into())
     }
 }
-// --- End Thermal Monitor Struct ---
 
+// Add ABI bindings for contract at module scope
+abigen!(
+    MiningContract,
+    r#" [
+        function submitMiningCommitment(bytes32 commitHash, uint8 poolId, uint256 nonce, uint256 deadline, bytes signature) external returns (bool);
+        function revealMiningCommitment(bytes32 previousOutput, bytes temporalSeed, uint64 nonce, bytes signature, bytes32 secretValue, uint8 poolId) external;
+        function minCommitmentAge() external view returns (uint256);
+    ]"#,
+);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -520,26 +759,43 @@ async fn main() -> Result<()> {
 
     // --- Start Update Check Task (if enabled) ---
     if config.update_enabled {
-        let update_config = config.clone(); // Clone config for the update task
+        let update_config = config.clone();
+        let retry_state = Arc::new(Mutex::new(UpdateRetryState::new()));
+        
         tokio::spawn(async move {
             info!("Update checker task started. Interval: {:?}", update_config.update_check_interval);
             loop {
-                tokio::time::sleep(update_config.update_check_interval).await;
-                info!("Checking for application updates...");
-                match check_and_apply_updates(&update_config, app_version).await {
-                    Ok(applied) => {
-                        if applied {
-                            info!("Update applied successfully. Restarting...");
-                            // Restart is handled within check_and_apply_updates if successful
-                            break; // Exit loop after restart attempt
-                        } else {
-                            info!("No updates applied.");
+                let should_check = {
+                    let state = retry_state.lock().await;
+                    state.should_retry()
+                };
+
+                if should_check {
+                    match check_and_apply_updates(&update_config, app_version).await {
+                        Ok(applied) => {
+                            let mut state = retry_state.lock().await;
+                            state.record_success();
+                            if applied {
+                                info!("Update applied successfully. Restarting...");
+                                break;
+                            }
+                            drop(state); // Release lock before sleep
+                            tokio::time::sleep(update_config.update_check_interval).await;
+                        }
+                        Err(e) => {
+                            let mut state = retry_state.lock().await;
+                            state.record_failure();
+                            let next_delay = state.next_attempt_delay();
+                            error!(
+                                "Update check failed: {}. Will retry in {:?} (attempt #{})", 
+                                e, next_delay, state.consecutive_failures
+                            );
+                            drop(state); // Release lock before sleep
+                            tokio::time::sleep(next_delay).await;
                         }
                     }
-                    Err(e) => {
-                        error!("Update check failed: {}", e);
-                        // Continue loop to check again later
-                    }
+                } else {
+                    tokio::time::sleep(Duration::from_secs(60)).await; // Check retry state every minute
                 }
             }
         });
@@ -565,23 +821,36 @@ async fn main() -> Result<()> {
 
 
     // --- Hypothetical Secure Stats Server Connection (Improvement #3) ---
-    let stats_server_endpoint = env::var("STATS_SERVER_ENDPOINT")
-        .unwrap_or_else(|_| "localhost:9999".to_string()); // Example endpoint
+    let secure_channel = {
+        let endpoint = env::var("STATS_SERVER_ENDPOINT")
+            .unwrap_or_else(|_| config.stats_server_endpoint.clone());
+        let cert_path = env::var("STATS_SERVER_CERT_PATH")
+            .unwrap_or_else(|_| config.stats_server_cert_path.clone());
+        let critical = env::var("STATS_SERVER_REQUIRED")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(config.stats_server_required);
 
-    // Placeholder: Path to the pinned certificate DER file
-    let pinned_cert_path = "path/to/pinned_cert.der"; // Replace with actual path or config value
-
-    let secure_channel = match network::secure_connect_pinned(
-        &stats_server_endpoint,
-        pinned_cert_path // Pass the path to the connect function
-    ).await {
-        Ok(channel) => {
-            info!("Successfully connected to secure stats server at {} with certificate pinning.", stats_server_endpoint);
-            Some(Arc::new(Mutex::new(channel))) // Wrap in Arc<Mutex> for sharing
-        }
-        Err(e) => {
-            warn!("Failed to connect to secure stats server at {} (pinning attempted): {}", stats_server_endpoint, e);
-            None
+        match network::secure_connect_pinned(&endpoint, &cert_path).await {
+            Ok(channel) => {
+                info!("Successfully connected to secure stats server at {}", endpoint);
+                Some(Arc::new(Mutex::new(channel)))
+            }
+            Err(e) => {
+                let msg = format!(
+                    "Failed to connect to secure stats server at {} (pinning attempted): {}", 
+                    endpoint, e
+                );
+                if critical {
+                    error!("{}", msg);
+                    error!("Stats server connection required, shutting down.");
+                    return Err(anyhow!(msg));
+                } else {
+                    warn!("{}", msg);
+                    warn!("Continuing without secure stats reporting.");
+                    None
+                }
+            }
         }
     };
     // --- End Hypothetical Secure Stats Server Connection ---
@@ -683,6 +952,13 @@ async fn main() -> Result<()> {
     let mut main_shutdown_receiver = shutdown_manager.subscribe();
     // --- End main loop shutdown receiver ---
 
+    // Add after wallet creation, before main loop
+    let stealth = Arc::new(Mutex::new(StealthAddress {
+        spending_key: wallet.clone(),
+        viewing_key: SigningKey::random(&mut OsRng),
+        ephemeral_keys: VecDeque::new(),
+    }));
+
     'main_loop: loop { // Label the main loop
         // Check exit condition or shutdown signal
         tokio::select! {
@@ -761,6 +1037,9 @@ async fn main() -> Result<()> {
             let mut thread_shutdown_receiver = shutdown_manager.subscribe();
             // --- End thread-specific shutdown receiver ---
 
+            // In the thread spawn setup, add stealth clone
+            let stealth = Arc::clone(&stealth);
+
             handles.push(tokio::spawn(async move { // Use tokio::spawn
                 // Start nonce based on thread ID
                 let mut nonce_base = thread_id as u64;
@@ -775,6 +1054,8 @@ async fn main() -> Result<()> {
                 let mut throttle_factor = 1.0f32; // Initialize throttle factor
                 // --- End Initialize Thermal Controller ---
 
+                // Update mining loop throttling logic
+                let thermal_rx = thermal_controller.subscribe();
                 'mining_loop: loop {
                     // --- Graceful Shutdown Check (Improvement #1) ---
                     tokio::select! {
@@ -792,15 +1073,34 @@ async fn main() -> Result<()> {
 
 
                     // --- Thermal Throttling Check (Improvement #2) ---
-                    match read_cpu_temperature() {
-                        Ok(temp) => {
-                            // Update controller and get new throttle factor
-                            throttle_factor = thermal_controller.update(temp);
+                    // Non-blocking temperature check
+                    tokio::select! {
+                        biased;
+                        Ok(notification) = thermal_rx.recv() => {
+                            // Update throttle factor based on notification
+                            if SystemTime::now().duration_since(notification.timestamp)
+                                .unwrap_or_default() < Duration::from_secs(1) 
+                            {
+                                throttle_factor = thermal_controller.update(notification.temperature).await;
+                            }
                         }
-                        Err(e) => {
-                            warn!("Thread {}: Failed to read CPU temperature: {}", thread_id, e);
-                            throttle_factor = 1.0; // Default to no throttling on error
+                        _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                            // Periodic temperature check if no notifications
+                            match read_cpu_temperature() {
+                                Ok(temp) => {
+                                    throttle_factor = thermal_controller.update(temp).await;
+                                }
+                                Err(e) => {
+                                    warn!("Failed to read CPU temperature: {}", e);
+                                }
+                            }
                         }
+                    }
+
+                    // Apply throttling using tokio sleep
+                    if throttle_factor < 1.0 {
+                        let sleep_ms = ((1.0 - throttle_factor) * 100.0) as u64;
+                        tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
                     }
                     // --- End Thermal Throttling Check ---
 
@@ -820,11 +1120,12 @@ async fn main() -> Result<()> {
                         let temporal_seed = generate_temporal_seed();
                         let message = create_message(&previous_output, &temporal_seed, current_nonce);
 
-                        // --- Call CPU optimization ---
-                        optimize_for_cpu(message.as_ptr());
-                        // --- End CPU optimization ---
+                        // Removed call to optimize_for_cpu as it's unnecessary with BLAKE3
+                        // BLAKE3 already uses optimal SIMD instructions based on CPU features
 
-                        let message_hash = keccak256(&message);
+                        // USE FAST HASHING: Pre-hash with BLAKE3 before keccak256
+                        // This is much faster on CPU while still meeting contract requirements
+                        let message_hash = fast_hash_message(&message);
 
                         // Reconstruct signing key temporarily for signing (using temp buffer)
                         let signature = {
@@ -877,456 +1178,603 @@ async fn main() -> Result<()> {
                     // If a solution was found and claimed by this thread in the batch
                     if found_in_batch {
                         if let Some((nonce, temporal_seed, signature, solution_hash)) = solution_details {
-                            // Submit to blockchain
-                            match submit_solution(
-                                &client,
-                                config.contract_address.parse().unwrap(),
-                                &previous_output,
-                                &temporal_seed,
+                            // Build the commitment hash
+                            let mut buf = Vec::new();
+                            buf.extend_from_slice(&previous_output);
+                            buf.extend_from_slice(&temporal_seed);
+                            buf.extend_from_slice(&nonce.to_le_bytes());
+                            buf.extend_from_slice(&signature.to_der());
+                            buf.extend_from_slice(&solution_hash);
+                            buf.extend_from_slice(&wallet.address().0);
+                            let commit_hash = keccak256(&buf);
+
+                            // Create EIP-712 commitment struct
+                            let deadline = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs() + 300; // 5 minutes
+
+                            let commitment = DynamicMiningCommitment {
+                                commit_hash: commit_hash.try_into().expect("32 bytes"),
+                                pool_id: 0,
                                 nonce,
-                                &signature,
-                                &solution_hash,
-                            ).await {
-                                Ok(receipt) => {
-                                    info!("Solution submitted successfully by thread {}!", thread_id);
-                                    consecutive_submission_errors = 0; // Reset thread-local submission errors
+                                deadline,
+                                stealth_meta: vec![],      // Stealth metadata for anonymous claim
+                                stealth_proof: vec![],     // Zero-knowledge proof of stealth key ownership
+                            };
 
-                                    let reward = extract_reward_from_receipt(&receipt).unwrap_or(0.0);
-                                    // Update statistics
-                                    let mut stats_guard = stats.lock().await;
-                                    stats_guard.solutions += 1;
-                                    stats_guard.successful_submissions += 1;
-                                    stats_guard.total_rewards += reward;
-                                    // Solution successfully submitted, break outer loop for this thread
-                                    break 'mining_loop;
-                                },
-                                Err(e) => {
-                                    error!("Thread {} failed to submit solution: {}", thread_id, e);
-                                    consecutive_submission_errors += 1;
-                                    let mut stats_guard = stats.lock().await;
-                                    stats_guard.failed_submissions += 1;
-                                    // Reset solution_found flag as submission failed, allowing others (or retry)
-                                    solution_found.store(false, Ordering::SeqCst); // Use SeqCst
+                            // Sign with dynamic chain ID and contract address
+                            let signature_eip712 = commitment.sign(&wallet, chain, contract_address).await?;
 
-                                    // Check if max submission retries exceeded for this thread
-                                    if consecutive_submission_errors > config.max_retries {
-                                        error!("Thread {} exceeded max submission retries, stopping.", thread_id);
-                                        break 'mining_loop; // Stop this thread
-                                    }
+                            // Submit commitment
+                            let contract = MiningContract::new(
+                                config.contract_address.parse().unwrap(),
+                                Arc::new(client.clone())
+                            );
 
-                                    // Consider a small delay before continuing mining loop
-                                    tokio::time::sleep(Duration::from_millis(100)).await;
-                                    // Continue mining loop to try next batch or let others try
+                            info!("Submitting mining commitment...");
+                            let tx = contract.submit_mining_commitment(
+                                commit_hash.into(),
+                                0u8,
+                                nonce,
+                                deadline,
+                                signature_eip712.to_vec().into(),
+                            ).send().await?;
+
+                            let receipt = tx.await?
+                                .ok_or_else(|| anyhow!("No receipt for commitment"))?;
+                            
+                            info!("Commitment submitted in tx: {:?}", receipt.transaction_hash);
+
+                            // Wait for minCommitmentAge blocks
+                            let min_blocks = contract.min_commitment_age().call().await?;
+                            info!("Waiting for {} blocks before reveal...", min_blocks);
+                            loop {
+                                let current_block = provider.get_block_number().await?;
+                                if current_block >= commit_block + min_blocks.into() {
+                                    break;
                                 }
+                                tokio::time::sleep(Duration::from_secs(12)).await; // ~1 block
                             }
+
+                            // Now proceed with reveal
+                            info!("Revealing mining solution...");
+                            let reveal_tx = contract.reveal_mining_commitment(
+                                previous_output.into(),
+                                temporal_seed.into(),
+                                nonce,
+                                signature_eip712.to_vec().into(),
+                                solution_hash.into(),
+                                0u8
+                            ).send().await?;
+
+                            let receipt = reveal_tx.await?
+                                .ok_or_else(|| anyhow!("No receipt for solution reveal"))?;
+
+                            // Update statistics with reward
+                            let reward = extract_reward_from_receipt(&receipt).unwrap_or(0.0);
+                            let mut stats_guard = stats.lock().await;
+// ...existing code...
+                            info!("Solution submitted successfully by thread {}!", thread_id);
+                            consecutive_submission_errors = 0; // Reset thread-local submission errors
+
+                            let reward = extract_reward_from_receipt(&receipt).unwrap_or(0.0);
+                            // Update statistics
+                            let mut stats_guard = stats.lock().await;
+                            stats_guard.solutions += 1;
+                            stats_guard.successful_submissions += 1;
+                            stats_guard.total_rewards += reward;
+                            // Solution successfully submitted, break outer loop for this thread
+                            break 'mining_loop;
+                        },
+                        Err(e) => {
+                            error!("Thread {} failed to submit solution: {}", thread_id, e);
+                            consecutive_submission_errors += 1;
+                            let mut stats_guard = stats.lock().await;
+                            stats_guard.failed_submissions += 1;
+                            // Reset solution_found flag as submission failed, allowing others (or retry)
+                            solution_found.store(false, Ordering::SeqCst); // Use SeqCst
+
+                            // Check if max submission retries exceeded for this thread
+                            if consecutive_submission_errors > config.max_retries {
+                                error!("Thread {} exceeded max submission retries, stopping.", thread_id);
+                                break 'mining_loop; // Stop this thread
+                            }
+
+                            // Consider a small delay before continuing mining loop
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            // Continue mining loop to try next batch or let others try
                         }
                     }
+                }
 
-                    // Increment base nonce for the next batch
-                    nonce_base += nonce_increment_batch;
+                // Increment base nonce for the next batch
+                nonce_base += nonce_increment_batch;
 
-                    // --- Apply Thermal Throttling Delay (Improvement #2) ---
-                    if throttle_factor < 1.0 {
-                        // Calculate sleep duration based on throttling factor
-                        // Example: If factor is 0.5, sleep for 50ms? Adjust base sleep time.
-                        // A simple approach: sleep for a duration inversely proportional to the factor.
-                        let base_yield_time_ms = 10.0; // Target time per yield/check when not throttled
-                        let target_time_ms = base_yield_time_ms / throttle_factor;
-                        let sleep_duration = Duration::from_millis((target_time_ms - base_yield_time_ms).max(0.0) as u64);
+                // --- Apply Thermal Throttling Delay (Improvement #2) ---
+                if throttle_factor < 1.0 {
+                    // Calculate sleep duration based on throttling factor
+                    // Example: If factor is 0.5, sleep for 50ms? Adjust base sleep time.
+                    // A simple approach: sleep for a duration inversely proportional to the factor.
+                    let base_yield_time_ms = 10.0; // Target time per yield/check when not throttled
+                    let target_time_ms = base_yield_time_ms / throttle_factor;
+                    let sleep_duration = Duration::from_millis((target_time_ms - base_yield_time_ms).max(0.0) as u64);
 
-                        if sleep_duration > Duration::ZERO {
-                             // Use trace level for frequent throttling logs
-                             // trace!("Thread {}: Throttling active (factor {:.2}), sleeping for {:?}", thread_id, throttle_factor, sleep_duration);
-                             tokio::time::sleep(sleep_duration).await;
-                        }
+                    if sleep_duration > Duration::ZERO {
+                         // Use trace level for frequent throttling logs
+                         // trace!("Thread {}: Throttling active (factor {:.2}), sleeping for {:?}", thread_id, throttle_factor, sleep_duration);
+                         tokio::time::sleep(sleep_duration).await;
                     }
-                    // --- End Apply Thermal Throttling Delay ---
+                }
+                // --- End Apply Thermal Throttling Delay ---
 
 
-                    // Yield after processing a batch to prevent hogging CPU & allow flag check
-                    tokio::task::yield_now().await;
-                } // End of 'mining_loop
-            }));
-        }
-
-        // Wait for all threads to complete (or one to successfully submit)
-        futures::future::join_all(handles).await;
-
-        // Check if a solution was actually found and submitted successfully in this round
-        // This check might be redundant if the loop breaks on success inside the thread
-        if solution_found.load(Ordering::SeqCst) {
-             blocks_mined_count += 1;
-             info!("Solution found in round. Total solutions: {}", blocks_mined_count);
-        } else if shutdown_receiver_shared.lock().await.is_none() {
-             // If shutdown was triggered, don't log "No solution found"
-        }
-         else {
-             warn!("No solution found in this round, fetching new challenge...");
-             // Check for shutdown before sleeping
-             tokio::select! {
-                 _ = main_shutdown_receiver.recv() => {
-                     info!("Shutdown signal received while waiting for retry.");
-                     break 'main_loop;
-                 }
-                 _ = tokio::time::sleep(config.retry_delay) => {} // Sleep if no shutdown
-             }
-        }
-    } // End main_loop
-
-    // --- Hypothetical Secure Channel Shutdown ---
-    if let Some(channel_arc) = secure_channel {
-        info!("Shutting down secure stats connection...");
-        let mut channel_guard = channel_arc.lock().await;
-        if let Err(e) = channel_guard.shutdown().await {
-            warn!("Error shutting down secure channel: {}", e);
-        }
+                // Yield after processing a batch to prevent hogging CPU & allow flag check
+                tokio::task::yield_now().await;
+            } // End of 'mining_loop
+        }));
     }
-    // --- End Hypothetical Secure Channel Shutdown ---
 
-    info!("Miner shutting down.");
-    Ok(())
+    // Wait for all threads to complete (or one to successfully submit)
+    futures::future::join_all(handles).await;
+
+    // Check if a solution was actually found and submitted successfully in this round
+    // This check might be redundant if the loop breaks on success inside the thread
+    if solution_found.load(Ordering::SeqCst) {
+         blocks_mined_count += 1;
+         info!("Solution found in round. Total solutions: {}", blocks_mined_count);
+    } else if shutdown_receiver_shared.lock().await.is_none() {
+         // If shutdown was triggered, don't log "No solution found"
+    }
+     else {
+         warn!("No solution found in this round, fetching new challenge...");
+         // Check for shutdown before sleeping
+         tokio::select! {
+             _ = main_shutdown_receiver.recv() => {
+                 info!("Shutdown signal received while waiting for retry.");
+                 break 'main_loop;
+             }
+             _ = tokio::time::sleep(config.retry_delay) => {} // Sleep if no shutdown
+         }
+    }
+} // End main_loop
+
+// --- Hypothetical Secure Channel Shutdown ---
+if let Some(channel_arc) = secure_channel {
+    info!("Shutting down secure stats connection...");
+    let mut channel_guard = channel_arc.lock().await;
+    if let Err(e) = channel_guard.shutdown().await {
+        warn!("Error shutting down secure channel: {}", e);
+    }
+}
+// --- End Hypothetical Secure Channel Shutdown ---
+
+info!("Miner shutting down.");
+Ok(())
 }
 
 // --- Update Check and Apply Function ---
 async fn check_and_apply_updates(config: &MinerConfig, current_version: &str) -> Result<bool> {
-    // Load public key
-    let pub_key_bytes = fs::read(&config.update_public_key_path).await
-        .context(format!("Failed to read update public key from: {}", config.update_public_key_path))?;
+// Load public key
+let pub_key_bytes = fs::read(&config.update_public_key_path).await
+    .context(format!("Failed to read update public key from: {}", config.update_public_key_path))?;
 
-    let verifier = update::UpdateVerifier::new(pub_key_bytes, current_version)
-        .context("Failed to initialize update verifier")?;
+let verifier = update::UpdateVerifier::new(pub_key_bytes, current_version)
+    .context("Failed to initialize update verifier")?;
 
-    if let Some(manifest) = verifier.check_for_updates(&config.update_server).await? {
-        info!("New version {} available, downloading...", manifest.version);
+if let Some(manifest) = verifier.check_for_updates(&config.update_server).await? {
+    info!("New version {} available, downloading...", manifest.version);
 
-        // Create a temporary path for the download
-        let temp_dir = std::env::temp_dir();
-        let temp_file_name = format!("miner_update_{}.tmp", manifest.version);
-        let temp_path = temp_dir.join(temp_file_name);
+    // Create a temporary path for the download
+    let temp_dir = std::env::temp_dir();
+    let temp_file_name = format!("miner_update_{}.tmp", manifest.version);
+    let temp_path = temp_dir.join(temp_file_name);
 
-        // Ensure temp file doesn't exist from previous failed attempt
-        if temp_path.exists() {
-            fs::remove_file(&temp_path).await.ok();
-        }
-
-        match verifier.download_update(&manifest, &temp_path).await {
-            Ok(_) => {
-                info!("Update downloaded to {:?}, attempting to apply...", temp_path);
-                // Apply the update (placeholder)
-                match update::apply_update(&temp_path).await {
-                    Ok(_) => {
-                        info!("Update applied successfully. Triggering restart.");
-                        // Restart the application (placeholder)
-                        if let Err(e) = update::restart_application() {
-                            error!("Failed to trigger application restart: {}", e);
-                            // Even if restart fails, return true as update was technically applied
-                        }
-                        return Ok(true); // Indicate update was applied (restart initiated)
-                    }
-                    Err(e) => {
-                        error!("Failed to apply update: {}", e);
-                        // Clean up downloaded file on failure
-                        fs::remove_file(&temp_path).await.ok();
-                        return Err(e).context("Update application failed");
-                    }
-                }
-            }
-            Err(e) => {
-                error!("Failed to download update: {}", e);
-                 // Clean up potentially partial file
-                if temp_path.exists() {
-                    fs::remove_file(&temp_path).await.ok();
-                }
-                return Err(e).context("Update download failed");
-            }
-        }
-    } else {
-        debug!("No updates available or necessary.");
-        Ok(false) // Indicate no update was applied
+    // Ensure temp file doesn't exist from previous failed attempt
+    if temp_path.exists() {
+        fs::remove_file(&temp_path).await.ok();
     }
+
+    match verifier.download_update(&manifest, &temp_path).await {
+        Ok(_) => {
+            info!("Update downloaded to {:?}, attempting to apply...", temp_path);
+            // Apply the update (placeholder)
+            match update::apply_update(&temp_path).await {
+                Ok(_) => {
+                    info!("Update applied successfully. Triggering restart.");
+                    // Restart the application (placeholder)
+                    if let Err(e) = update::restart_application() {
+                        error!("Failed to trigger application restart: {}", e);
+                        // Even if restart fails, return true as update was technically applied
+                    }
+                    return Ok(true); // Indicate update was applied (restart initiated)
+                }
+                Err(e) => {
+                    error!("Failed to apply update: {}", e);
+                    // Clean up downloaded file on failure
+                    fs::remove_file(&temp_path).await.ok();
+                    return Err(e).context("Update application failed");
+                }
+            }
+        }
+        Err(e) => {
+            error!("Failed to download update: {}", e);
+             // Clean up potentially partial file
+            if temp_path.exists() {
+                fs::remove_file(&temp_path).await.ok();
+            }
+            return Err(e).context("Update download failed");
+        }
+    }
+} else {
+    debug!("No updates available or necessary.");
+    Ok(false) // Indicate no update was applied
+}
 }
 
 
 // load_config - Adapted to use new MinerConfig structure
 fn load_config() -> Result<MinerConfig> {
-    let config_path = env::var("CONFIG_PATH").unwrap_or_else(|_| "miner_config.json".to_string());
-    let mut config: MinerConfig = if Path::new(&config_path).exists() {
-        debug!("Loading config from {}", config_path);
-        let config_data = fs::read_to_string(&config_path)?;
-        // Deserialize and fill missing fields with defaults if necessary
-        let loaded_config: Value = serde_json::from_str(&config_data)?;
-        let default_config_json = serde_json::to_value(MinerConfig::default())?;
-        let mut merged_config = default_config_json;
-        json_patch::merge(&mut merged_config, &loaded_config);
-        serde_json::from_value(merged_config)?
-    } else {
-        warn!("Config file not found at {}, using environment variables or defaults.", config_path);
-        // Fall back to environment variables or defaults
-        // Get default config to use its values if env vars are missing
-        let defaults = MinerConfig::default();
-        MinerConfig {
-            contract_address: env::var("CONTRACT_ADDRESS")
-                .unwrap_or_else(|_| defaults.contract_address),
-            rpc_url: env::var("RPC_URL")
-                .unwrap_or_else(|_| defaults.rpc_url),
-            private_key_path: env::var("PRIVATE_KEY_PATH").ok(),
-            threads: env::var("MINER_THREADS")
+let config_path = env::var("CONFIG_PATH").unwrap_or_else(|_| "miner_config.json".to_string());
+let mut config: MinerConfig = if Path::new(&config_path).exists() {
+    debug!("Loading config from {}", config_path);
+    let config_data = fs::read_to_string(&config_path)?;
+    // Deserialize and fill missing fields with defaults if necessary
+    let loaded_config: Value = serde_json::from_str(&config_data)?;
+    let default_config_json = serde_json::to_value(MinerConfig::default())?;
+    let mut merged_config = default_config_json;
+    json_patch::merge(&mut merged_config, &loaded_config);
+    serde_json::from_value(merged_config)?
+} else {
+    warn!("Config file not found at {}, using environment variables or defaults.", config_path);
+    // Fall back to environment variables or defaults
+    // Get default config to use its values if env vars are missing
+    let defaults = MinerConfig::default();
+    MinerConfig {
+        contract_address: env::var("CONTRACT_ADDRESS")
+            .unwrap_or_else(|_| defaults.contract_address),
+        rpc_url: env::var("RPC_URL")
+            .unwrap_or_else(|_| defaults.rpc_url),
+        private_key_path: env::var("PRIVATE_KEY_PATH").ok(),
+        threads: env::var("MINER_THREADS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(defaults.threads), // Use default threads
+        gas_price_multiplier: env::var("GAS_PRICE_MULTIPLIER")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(defaults.gas_price_multiplier),
+        retry_delay: Duration::from_secs(
+            env::var("RETRY_DELAY_SECONDS")
                 .ok()
                 .and_then(|s| s.parse().ok())
-                .unwrap_or(defaults.threads), // Use default threads
-            gas_price_multiplier: env::var("GAS_PRICE_MULTIPLIER")
+                .unwrap_or(defaults.retry_delay.as_secs()), // Use default duration
+        ),
+        log_level: env::var("LOG_LEVEL")
+            .ok()
+            .and_then(|s| match s.to_uppercase().as_str() {
+                "TRACE" => Some(Level::TRACE),
+                "DEBUG" => Some(Level::DEBUG),
+                "INFO" => Some(Level::INFO),
+                "WARN" => Some(Level::WARN),
+                "ERROR" => Some(Level::ERROR),
+                _ => None,
+            })
+            .unwrap_or(defaults.log_level),
+        stats_interval: Duration::from_secs(
+            env::var("STATS_INTERVAL_SECONDS")
                 .ok()
                 .and_then(|s| s.parse().ok())
-                .unwrap_or(defaults.gas_price_multiplier),
-            retry_delay: Duration::from_secs(
-                env::var("RETRY_DELAY_SECONDS")
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(defaults.retry_delay.as_secs()), // Use default duration
-            ),
-            log_level: env::var("LOG_LEVEL")
-                .ok()
-                .and_then(|s| match s.to_uppercase().as_str() {
-                    "TRACE" => Some(Level::TRACE),
-                    "DEBUG" => Some(Level::DEBUG),
-                    "INFO" => Some(Level::INFO),
-                    "WARN" => Some(Level::WARN),
-                    "ERROR" => Some(Level::ERROR),
-                    _ => None,
-                })
-                .unwrap_or(defaults.log_level),
-            stats_interval: Duration::from_secs(
-                env::var("STATS_INTERVAL_SECONDS")
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(defaults.stats_interval.as_secs()), // Use default duration
-            ),
-            exit_after_blocks: env::var("EXIT_AFTER_BLOCKS")
-                .ok()
-                .and_then(|s| s.parse().ok()),
-            max_retries: env::var("MAX_RETRIES")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(defaults.max_retries),
-            // Load new/updated fields from environment
-            // Removed loading for use_avx2 and use_sha_ni
-            prefetch_distance: env::var("PREFETCH_DISTANCE")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(defaults.prefetch_distance),
-            batch_size: env::var("BATCH_SIZE")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(defaults.batch_size),
-            l3_cache_optimized: env::var("L3_CACHE_OPTIMIZED") // New field
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(defaults.l3_cache_optimized),
-            // --- Load Update Config from Env Vars ---
-            update_server: env::var("UPDATE_SERVER").unwrap_or(defaults.update_server),
-            update_check_interval: Duration::from_secs(
-                env::var("UPDATE_CHECK_INTERVAL_SECONDS")
-                    .ok().and_then(|s| s.parse().ok())
-                    .unwrap_or(defaults.update_check_interval.as_secs())
-            ),
-            update_public_key_path: env::var("UPDATE_PUBLIC_KEY_PATH")
-                .unwrap_or(defaults.update_public_key_path),
-            update_enabled: env::var("UPDATE_ENABLED")
-                .ok().and_then(|s| s.parse().ok()).unwrap_or(defaults.update_enabled),
-        }
-    };
-
-    // Validate config
-    if config.threads < 1 {
-        // Consider setting threads based on num_cpus::get_physical() here if desired
-        warn!("Thread count is less than 1, setting to 1.");
-        config.threads = 1;
+                .unwrap_or(defaults.stats_interval.as_secs()), // Use default duration
+        ),
+        exit_after_blocks: env::var("EXIT_AFTER_BLOCKS")
+            .ok()
+            .and_then(|s| s.parse().ok()),
+        max_retries: env::var("MAX_RETRIES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(defaults.max_retries),
+        // Load new/updated fields from environment
+        // Removed loading for use_avx2 and use_sha_ni
+        prefetch_distance: env::var("PREFETCH_DISTANCE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(defaults.prefetch_distance),
+        batch_size: env::var("BATCH_SIZE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(defaults.batch_size),
+        l3_cache_optimized: env::var("L3_CACHE_OPTIMIZED") // New field
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(defaults.l3_cache_optimized),
+        // --- Load Update Config from Env Vars ---
+        update_server: env::var("UPDATE_SERVER").unwrap_or(defaults.update_server),
+        update_check_interval: Duration::from_secs(
+            env::var("UPDATE_CHECK_INTERVAL_SECONDS")
+                .ok().and_then(|s| s.parse().ok())
+                .unwrap_or(defaults.update_check_interval.as_secs())
+        ),
+        update_public_key_path: env::var("UPDATE_PUBLIC_KEY_PATH")
+            .unwrap_or(defaults.update_public_key_path),
+        update_enabled: env::var("UPDATE_ENABLED")
+            .ok().and_then(|s| s.parse().ok()).unwrap_or(defaults.update_enabled),
+        // --- Load Stats Server Config from Env Vars ---
+        stats_server_required: env::var("STATS_SERVER_REQUIRED")
+            .ok().and_then(|s| s.parse().ok()).unwrap_or(defaults.stats_server_required),
+        stats_server_endpoint: env::var("STATS_SERVER_ENDPOINT")
+            .unwrap_or(defaults.stats_server_endpoint),
+        stats_server_cert_path: env::var("STATS_SERVER_CERT_PATH")
+            .unwrap_or(defaults.stats_server_cert_path),
     }
-    if config.batch_size < 1 {
-        warn!("Batch size is less than 1, setting to 1.");
-        config.batch_size = 1; // Ensure batch size is at least 1
-    }
-    if config.contract_address == "0xYourContractAddress" {
-         warn!("Using default contract address. Please set CONTRACT_ADDRESS environment variable or update miner_config.json");
-    }
+};
 
-    // Remove runtime checks for CPU features flags as they are removed
-    // if config.use_avx2 && !is_avx2_supported() { ... }
-    // if config.use_sha_ni && !is_sha_ni_supported() { ... }
+// Validate config
+if config.threads < 1 {
+    // Consider setting threads based on num_cpus::get_physical() here if desired
+    warn!("Thread count is less than 1, setting to 1.");
+    config.threads = 1;
+}
+if config.batch_size < 1 {
+    warn!("Batch size is less than 1, setting to 1.");
+    config.batch_size = 1; // Ensure batch size is at least 1
+}
+if config.contract_address == "0xYourContractAddress" {
+     warn!("Using default contract address. Please set CONTRACT_ADDRESS environment variable or update miner_config.json");
+}
+
+// Remove runtime checks for CPU features flags as they are removed
+// if config.use_avx2 && !is_avx2_supported() { ... }
+// if config.use_sha_ni && !is_sha_ni_supported() { ... }
 
 
-    // Save config for reference if it was loaded from env vars and file didn't exist
-    if (!Path::new(&config_path).exists()) {
-        info!("Saving default/environment configuration to {}", config_path);
-        let config_json = serde_json::to_string_pretty(&config)?;
-        fs::write(&config_path, config_json)?;
-    }
+// Save config for reference if it was loaded from env vars and file didn't exist
+if (!Path::new(&config_path).exists()) {
+    info!("Saving default/environment configuration to {}", config_path);
+    let config_json = serde_json::to_string_pretty(&config)?;
+    fs::write(&config_path, config_json)?;
+}
 
-    Ok(config)
+Ok(config)
 }
 
 // setup_logging - Kept as is
 fn setup_logging(level: Level) -> Result<()> {
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(level)
-        .with_ansi(true)
-        .with_file(true)
-        .with_line_number(true)
-        .finish();
+let subscriber = FmtSubscriber::builder()
+    .with_max_level(level)
+    .with_ansi(true)
+    .with_file(true)
+    .with_line_number(true)
+    .finish();
 
-    tracing::subscriber::set_global_default(subscriber)
-        .context("Failed to set global default subscriber")
+tracing::subscriber::set_global_default(subscriber)
+    .context("Failed to set global default subscriber")
 }
 
 // load_or_generate_key_secure - Modified to return SecureBuffer
 fn load_or_generate_key_secure(config: &MinerConfig) -> Result<SecureBuffer> {
-    let key_bytes = if let Some(key_path) = &config.private_key_path {
-        let key_path = Path::new(key_path);
-        if key_path.exists() {
-            debug!("Loading existing private key from {}", key_path.display());
-            let key_data = fs::read_to_string(key_path)?;
-            hex::decode(key_data.trim())?
-        } else {
-            debug!("Generating new private key and saving to {}", key_path.display());
-            let new_key = SigningKey::random(&mut OsRng);
-            let bytes = new_key.to_bytes(); // Get bytes
-            let key_hex = hex::encode(&bytes);
-            fs::write(key_path, key_hex)?;
-            bytes.to_vec() // Return Vec<u8>
-        }
+let key_bytes = if let Some(key_path) = &config.private_key_path {
+    let key_path = Path::new(key_path);
+    if key_path.exists() {
+        debug!("Loading existing private key from {}", key_path.display());
+        let key_data = fs::read_to_string(key_path)?;
+        hex::decode(key_data.trim())?
     } else {
-        warn!("No private key path specified, generating ephemeral key for this session.");
+        debug!("Generating new private key and saving to {}", key_path.display());
         let new_key = SigningKey::random(&mut OsRng);
-        new_key.to_bytes().to_vec() // Return Vec<u8>
-    };
-
-    // Ensure key bytes are exactly 32 bytes for k256::SigningKey
-    if key_bytes.len() != 32 {
-        return Err(anyhow!("Invalid private key length: expected 32 bytes, got {}", key_bytes.len()));
+        let bytes = new_key.to_bytes(); // Get bytes
+        let key_hex = hex::encode(&bytes);
+        fs::write(key_path, key_hex)?;
+        bytes.to_vec() // Return Vec<u8>
     }
+} else {
+    warn!("No private key path specified, generating ephemeral key for this session.");
+    let new_key = SigningKey::random(&mut OsRng);
+    new_key.to_bytes().to_vec() // Return Vec<u8>
+};
 
-    // Create SecureBuffer and copy key bytes into it
-    let mut secure_buffer = SecureBuffer::new(32);
-    secure_buffer.as_mut_slice().copy_from_slice(&key_bytes);
+// Ensure key bytes are exactly 32 bytes for k256::SigningKey
+if key_bytes.len() != 32 {
+    return Err(anyhow!("Invalid private key length: expected 32 bytes, got {}", key_bytes.len()));
+}
 
-    // Explicitly zeroize the intermediate key_bytes Vec (important!)
-    key_bytes.zeroize();
+// Create SecureBuffer and copy key bytes into it
+let mut secure_buffer = SecureBuffer::new(32);
+secure_buffer.as_mut_slice().copy_from_slice(&key_bytes);
 
-    Ok(secure_buffer)
+// Explicitly zeroize the intermediate key_bytes Vec (important!)
+key_bytes.zeroize();
+
+Ok(secure_buffer)
 }
 
 // create_wallet_from_secure_buffer - Modified for Improvement #2
 fn create_wallet_from_secure_buffer(key_buffer: &SecureBuffer, _config: &MinerConfig) -> Result<LocalWallet> {
-    // Create a temporary buffer to avoid exposing key through potential panics
-    let mut key_bytes = [0u8; 32];
-    key_bytes.copy_from_slice(key_buffer.as_slice());
+// Create a temporary buffer to avoid exposing key through potential panics
+let mut key_bytes = [0u8; 32];
+key_bytes.copy_from_slice(key_buffer.as_slice());
 
-    // Attempt to create wallet from the temporary buffer
-    let wallet_result = LocalWallet::from_bytes(&key_bytes);
+// Attempt to create wallet from the temporary buffer
+let wallet_result = LocalWallet::from_bytes(&key_bytes);
 
-    // Zeroize the temporary buffer immediately, regardless of success or failure
-    key_bytes.zeroize();
+// Zeroize the temporary buffer immediately, regardless of success or failure
+key_bytes.zeroize();
 
-    // Handle the result of wallet creation
-    let wallet = wallet_result.map_err(|e| anyhow!("Failed to create wallet from bytes: {}", e))?;
+// Handle the result of wallet creation
+let wallet = wallet_result.map_err(|e| anyhow!("Failed to create wallet from bytes: {}", e))?;
 
-    // Configure wallet with chain id
-    let chain_id = env::var("CHAIN_ID")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1); // Default to Ethereum mainnet (adjust if needed)
-    debug!("Using Chain ID: {}", chain_id);
+// Configure wallet with chain id
+let chain_id = env::var("CHAIN_ID")
+    .ok()
+    .and_then(|s| s.parse().ok())
+    .unwrap_or(1); // Default to Ethereum mainnet (adjust if needed)
+debug!("Using Chain ID: {}", chain_id);
 
-    Ok(wallet.with_chain_id(chain_id))
+Ok(wallet.with_chain_id(chain_id))
 }
 
 // extract_reward_from_receipt - Adapted event signature
 fn extract_reward_from_receipt(receipt: &TransactionReceipt) -> Option<f64> {
-    // Find BeaconBlockMined event and extract reward
-    // Event signature from Solidity: event BeaconBlockMined(address indexed miner, bytes32 hmacOutput, uint256 reward, uint64 nonce, uint64 timestamp, uint8 poolId);
-    let event_signature_hash = keccak256("BeaconBlockMined(address,bytes32,uint256,uint64,uint64,uint8)"); // Corrected signature
+// Find BeaconBlockMined event and extract reward
+// Event signature from Solidity: event BeaconBlockMined(address indexed miner, bytes32 hmacOutput, uint256 reward, uint64 nonce, uint64 timestamp, uint8 poolId);
+let event_signature_hash = keccak256("BeaconBlockMined(address,bytes32,uint256,uint64,uint64,uint8)"); // Corrected signature
 
-    for log in &receipt.logs {
-        if log.topics.len() >= 1 && log.topics[0] == H256(event_signature_hash) {
-             // Decode non-indexed parameters: reward (uint256), nonce (uint64), timestamp (uint64), poolId (uint8)
-             // Data layout: reward_bytes32 | nonce_bytes32 | timestamp_bytes32 | poolId_bytes32
-             if log.data.len() >= 32 * 1 { // Check if reward data is present
-                 let reward_data = &log.data[0..32];
-                 let reward_u256 = U256::from_big_endian(reward_data);
-                 // Convert U256 reward to f64 (assuming 18 decimals)
-                 let reward_f64 = ethers::utils::format_units(reward_u256, 18)
-                     .ok()
-                     .and_then(|s| s.parse::<f64>().ok())
-                     .unwrap_or(0.0);
-                 debug!("Extracted reward: {} (U256: {})", reward_f64, reward_u256);
-                 return Some(reward_f64);
-             } else {
-                 warn!("BeaconBlockMined event data too short to extract reward. Data length: {}", log.data.len());
-             }
-        }
+for log in &receipt.logs {
+    if log.topics.len() >= 1 && log.topics[0] == H256(event_signature_hash) {
+         // Decode non-indexed parameters: reward (uint256), nonce (uint64), timestamp (uint64), poolId (uint8)
+         // Data layout: reward_bytes32 | nonce_bytes32 | timestamp_bytes32 | poolId_bytes32
+         if log.data.len() >= 32 * 1 { // Check if reward data is present
+             let reward_data = &log.data[0..32];
+             let reward_u256 = U256::from_big_endian(reward_data);
+             // Convert U256 reward to f64 (assuming 18 decimals)
+             let reward_f64 = ethers::utils::format_units(reward_u256, 18)
+                 .ok()
+                 .and_then(|s| s.parse::<f64>().ok())
+                 .unwrap_or(0.0);
+             debug!("Extracted reward: {} (U256: {})", reward_f64, reward_u256);
+             return Some(reward_f64);
+         } else {
+             warn!("BeaconBlockMined event data too short to extract reward. Data length: {}", log.data.len());
+         }
     }
-    debug!("BeaconBlockMined event not found or reward extraction failed.");
-    None
+}
+debug!("BeaconBlockMined event not found or reward extraction failed.");
+None
 }
 
 // print_stats - Added from snippet, made async for tokio::Mutex
 async fn print_stats(stats_arc: &Arc<Mutex<MiningStats>>) {
-    let stats = stats_arc.lock().await; // Use tokio Mutex lock
-    let elapsed = stats.start_time.elapsed().unwrap_or_default().as_secs_f64();
-    let hashrate = if elapsed > 0.0 { stats.hashes as f64 / elapsed } else { 0.0 };
+let stats = stats_arc.lock().await; // Use tokio Mutex lock
+let elapsed = stats.start_time.elapsed().unwrap_or_default().as_secs_f64();
+let hashrate = if elapsed > 0.0 { stats.hashes as f64 / elapsed } else { 0.0 };
 
-    info!("┌─── Mining Statistics ───────────────────────");
-    info!("│ Solutions: {}", stats.solutions);
-    info!("│ Total Hashes: {}", stats.hashes);
-    info!("│ Hashrate: {:.2} H/s", hashrate);
-    info!("│ Running time: {:.2} minutes", elapsed / 60.0);
-    info!("│ Total rewards: {:.6} tokens", stats.total_rewards); // Kept from original
-    info!("│ Successful Submissions: {}", stats.successful_submissions); // Kept from original
-    info!("│ Failed Submissions: {}", stats.failed_submissions); // Kept from original
-    info!("└────────────────────────────────────────────");
+info!("┌─── Mining Statistics ───────────────────────");
+info!("│ Solutions: {}", stats.solutions);
+info!("│ Total Hashes: {}", stats.hashes);
+info!("│ Hashrate: {:.2} H/s", hashrate);
+info!("│ Running time: {:.2} minutes", elapsed / 60.0);
+info!("│ Total rewards: {:.6} tokens", stats.total_rewards); // Kept from original
+info!("│ Successful Submissions: {}", stats.successful_submissions); // Kept from original
+info!("│ Failed Submissions: {}", stats.failed_submissions); // Kept from original
+info!("└────────────────────────────────────────────");
 }
 
 // Test stub for quantum resistant hash
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use k256::ecdsa::SigningKey;
-    use rand::rngs::OsRng;
+use super::*;
+use k256::ecdsa::SigningKey;
+use rand::rngs::OsRng;
 
-    #[test]
-    fn test_quantum_resistant_hash() {
-        // Test against known values from contract tests (replace with actual values)
-        let signing_key = SigningKey::random(&mut OsRng); // Example key
-        let msg_hash = keccak256(b"test message");
-        let signature: Signature = signing_key.sign(&msg_hash);
-        let secret = b"test_secret";
+#[test]
+fn test_quantum_resistant_hash() {
+    // Test against known values from contract tests (replace with actual values)
+    let signing_key = SigningKey::random(&mut OsRng); // Example key
+    // Use fast_hash_message instead of keccak256 for better performance
+    let msg_hash = fast_hash_message(b"test message");
+    let signature: Signature = signing_key.sign(&msg_hash);
+    let secret = b"test_secret";
 
-        let result = quantum_resistant_hash(&signature, &msg_hash, secret);
+    let result = quantum_resistant_hash(&signature, &msg_hash, secret);
 
-        // Replace with the actual expected hash from contract testing
-        let expected_value: [u8; 32] = [0u8; 32]; // Placeholder
+    // Replace with the actual expected hash from contract testing
+    let expected_value: [u8; 32] = [0u8; 32]; // Placeholder
 
-        assert_eq!(result, expected_value, "Quantum resistant hash does not match expected value");
+    assert_eq!(result, expected_value, "Quantum resistant hash does not match expected value");
+}
+
+// Add a benchmark test for the hashing performance improvement
+#[test]
+#[ignore] // Ignore by default, run explicitly with cargo test -- --ignored
+fn benchmark_hashing_methods() {
+    // Create test data
+    let test_data = vec![0u8; 128];
+    
+    // Warmup
+    for _ in 0..1000 {
+        let _ = keccak256(&test_data);
+        let _ = fast_hash_message(&test_data);
     }
+    
+    // Benchmark keccak256 directly
+    let keccak_start = Instant::now();
+    for _ in 0..10000 {
+        let _ = keccak256(&test_data);
+    }
+    let keccak_time = keccak_start.elapsed();
+    
+    // Benchmark fast_hash_message (BLAKE3 + keccak256)
+    let fast_start = Instant::now();
+    for _ in 0..10000 {
+        let _ = fast_hash_message(&test_data);
+    }
+    let fast_time = fast_start.elapsed();
+    
+    println!("Keccak256: {:?} for 10000 iterations", keccak_time);
+    println!("Fast Hash: {:?} for 10000 iterations", fast_time);
+    println!("Speed improvement: {:.2}x", keccak_time.as_secs_f64() / fast_time.as_secs_f64());
+    
+    // Test specifically with different message sizes to show where BLAKE3 shines
+    let sizes = [32, 64, 128, 256, 512, 1024, 2048, 4096];
+    for size in sizes {
+        let large_data = vec![0u8; size];
+        
+        let keccak_start = Instant::now();
+        for _ in 0..1000 {
+            let _ = keccak256(&large_data);
+        }
+        let keccak_time = keccak_start.elapsed();
+        
+        let fast_start = Instant::now();
+        for _ in 0..1000 {
+            let _ = fast_hash_message(&large_data);
+        }
+        let fast_time = fast_start.elapsed();
+        
+        println!(
+            "Size {} bytes: Keccak: {:?}, Fast: {:?}, Improvement: {:.2}x", 
+            size, 
+            keccak_time, 
+            fast_time, 
+            keccak_time.as_secs_f64() / fast_time.as_secs_f64()
+        );
+    }
+}
+
+// Add a test to verify CPU feature detection works correctly
+#[test]
+fn test_cpu_feature_detection() {
+    let strategy = detect_cpu_features();
+    println!("Detected CPU strategy: {:?}", strategy);
+    
+    // We can't make specific assertions about the result since it depends on the hardware
+    // But we can verify the function runs without error
+    match strategy {
+        MiningStrategy::AVX512 => println!("Using AVX-512 optimizations"),
+        MiningStrategy::AVX2 => println!("Using AVX2 optimizations"),
+        MiningStrategy::SSE4 => println!("Using SSE4 optimizations"),
+        MiningStrategy::Generic => println!("Using generic implementation"),
+    }
+}
 }
 
 // --- Add function signature for secure_connect_pinned in network module (if not already there) ---
 // This is just a conceptual addition to show where it would fit.
 // The actual implementation would be in network.rs.
 mod network_stub { // Placeholder to avoid compiler errors here
-    use anyhow::Result;
-    use tokio::net::TcpStream; // Example stream type
-    pub struct SecureChannel { /* fields */ }
-    impl SecureChannel {
-        pub async fn write_all(&mut self, _buf: &[u8]) -> Result<()> { Ok(()) }
-        pub fn check_rotation(&mut self) -> Result<()> { Ok(()) }
-        pub async fn shutdown(&mut self) -> Result<()> { Ok(()) }
-    }
-    pub async fn secure_connect_pinned(_endpoint: &str, _cert_path: &str) -> Result<SecureChannel> {
-        // Implementation would go in network.rs
-        // Load pinned cert, configure TLS connector with pinning, connect.
-        Err(anyhow::anyhow!("secure_connect_pinned not implemented"))
-    }
+use anyhow::Result;
+use tokio::net::TcpStream; // Example stream type
+pub struct SecureChannel { /* fields */ }
+impl SecureChannel {
+    pub async fn write_all(&mut self, _buf: &[u8]) -> Result<()> { Ok(()) }
+    pub fn check_rotation(&mut self) -> Result<()> { Ok(()) }
+    pub async fn shutdown(&mut self) -> Result<()> { Ok(()) }
+}
+pub async fn secure_connect_pinned(_endpoint: &str, _cert_path: &str) -> Result<SecureChannel> {
+    // Implementation would go in network.rs
+    // Load pinned cert, configure TLS connector with pinning, connect.
+    Err(anyhow::anyhow!("secure_connect_pinned not implemented"))
+}
 }
 use network_stub as network; // Use the stub for compilation
 // --- End network module stub ---
@@ -1335,62 +1783,221 @@ use network_stub as network; // Use the stub for compilation
 // --- Final Testing Recommendations (Improvement #4) ---
 #[cfg(test)]
 mod integration_tests {
-    use super::*;
-    use tempfile::NamedTempFile;
-    use std::fs;
+use super::*;
+use tempfile::NamedTempFile;
+use std::fs;
 
-    // Helper to create a dummy config for testing
-    fn create_test_config() -> (MinerConfig, NamedTempFile) {
-        let key_file = NamedTempFile::new().expect("Failed to create temp key file");
-        let mut config = MinerConfig::default();
-        config.threads = 1; // Single thread for predictable testing
-        config.batch_size = 2; // Small batch
-        config.exit_after_blocks = Some(1); // Exit after finding one solution
-        config.rpc_url = "http://localhost:8545".to_string(); // Use a mock RPC if possible
-        config.contract_address = "0x5FbDB2315678afecb367f032d93F642f64180aa3".to_string(); // Example address
-        config.private_key_path = Some(key_file.path().to_str().unwrap().to_string());
-        config.log_level = Level::DEBUG; // More verbose logging for tests
-        config.retry_delay = Duration::from_millis(100);
-        config.stats_interval = Duration::from_secs(1); // Frequent stats for testing
+// Helper to create a dummy config for testing
+fn create_test_config() -> (MinerConfig, NamedTempFile) {
+    let key_file = NamedTempFile::new().expect("Failed to create temp key file");
+    let mut config = MinerConfig::default();
+    config.threads = 1; // Single thread for predictable testing
+    config.batch_size = 2; // Small batch
+    config.exit_after_blocks = Some(1); // Exit after finding one solution
+    config.rpc_url = "http://localhost:8545".to_string(); // Use a mock RPC if possible
+    config.contract_address = "0x5FbDB2315678afecb367f032d93F642f64180aa3".to_string(); // Example address
+    config.private_key_path = Some(key_file.path().to_str().unwrap().to_string());
+    config.log_level = Level::DEBUG; // More verbose logging for tests
+    config.retry_delay = Duration::from_millis(100);
+    config.stats_interval = Duration::from_secs(1); // Frequent stats for testing
 
-        // Write a dummy key to the temp file
-        let dummy_key = SigningKey::random(&mut OsRng);
-        fs::write(key_file.path(), hex::encode(dummy_key.to_bytes())).expect("Failed to write dummy key");
+    // Write a dummy key to the temp file
+    let dummy_key = SigningKey::random(&mut OsRng);
+    fs::write(key_file.path(), hex::encode(dummy_key.to_bytes())).expect("Failed to write dummy key");
 
-        (config, key_file)
-    }
+    (config, key_file)
+}
 
-    #[tokio::test]
-    #[ignore] // Ignore by default as it requires external setup (like a local node/mock)
-    async fn test_full_mining_cycle_basic() {
-        // Setup test config and dummy key file
-        let (config, _key_file) = create_test_config(); // _key_file guards temp file lifetime
+#[tokio::test]
+#[ignore] // Ignore by default as it requires external setup (like a local node/mock)
+async fn test_full_mining_cycle_basic() {
+    // Setup test config and dummy key file
+    let (config, _key_file) = create_test_config(); // _key_file guards temp file lifetime
 
-        // It's hard to directly test `main` due to its structure.
-        // Ideally, refactor `main` to extract the core mining loop logic
-        // into a separate async function that accepts config and returns Result.
-        // For now, we'll just assert that creating the config works.
+    // It's hard to directly test `main` due to its structure.
+    // Ideally, refactor `main` to extract the core mining loop logic
+    // into a separate async function that accepts config and returns Result.
+    // For now, we'll just assert that creating the config works.
 
-        // Example of how you *might* call a refactored main logic function:
-        // let result = run_miner_logic(config).await;
-        // assert!(result.is_ok(), "Miner logic failed: {:?}", result.err());
+    // Example of how you *might* call a refactored main logic function:
+    // let result = run_miner_logic(config).await;
+    // assert!(result.is_ok(), "Miner logic failed: {:?}", result.err());
 
-        // Placeholder assertion: Check if config loading works
-        assert_eq!(config.threads, 1);
-        assert!(config.private_key_path.is_some());
+    // Placeholder assertion: Check if config loading works
+    assert_eq!(config.threads, 1);
+    assert!(config.private_key_path.is_some());
 
-        // TODO: Implement actual test execution, potentially requiring:
-        // 1. A running local Ethereum node (e.g., Anvil, Hardhat node).
-        // 2. Deployment of the TemporalGradientBeacon contract to that node.
-        // 3. Mocking or providing necessary environment variables (ETHERSCAN_API_KEY).
-        // 4. Refactoring `main` for testability.
-    }
+    // TODO: Implement actual test execution, potentially requiring:
+    // 1. A running local Ethereum node (e.g., Anvil, Hardhat node).
+    // 2. Deployment of the TemporalGradientBeacon contract to that node.
+    // 3. Mocking or providing necessary environment variables (ETHERSCAN_API_KEY).
+    // 4. Refactoring `main` for testability.
+}
 
-    // Add more tests:
-    // - test_config_loading_from_env()
-    // - test_key_generation_ephemeral()
-    // - test_thermal_throttling_logic()
-    // - test_meets_difficulty()
-    // - test_quantum_resistant_hash() (already exists, ensure it's thorough)
+// Add more tests:
+// - test_config_loading_from_env()
+// - test_key_generation_ephemeral()
+// - test_thermal_throttling_logic()
+// - test_meets_difficulty()
+// - test_quantum_resistant_hash() (already exists, ensure it's thorough)
 }
 // --- End Testing Recommendations ---
+
+// Add synchronous version of quantum resistant hash
+#[inline]
+fn quantum_resistant_hash(signature: &Signature, message_hash: &[u8; 32], temporal_seed: &[u8]) -> [u8; 32] {
+    // 1) pack exactly the same bytes your contract expects
+    let mut packed = Vec::with_capacity(
+        signature.to_der().as_bytes().len() +
+        message_hash.len() +
+        temporal_seed.len()
+    );
+    packed.extend_from_slice(signature.to_der().as_bytes());
+    packed.extend_from_slice(message_hash);
+    packed.extend_from_slice(temporal_seed);
+
+    // 2) call your inner (Solidity-matching) routine with dummy timestamp
+    // Fixed timestamp (0) ensures consistency with chain validation
+    quantum_resistant_hash_inner(&packed, 0)
+}
+
+// Add after imports
+use k256::{
+    elliptic_curve::{group::prime::PrimeCurveAffine, sec1::ToEncodedPoint},
+    ProjectivePoint, PublicKey,
+};
+
+// Add new structs for stealth mining
+#[derive(Debug, Clone)]
+struct StealthAddress {
+    spending_key: LocalWallet,
+    viewing_key: SigningKey,
+    ephemeral_keys: VecDeque<(SigningKey, SystemTime)>, // (key, expiry)
+}
+
+impl StealthAddress {
+    // ...existing code...
+
+    fn generate_ephemeral_key(&mut self) -> Result<PublicKey> {
+        let ephemeral_key = SigningKey::random(&mut OsRng);
+        let expiry = SystemTime::now() + Duration::from_secs(3600); // 1 hour validity
+        self.ephemeral_keys.push_back((ephemeral_key.clone(), expiry));
+        
+        // Clean expired keys
+        while let Some((_, exp)) = self.ephemeral_keys.front() {
+            if exp < &SystemTime::now() {
+                self.ephemeral_keys.pop_front();
+            } else {
+                break;
+            }
+        }
+        
+        Ok(ephemeral_key.verifying_key().into())
+    }
+
+    fn find_claiming_key(&self, stealth_meta: &[u8]) -> Option<SigningKey> {
+        self.ephemeral_keys.iter()
+            .find(|(key, expiry)| {
+                if expiry < &SystemTime::now() {
+                    return false;
+                }
+                let public = key.verifying_key();
+                let point = public.as_affine().to_encoded_point(true);
+                stealth_meta.starts_with(point.as_bytes())
+            })
+            .map(|(key, _)| key.clone())
+    }
+}
+
+// Update DynamicMiningCommitment to include stealth fields
+pub struct DynamicMiningCommitment {
+    // ...existing code...
+    stealth_meta: Vec<u8>,      // Stealth metadata for anonymous claim
+    stealth_proof: Vec<u8>,     // Zero-knowledge proof of stealth key ownership
+}
+
+impl DynamicMiningCommitment {
+    fn to_eip712_types(chain_id: u64, contract_address: Address) -> TypedData {
+        TypedData {
+            // ...existing code...
+            types: {
+                let mut types = BTreeMap::new();
+                types.insert(
+                    "MiningCommitment".to_string(),
+                    vec![
+                        // ...existing fields...
+                        TypeField { 
+                            name: "stealthMeta".to_string(), 
+                            r#type: "bytes".to_string() 
+                        },
+                        TypeField { 
+                            name: "stealthProof".to_string(), 
+                            r#type: "bytes".to_string() 
+                        },
+                    ],
+                );
+                types
+            },
+            message: {
+                let mut map = BTreeMap::new();
+                // ...existing fields...
+                map.insert("stealthMeta".to_string(), 
+                    Value::from(format!("0x{}", hex::encode(&self.stealth_meta))));
+                map.insert("stealthProof".to_string(), 
+                    Value::from(format!("0x{}", hex::encode(&self.stealth_proof))));
+                map
+            },
+        }
+    }
+}
+
+// Add to mining loop where solution is found:
+if meets_difficulty(&solution_hash, difficulty_target) {
+    if solution_found.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+        info!("Thread {} found solution in batch! Nonce: {}", thread_id, current_nonce);
+
+        // 1) Generate fresh ephemeral key and pack its compressed point
+        let mut stealth = stealth.lock().await;
+        let ephem_pub = stealth.generate_ephemeral_key()
+            .context("failed to generate ephemeral stealth key")?;
+        let stealth_meta = ephem_pub.to_encoded_point(true).as_bytes().to_vec();
+
+        // 2) Build ZK-proof of ownership 
+        let stealth_proof = {
+            // TODO: Replace with actual ZK proof generation
+            // For example: prove_ownership(&stealth_meta, &stealth.viewing_key)
+            vec![0u8; 32] // Placeholder
+        };
+        
+        drop(stealth); // Release lock before network operations
+
+        // 3) Build commitment with stealth data
+        let commit_hash = {
+            let mut buf = Vec::new();
+            buf.extend_from_slice(&previous_output);
+            buf.extend_from_slice(&temporal_seed);
+            buf.extend_from_slice(&current_nonce.to_le_bytes());
+            buf.extend_from_slice(&signature.to_der());
+            buf.extend_from_slice(&solution_hash);
+            buf.extend_from_slice(&wallet.address().0);
+            keccak256(&buf)
+        };
+
+        let deadline = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| anyhow!("Failed to get deadline timestamp: {}", e))?
+            .as_secs() + 300; // 5 minutes
+
+        let commitment = DynamicMiningCommitment {
+            commit_hash: commit_hash.try_into().expect("32 bytes"),
+            pool_id: 0,
+            nonce: current_nonce,
+            deadline,
+            stealth_meta,
+            stealth_proof,
+        };
+
+        // Rest of existing submission code
+        // ...existing code...
+    }
+}

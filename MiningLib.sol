@@ -4,6 +4,7 @@ pragma solidity ^0.8.28;
 import { BloomFilterLib } from "./BloomFilterLib.sol";
 import { ECDSAUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/cryptography/ECDSAUpgradeable.sol";
 import { MathUpgradeable as Math } from "@openzeppelin/contracts-upgradeable/utils/math/MathUpgradeable.sol";
+import { CoreUtilsLib } from "./CoreUtilsLib.sol";
 
 /**
  * @title MiningLib
@@ -188,16 +189,9 @@ library MiningLib {
         uint256 historySize
     ) internal view returns (bool found) {
         if (previousOutput == bytes32(0)) revert MalformedInput();
-        if (historySize > 32) historySize = 32;
-        assembly {
-            let ptr := history.slot
-            for { let i := 0 } lt(i, historySize) { i := add(i,1) } {
-                if eq(sload(add(ptr,i)), previousOutput) {
-                    found := 1
-                    break
-                }
-            }
-        }
+        // This function duplicates functionality in CoreUtilsLib.validatePreviousOutput
+        // Delegate to CoreUtilsLib's implementation for DRY code
+        return CoreUtilsLib.validatePreviousOutput(previousOutput, history, historySize);
     }
 
     /// @notice Estimate mining difficulty from hash

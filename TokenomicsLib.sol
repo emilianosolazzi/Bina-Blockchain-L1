@@ -46,14 +46,20 @@ library TokenomicsLib {
             state.currentEpoch += epochsPassed;
             state.epochStartBlock = block.number;
 
-            bool isHalving = block.number - state.lastHalvingBlock >= state.halvingInterval;
-            if (isHalving) {
-                newReward = newReward / 2;
+            // Calculate how many halving intervals (in blocks) have passed
+            uint256 intervals = (block.number - state.lastHalvingBlock) / state.halvingInterval;
+
+            // Apply a 35% reduction (i.e. keep 65%) each time one interval has passed
+            if (intervals > 0) {
+                for (uint256 i = 0; i < intervals; i++) {
+                    newReward = (newReward * 65) / 100;
+                }
                 state.rewardAmount = newReward;
-                state.lastHalvingBlock = block.number;
+                state.lastHalvingBlock += intervals * state.halvingInterval;
             }
 
-            emit TokenomicsUpdate(state.currentEpoch, newReward, block.number, isHalving);
+            // Emit event with isHalving=true if any halving occurred
+            emit TokenomicsUpdate(state.currentEpoch, newReward, block.number, intervals > 0);
         }
 
         return newReward;
@@ -65,7 +71,7 @@ library TokenomicsLib {
      * @param newBlocksPerEpoch New blocks per epoch (non-zero)
      */
     function setEpochBlocks(EpochState storage state, uint256 newBlocksPerEpoch) internal {
-        require(newBlocksPerEpoch != 0, "InvalidEpochParameters");
+        if (newBlocksPerEpoch == 0) revert InvalidEpochParameters();
         state.blocksPerEpoch = newBlocksPerEpoch;
     }
 
@@ -75,7 +81,7 @@ library TokenomicsLib {
      * @param newHalvingInterval New halving interval (non-zero)
      */
     function setHalvingInterval(EpochState storage state, uint256 newHalvingInterval) internal {
-        require(newHalvingInterval != 0, "InvalidEpochParameters");
+        if (newHalvingInterval == 0) revert InvalidEpochParameters();
         state.halvingInterval = newHalvingInterval;
     }
 

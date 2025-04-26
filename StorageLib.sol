@@ -4,6 +4,7 @@ pragma solidity ^0.8.28;
 /**
  * @title StorageLib
  * @notice Library for managing historical block storage
+ * @dev Uses a circular buffer pattern to optimize gas usage when storing beacon blocks
  */
 library StorageLib {
     // BeaconBlock structure for storing comprehensive block data
@@ -19,13 +20,19 @@ library StorageLib {
     }
 
     struct HistoricalStorage {
-        BeaconBlock[] blocks;
+        // Storage as a fixed-size mapping rather than a dynamic array
+        mapping(uint256 => BeaconBlock) blockMap;
         uint256 maxBlocks;
+        uint256 totalBlocks; // Total blocks ever archived (can exceed maxBlocks)
+        uint256 headIndex;   // Current position in the circular buffer
         bool enabled;
+        bool configured;     // Flag to prevent reconfiguration of maxBlocks
     }
     
     event HistoricalStorageConfigChanged(bool enabled, uint256 maxBlocks);
     event BlockArchived(uint256 indexed blockIndex, bytes32 output, address indexed miner);
+    
+    error AlreadyConfigured();
     
     function configureHistoricalStorage(
         HistoricalStorage storage self,
@@ -35,26 +42,70 @@ library StorageLib {
         uint256 genesisTimestamp,
         address sender
     ) internal {
+        require(maxBlocks > 0, "Max blocks must be > 0");
+        
+        // Prevent changing maxBlocks after initial configuration to avoid orphaned data
+        if (self.configured) {
+            // Can still toggle enabled/disabled state
+            self.enabled = enabled;
+            emit HistoricalStorageConfigChanged(enabled, self.maxBlocks);
+            return;
+        }
+        
         self.enabled = enabled;
         self.maxBlocks = maxBlocks;
+        self.configured = true; // Mark as configured to prevent future maxBlocks changes
         
-        // If enabling and we have no genesis block, add it
-        if (enabled && self.blocks.length == 0) {
-            self.blocks.push(
-                BeaconBlock({
-                    output: genesisOutput,
-                    previousOutput: bytes32(0),
-                    nonce: 0,
-                    miner: sender,
-                    actualDifficulty: 0,
-                    reward: 0, 
-                    timestamp: genesisTimestamp,
-                    poolId: 0
-                })
-            );
+        // If enabling and we have no blocks yet, add genesis block
+        if (enabled && self.totalBlocks == 0) {
+            // Initialize the circular buffer with genesis block at index 0
+            self.blockMap[0] = BeaconBlock({
+                output: genesisOutput,
+                previousOutput: bytes32(0),
+                nonce: 0,
+                miner: sender,
+                actualDifficulty: 0,
+                reward: 0, 
+                timestamp: genesisTimestamp,
+                poolId: 0
+            });
+            
+            self.totalBlocks = 1;
+            self.headIndex = 0;
         }
         
         emit HistoricalStorageConfigChanged(enabled, maxBlocks);
+    }
+    
+    /**
+     * @notice Force reconfiguration of maxBlocks (should be used with extreme caution)
+     * @dev This function can orphan data if maxBlocks is reduced
+     * @param self The storage reference
+     * @param newMaxBlocks New maximum number of blocks
+     * @param force Whether to force the change even if data loss may occur
+     */
+    function forceReconfigure(
+        HistoricalStorage storage self,
+        uint256 newMaxBlocks,
+        bool force
+    ) internal returns (bool success) {
+        require(newMaxBlocks > 0, "Max blocks must be > 0");
+        
+        // If reducing size, check if we'll lose data
+        if (newMaxBlocks < self.maxBlocks && self.totalBlocks > newMaxBlocks) {
+            // Will lose data - require force flag
+            if (!force) {
+                return false;
+            }
+            
+            // With force=true, we accept data loss
+            // Adjust head index to point within new bounds
+            self.headIndex = self.headIndex % newMaxBlocks;
+        }
+        
+        self.maxBlocks = newMaxBlocks;
+        emit HistoricalStorageConfigChanged(self.enabled, newMaxBlocks);
+        return true;
     }
     
     function archiveBlock(
@@ -70,30 +121,27 @@ library StorageLib {
     ) internal returns (uint256 blockIndex) {
         if (!self.enabled) return 0;
         
-        // If we've reached max capacity, remove oldest block
-        if (self.blocks.length >= self.maxBlocks && self.maxBlocks > 0) {
-            // Shift array elements (remove first element)
-            for (uint256 i = 0; i < self.blocks.length - 1; i++) {
-                self.blocks[i] = self.blocks[i + 1];
-            }
-            self.blocks.pop(); // Remove last duplicate
-        }
+        // Calculate the next position in the circular buffer
+        uint256 nextIndex = (self.headIndex + 1) % self.maxBlocks;
         
-        // Add new block
-        self.blocks.push(
-            BeaconBlock({
-                output: output,
-                previousOutput: previousOutput,
-                nonce: nonce,
-                miner: miner,
-                actualDifficulty: actualDifficulty,
-                reward: reward,
-                timestamp: timestamp,
-                poolId: poolId
-            })
-        );
+        // Add new block at the calculated position
+        self.blockMap[nextIndex] = BeaconBlock({
+            output: output,
+            previousOutput: previousOutput,
+            nonce: nonce,
+            miner: miner,
+            actualDifficulty: actualDifficulty,
+            reward: reward,
+            timestamp: timestamp,
+            poolId: poolId
+        });
         
-        blockIndex = self.blocks.length - 1;
+        // Update head index and total block count
+        self.headIndex = nextIndex;
+        self.totalBlocks += 1;
+        
+        // Return the absolute index (total blocks - 1)
+        blockIndex = self.totalBlocks - 1;
         emit BlockArchived(blockIndex, output, miner);
         return blockIndex;
     }
@@ -103,9 +151,26 @@ library StorageLib {
         uint256 startIndex,
         uint256 endIndex
     ) internal view returns (BeaconBlock[] memory blocks) {
-        if (endIndex > self.blocks.length) {
-            endIndex = self.blocks.length;
+        // Calculate how many blocks we can actually return
+        uint256 availableBlocks = self.totalBlocks;
+        uint256 oldestBlockIndex = 0;
+        
+        // If we have more blocks than maxBlocks, calculate the oldest available index
+        if (availableBlocks > self.maxBlocks) {
+            oldestBlockIndex = availableBlocks - self.maxBlocks;
         }
+        
+        // Ensure startIndex is not before the oldest available block
+        if (startIndex < oldestBlockIndex) {
+            startIndex = oldestBlockIndex;
+        }
+        
+        // Ensure endIndex doesn't exceed total blocks
+        if (endIndex > availableBlocks) {
+            endIndex = availableBlocks;
+        }
+        
+        // Return empty array if invalid range
         if (startIndex >= endIndex) {
             return new BeaconBlock[](0);
         }
@@ -114,9 +179,84 @@ library StorageLib {
         BeaconBlock[] memory result = new BeaconBlock[](resultLength);
         
         for (uint256 i = 0; i < resultLength; i++) {
-            result[i] = self.blocks[startIndex + i];
+            // Calculate the physical position in the circular buffer
+            uint256 actualIndex = (startIndex + i) % self.maxBlocks;
+            result[i] = self.blockMap[actualIndex];
         }
         
         return result;
+    }
+    
+    /**
+     * @notice Get a single historical block by its absolute index
+     * @dev Will revert if the index is out of bounds (older than maxBlocks)
+     * @param self The storage reference
+     * @param blockIndex The absolute index of the block to retrieve
+     * @return block The requested block
+     */
+    function getHistoricalBlock(
+        HistoricalStorage storage self,
+        uint256 blockIndex
+    ) internal view returns (BeaconBlock memory) {
+        require(self.enabled, "Historical storage not enabled");
+        
+        // Check that the requested block is within available range
+        uint256 oldestAvailable = self.totalBlocks > self.maxBlocks ? 
+            self.totalBlocks - self.maxBlocks : 0;
+            
+        require(blockIndex >= oldestAvailable, "Block index out of range (too old)");
+        require(blockIndex < self.totalBlocks, "Block index out of range (future)");
+        
+        // Calculate the physical index in the circular buffer
+        uint256 actualIndex = blockIndex % self.maxBlocks;
+        return self.blockMap[actualIndex];
+    }
+    
+    /**
+     * @notice Get information about the storage state
+     * @param self The storage reference
+     * @return enabled Whether historical storage is enabled
+     * @return maxBlocks Maximum number of blocks to store
+     * @return totalBlocks Total number of blocks ever archived
+     * @return oldestAvailable Index of the oldest available block
+     */
+    function getStorageInfo(
+        HistoricalStorage storage self
+    ) internal view returns (bool enabled, uint256 maxBlocks, uint256 totalBlocks, uint256 oldestAvailable) {
+        enabled = self.enabled;
+        maxBlocks = self.maxBlocks;
+        totalBlocks = self.totalBlocks;
+        oldestAvailable = self.totalBlocks > self.maxBlocks ? 
+            self.totalBlocks - self.maxBlocks : 0;
+            
+        return (enabled, maxBlocks, totalBlocks, oldestAvailable);
+    }
+    
+    /**
+     * @notice Check if changing maxBlocks would result in data loss
+     * @param self The storage reference
+     * @param newMaxBlocks Proposed new maximum blocks
+     * @return wouldLoseData Whether changing to newMaxBlocks would lose data
+     * @return dataLossCount Number of entries that would be lost
+     */
+    function checkReconfigurationImpact(
+        HistoricalStorage storage self,
+        uint256 newMaxBlocks
+    ) internal view returns (bool wouldLoseData, uint256 dataLossCount) {
+        if (newMaxBlocks >= self.maxBlocks) {
+            // Increasing size never loses data
+            return (false, 0);
+        }
+        
+        uint256 actualStored = self.totalBlocks > self.maxBlocks ? self.maxBlocks : self.totalBlocks;
+        
+        if (actualStored <= newMaxBlocks) {
+            // All current data fits in new size
+            return (false, 0);
+        }
+        
+        // Calculate how many entries would be lost
+        dataLossCount = actualStored - newMaxBlocks;
+        return (true, dataLossCount);
     }
 }

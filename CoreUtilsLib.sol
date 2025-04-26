@@ -65,6 +65,8 @@ library CoreUtilsLib {
         bytes32[32] storage history,
         uint256 historySize
     ) internal view returns (bool exists) {
+        if (output == bytes32(0)) return false; // Add consistency with MiningLib's validation
+        
         // Use unchecked for loop counter
         unchecked {
             // Ensure loop bound doesn't exceed actual array size (32)

@@ -185,15 +185,15 @@ contract TemporalGradientBeacon is
         __UUPSUpgradeable_init();
         __AccessControl_init();
         __EIP712_init("TemporalGradientBeacon", "1");
-        __AccessControl_init();
-        require(_tgbtToken != address(0) && _tstakeToken != address(0), "ZeroToken");
-        require(_difficulty >= MIN_DIFFICULTY && _difficulty <= MAX_DIFFICULTY, "InvalidDifficulty");
-        require(_tgbtToken != address(0) && _tstakeToken != address(0), "ZeroToken");
+
+        if (_tgbtToken == address(0) || _tstakeToken == address(0)) revert ZeroToken();
+        if (_difficulty < MIN_DIFFICULTY || _difficulty > MAX_DIFFICULTY) revert InvalidDifficulty();
+        
         tgbtToken = ITGBT(_tgbtToken);
         tstakeToken = ITGBT(_tstakeToken);
         targetDifficulty = _difficulty;
         outputExpiryBlocks = 50000;
-        targetDifficulty = _difficulty;
+        
         // Initialize tokenomics
         epochState.currentEpoch = 0;
         epochState.blocksPerEpoch = _blocksPerEpoch;
@@ -202,7 +202,7 @@ contract TemporalGradientBeacon is
         epochState.halvingInterval = _halvingInterval;
         epochState.rewardAmount = _initialReward;
         totalMined = 0;
-        epochState.rewardAmount = _initialReward;
+        
         // Initialize default mining pool
         governanceContext.miningPools[0] = MiningLib.MiningPool({
             targetDifficulty: _difficulty,
@@ -210,9 +210,9 @@ contract TemporalGradientBeacon is
             totalMined: 0,
             active: true
         });
-        governanceContext.poolCount = 1; // Use governance context pool count
-        poolCount = 1; // Keep legacy poolCount for compatibility? Re-evaluate if needed.
-        governanceContext.poolCount = 1; // Use governance context pool count
+        governanceContext.poolCount = 1;
+        poolCount = 1;
+        
         // Initialize genesis block
         genesisBlockOutput = keccak256(abi.encodePacked("GENESIS_BLOCK", msg.sender, block.timestamp, block.prevrandao));
         genesisBlockTimestamp = uint64(block.timestamp);
@@ -221,48 +221,47 @@ contract TemporalGradientBeacon is
         currentOutputIndex = 0;
         lastOutputTimestamp = uint64(block.timestamp);
         emit GenesisBlockCreated(genesisBlockOutput, genesisBlockTimestamp);
-        lastOutputTimestamp = uint64(block.timestamp);
+        
         // Initialize output history
         for (uint256 i = 1; i < OUTPUT_HISTORY_SIZE; i++) {
             outputHistory[i] = genesisBlockOutput;
         }
-        for (uint256 i = 1; i < OUTPUT_HISTORY_SIZE; i++) {
-            outputHistory[i] = genesisBlockOutput;
-        }
+        
         // Set mining parameters optimized for 10M+ users on Arbitrum
         governanceContext.minBlockInterval = 1; // Reduced from 5
         governanceContext.minSubmissionsPerBlock = 1;
         governanceContext.consensusThreshold = 70;
         governanceContext.minCommitmentAge = 2; // Reduced from 5
         governanceContext.maxCommitmentAge = 500; // Increased from 100
-        // Set legacy vars for compatibility? Re-evaluate if needed.
-        minBlockInterval = 5;
+        
+        // Set legacy vars for compatibility
+        minBlockInterval = 1;
         minSubmissionsPerBlock = 1;
         consensusThreshold = 70;
-        minCommitmentAge = 5;
-        maxCommitmentAge = 100;
-        minCommitmentAge = 5;
+        minCommitmentAge = 2;
+        maxCommitmentAge = 500;
+        
         // Initialize randomness system using RandomnessLib.State
-        randomnessState.tgbtTokenAddress = _tgbtToken; // <<< Set token address
-        randomnessState.baseEmergencyFee = 100 ether; // <<< Set base fee
-        randomnessState.feePerContributor = 10 ether; // <<< Set per contributor fee (example value)
+        randomnessState.tgbtTokenAddress = _tgbtToken;
+        randomnessState.baseEmergencyFee = 100 ether;
+        randomnessState.feePerContributor = 10 ether;
         randomnessState.expiryBlocks = 50000;
         randomnessState.minContributions = 3;
         randomnessState.maxContributions = 10;
-        randomnessState.maxBatchSize = 20; // <<< Example batch size
-        randomnessState.maxContributions = 10;
+        randomnessState.maxBatchSize = 20;
+        
         // Initialize bloom filter with size, numHashes, and salt
-        bloomFilter = BloomFilterLib.createFilter(1024, 3, block.timestamp); // Added block.timestamp as salttions
+        bloomFilter = BloomFilterLib.createFilter(1024, 3, block.timestamp);
         outputCount = 1;
-        bloomFilter = BloomFilterLib.createFilter(1024, 3, block.timestamp); // Added block.timestamp as salt
+        
         // Setup roles
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
         _grantRole(GOVERNANCE_ROLE, msg.sender);
         _grantRole(UPGRADER_ROLE, msg.sender);
         _grantRole(EMERGENCY_ROLE, msg.sender);
         _grantRole(TOKENOMICS_ROLE, msg.sender);
-        _grantRole(SLASHER_ROLE, msg.sender); 
-        _grantRole(BURNER_ROLE, msg.sender); 
+        _grantRole(SLASHER_ROLE, msg.sender);
+        _grantRole(BURNER_ROLE, msg.sender);
     }
 
     /* ========== MINING FUNCTIONS ========== */
@@ -812,7 +811,8 @@ contract TemporalGradientBeacon is
     function setEmergencyFeeParams(uint256 baseFee, uint256 perContributorFee) external onlyRole(GOVERNANCE_ROLE) {
         // For scaling to 10M+ users, consider implementing a dynamic fee structure
         // that adjusts based on current network load and user demand
-        GovernanceLib.setEmergencyFeeParameters(randomnessState, baseFee, perContributorFee);
+        randomnessState.baseEmergencyFee = baseFee;
+        randomnessState.feePerContributor = perContributorFee;
         emit EmergencyFeeParametersChanged(baseFee, perContributorFee);
     }
 
@@ -822,7 +822,14 @@ contract TemporalGradientBeacon is
      * @param maxContributions Maximum allowed contributions.
      */
     function setRandomnessContributionParams(uint256 minContributions, uint256 maxContributions) external onlyRole(GOVERNANCE_ROLE) {
-        GovernanceLib.setContributionParameters(randomnessState, minContributions, maxContributions);
+        // Validate parameters
+        if (minContributions < 2) revert MinContributionsTooLow();
+        if (maxContributions <= minContributions) revert MaxLessThanMin();
+        if (maxContributions > 50) revert MaxContributionsTooHigh(); // Arbitrary upper limit for gas considerations
+        
+        // Update state
+        randomnessState.minContributions = minContributions;
+        randomnessState.maxContributions = maxContributions;
     }
 
     /**
