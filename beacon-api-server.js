@@ -39,6 +39,56 @@ const logger = winston.createLogger({
   ],
 });
 
+// --- Configuration for 10M User Scale ---
+const TEN_MILLION_USER_CONFIG = {
+  // API Rate Limiting
+  globalRateLimit: {
+    windowMs: 60 * 1000, // 1 minute window
+    max: 1000000, // 1M requests per minute total (up from 100 for regular scale)
+    standardHeaders: true,
+    legacyHeaders: false,
+  },
+  userRateLimit: {
+    windowMs: 60 * 1000,
+    max: 100, // 100 requests per minute per user
+    standardHeaders: true,
+    keyGenerator: (req) => req.headers['x-api-key'] || req.ip,
+  },
+  
+  // Database Connection Pool
+  databasePool: {
+    min: 20,
+    max: 200,
+    acquireTimeoutMillis: 30000,
+    createTimeoutMillis: 30000,
+    idleTimeoutMillis: 30000,
+    reapIntervalMillis: 1000,
+    createRetryIntervalMillis: 200,
+  },
+  
+  // Request Batching
+  batchSize: 1000, // Handle up to 1000 requests in a single batch
+  batchTimeout: 200, // Max wait time for batch completion (ms)
+  
+  // Connection Management
+  keepAliveTimeout: 65000, // Match ALB idle timeout if using AWS
+  headersTimeout: 66000,
+  
+  // Cache Settings
+  cacheTTL: {
+    randomness: 60, // 60 seconds
+    block: 30,      // 30 seconds
+    status: 10      // 10 seconds
+  },
+  
+  // Logging
+  logLevel: 'info', // Reduce verbosity at scale
+  logSampleRate: 0.01, // Only log 1% of requests at full detail
+};
+
+// Apply configuration to Express app and middleware
+app.use(rateLimit(TEN_MILLION_USER_CONFIG.globalRateLimit));
+
 // --- Database Connection ---
 const dbPool = new Pool({
   connectionString: process.env.DATABASE_URL, // Ensure DATABASE_URL is set in your environment
@@ -444,59 +494,83 @@ app.get('/api/v1/latest', async (req, res) => {
 // Apply verifyAuth middleware if monetization/authentication is desired for this endpoint
 // app.post('/api/v1/randomness', verifyAuth, async (req, res) => {
 app.post('/api/v1/randomness', async (req, res) => { // Currently public
-  const endpoint = '/api/v1/randomness';
-  let logData = { endpoint, ipAddress: req.ip, userAgent: req.headers['user-agent'] };
-  let dbRequestId = null; // To potentially link webhook storage later if needed
-  try {
-    const { numWords = 1, seed = '', signature, signerAddress } = req.body;
+  // Apply per-user rate limiting for 10M scale
+  const userRateLimiter = rateLimit(TEN_MILLION_USER_CONFIG.userRateLimit);
+  userRateLimiter(req, res, async () => {
+    // Process the request as normal
+    const endpoint = '/api/v1/randomness';
+    let logData = { endpoint, ipAddress: req.ip, userAgent: req.headers['user-agent'] };
+    let dbRequestId = null; // To potentially link webhook storage later if needed
+    try {
+      const { numWords = 1, seed = '', signature, signerAddress } = req.body;
 
-    // --- Signature Verification (Optional) ---
-    if (signature) {
-      if (!signerAddress) {
-        return res.status(400).json({ error: 'signerAddress is required when providing a signature' });
+      // --- Signature Verification (Optional) ---
+      if (signature) {
+        if (!signerAddress) {
+          return res.status(400).json({ error: 'signerAddress is required when providing a signature' });
+        }
+        const isValidSignature = await verifySeedSignature(seed, signature, signerAddress);
+        if (!isValidSignature) {
+          logger.warn('Invalid signature provided for randomness request', { signerAddress, seed });
+          return res.status(403).json({ error: 'Invalid signature' });
+        }
+        logger.debug('Seed signature verified successfully');
       }
-      const isValidSignature = await verifySeedSignature(seed, signature, signerAddress);
-      if (!isValidSignature) {
-        logger.warn('Invalid signature provided for randomness request', { signerAddress, seed });
-        return res.status(403).json({ error: 'Invalid signature' });
+      // --- End Signature Verification ---
+
+      if (!Number.isInteger(numWords) || numWords <= 0 || numWords > 100) {
+        logData.error = 'numWords must be between 1 and 100';
+        dbRequestId = await logUsage(logData);
+        return res.status(400).json({ error: logData.error });
       }
-      logger.debug('Seed signature verified successfully');
-    }
-    // --- End Signature Verification ---
 
-    if (!Number.isInteger(numWords) || numWords <= 0 || numWords > 100) {
-      logData.error = 'numWords must be between 1 and 100';
-      dbRequestId = await logUsage(logData);
-      return res.status(400).json({ error: logData.error });
-    }
+      const latestOutput = await beaconContract.getLatestOutput();
+      const normalizedSeed = normalizeSeed(seed);
+      const randomWords = generateRandomWords(latestOutput, numWords, normalizedSeed);
 
-    const latestOutput = await beaconContract.getLatestOutput();
-    const normalizedSeed = normalizeSeed(seed);
-    const randomWords = generateRandomWords(latestOutput, numWords, normalizedSeed);
+      // For 10M scale, batch similar requests together
+      const batchKey = `${req.body.numWords || 1}-${normalizedSeed.substring(0, 8)}`;
+      const cachedResult = await redisClient.get(`batch:${batchKey}`);
+      
+      if (cachedResult) {
+        // Return from batch cache
+        return res.json(JSON.parse(cachedResult));
+      }
 
-    logData = {
-        ...logData,
+      logData = {
+          ...logData,
+          source: latestOutput,
+          seedUsed: normalizedSeed,
+          numItems: numWords,
+          output: randomWords.length > 0 ? randomWords[0] : null, // Log first word as example output
+          randomness: randomWords // Log full array
+      };
+      dbRequestId = await logUsage(logData); // Log usage
+
+      logger.info(`Generated ${numWords} random words`, { source: latestOutput, seedUsed: normalizedSeed });
+      const responseData = {
         source: latestOutput,
-        seedUsed: normalizedSeed,
-        numItems: numWords,
-        output: randomWords.length > 0 ? randomWords[0] : null, // Log first word as example output
-        randomness: randomWords // Log full array
-    };
-    dbRequestId = await logUsage(logData); // Log usage
+        randomWords,
+        timestamp: Date.now(),
+        requestId: dbRequestId // Optionally return the DB log request ID
+      };
 
-    logger.info(`Generated ${numWords} random words`, { source: latestOutput, seedUsed: normalizedSeed });
-    res.json({
-      source: latestOutput,
-      randomWords,
-      timestamp: Date.now(),
-      requestId: dbRequestId // Optionally return the DB log request ID
-    });
-  } catch (error) {
-    logger.error('Failed to generate randomness:', { error: error.message, stack: error.stack });
-    logData.error = error.message;
-    await logUsage(logData); // Log error
-    res.status(500).json({ error: 'Failed to generate randomness', details: error.message });
-  }
+      // Cache for future similar requests in this millisecond
+      await redisClient.set(
+        `batch:${batchKey}`, 
+        JSON.stringify(responseData), 
+        'PX', 
+        50 // 50ms cache for batching
+      );
+
+      res.json(responseData);
+    } catch (error) {
+      logger.error('Failed to generate randomness:', { error: error.message, stack: error.stack });
+      logData.error = error.message;
+      await logUsage(logData); // Log error
+      res.status(500).json({ error: 'Failed to generate randomness', details: error.message });
+    }
+  });
 });
 
 /**

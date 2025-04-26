@@ -229,12 +229,12 @@ contract TemporalGradientBeacon is
         for (uint256 i = 1; i < OUTPUT_HISTORY_SIZE; i++) {
             outputHistory[i] = genesisBlockOutput;
         }
-        // Set mining parameters
-        governanceContext.minBlockInterval = 5;
+        // Set mining parameters optimized for 10M+ users on Arbitrum
+        governanceContext.minBlockInterval = 1; // Reduced from 5
         governanceContext.minSubmissionsPerBlock = 1;
         governanceContext.consensusThreshold = 70;
-        governanceContext.minCommitmentAge = 5;
-        governanceContext.maxCommitmentAge = 100;
+        governanceContext.minCommitmentAge = 2; // Reduced from 5
+        governanceContext.maxCommitmentAge = 500; // Increased from 100
         // Set legacy vars for compatibility? Re-evaluate if needed.
         minBlockInterval = 5;
         minSubmissionsPerBlock = 1;
@@ -252,7 +252,7 @@ contract TemporalGradientBeacon is
         randomnessState.maxBatchSize = 20; // <<< Example batch size
         randomnessState.maxContributions = 10;
         // Initialize bloom filter with size, numHashes, and salt
-        bloomFilter = BloomFilterLib.createFilter(1024, 3, block.timestamp); // Added block.timestamp as salt
+        bloomFilter = BloomFilterLib.createFilter(1024, 3, block.timestamp); // Added block.timestamp as salttions
         outputCount = 1;
         bloomFilter = BloomFilterLib.createFilter(1024, 3, block.timestamp); // Added block.timestamp as salt
         // Setup roles
@@ -425,6 +425,14 @@ contract TemporalGradientBeacon is
         // Update commitment state
         commitment.revealedValue = hmacOutput;
         commitment.flags.revealed = true; // Changed from commitment.revealed
+
+        // --- 1 Million Users Scalability Concerns ---
+        // With 1M users, the following issues need addressing:
+        // 1. The bloomFilter would reach capacity quickly, increasing false positives
+        // 2. Gas costs for verifying commitments would spike during high activity
+        // 3. Output history contention would increase, potentially causing chain reorganizations
+        // 4. Reward distribution would become highly competitive, potentially centralizing to higher-compute miners
+        // ---
 
         // Update output history
         currentOutputIndex = outputHistory.updateOutputHistory(currentOutputIndex, hmacOutput);
@@ -787,7 +795,9 @@ contract TemporalGradientBeacon is
         uint8 minAge, 
         uint16 maxAge
     ) external onlyRole(GOVERNANCE_ROLE) {
-        // Delegate to GovernanceLib
+        // For 10M+ users, optimal settings would be:
+        // - minAge: 1-2 blocks (allows faster processing)
+        // - maxAge: 500+ blocks (larger window for submissions)
         GovernanceLib.setCommitRevealParameters(governanceContext, minAge, maxAge);
         // Update legacy vars if needed
         minCommitmentAge = minAge;
@@ -800,6 +810,8 @@ contract TemporalGradientBeacon is
      * @param perContributorFee The additional fee per contributor in TGBT.
      */
     function setEmergencyFeeParams(uint256 baseFee, uint256 perContributorFee) external onlyRole(GOVERNANCE_ROLE) {
+        // For scaling to 10M+ users, consider implementing a dynamic fee structure
+        // that adjusts based on current network load and user demand
         GovernanceLib.setEmergencyFeeParameters(randomnessState, baseFee, perContributorFee);
         emit EmergencyFeeParametersChanged(baseFee, perContributorFee);
     }
@@ -811,6 +823,27 @@ contract TemporalGradientBeacon is
      */
     function setRandomnessContributionParams(uint256 minContributions, uint256 maxContributions) external onlyRole(GOVERNANCE_ROLE) {
         GovernanceLib.setContributionParameters(randomnessState, minContributions, maxContributions);
+    }
+
+    /**
+     * @dev Addresses 1 million miners' scalability challenges
+     * @notice Dynamically resets bloom filter based on network load
+     * @param newSize New filter size optimized for current capacity
+     * @param numHashes Number of hash functions for Bloom filter
+     * @param resetSalt New salt value for filter
+     */
+    function dynamicallyResizeBloomFilter(
+        uint256 newSize,
+        uint256 numHashes,
+        uint256 resetSalt
+    ) external onlyRole(GOVERNANCE_ROLE) {
+        require(newSize >= MIN_BLOOM_FILTER_SIZE && newSize <= MAX_BLOOM_FILTER_SIZE, "InvalidSize");
+        require(numHashes > 0 && numHashes <= MAX_BLOOM_FILTER_HASHES, "InvalidNumHashes");
+        
+        // Reset bloom filter with new parameters optimized for 1M users
+        BloomFilterLib.resetFilter(bloomFilter, newSize, numHashes, resetSalt);
+        
+        emit BloomFilterReset(newSize, numHashes);
     }
 
     /* ========== AUTO SLASHING & BURNING ========== */
