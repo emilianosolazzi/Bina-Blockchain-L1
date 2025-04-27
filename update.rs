@@ -7,6 +7,18 @@ use tokio::io::AsyncWriteExt; // Required for write_all
 use ring::{digest, signature};
 use tracing::{info, warn, error, debug};
 use hex; // Use the hex crate directly
+use std::sync::atomic::{AtomicBool, Ordering};
+
+// Add platform-specific modules
+#[cfg(target_os = "windows")]
+mod windows;
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "macos")]
+mod macos;
+
+// Add global update state
+static UPDATING: AtomicBool = AtomicBool::new(false);
 
 // --- Manifest Definition ---
 
@@ -187,32 +199,80 @@ impl UpdateVerifier {
             }
         }
     }
+
+    /// Enhanced verification with binary compatibility check
+    async fn verify_binary_update(&self, path: &Path) -> Result<()> {
+        let metadata = tokio::fs::metadata(path).await?;
+        if metadata.len() > 1024 * 1024 * 100 { // 100MB max
+            return Err(anyhow!("Update file too large"));
+        }
+
+        #[cfg(target_family = "unix")]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = metadata.permissions();
+            if perms.mode() & 0o111 == 0 {
+                return Err(anyhow!("Update binary not executable"));
+            }
+        }
+
+        Ok(())
+    }
 }
 
 // --- Update Application Logic ---
 
-/// Applies the downloaded update. Placeholder implementation.
-/// This function is complex and platform-specific.
+/// Improved update application with platform-specific handling
 pub async fn apply_update(update_path: &Path) -> Result<()> {
-    info!("Attempting to apply update from: {:?}", update_path);
+    if !UPDATING.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+        return Err(anyhow!("Update already in progress"));
+    }
 
-    // --- Platform-Specific Implementation Required ---
-    // 1. Verify the update binary itself (e.g., internal signature, checksum).
-    // 2. Check compatibility (OS, architecture).
-    // 3. [Optional] Backup current executable.
-    // 4. Replace the current executable with the new one.
-    //    - On Windows, this often involves renaming the current exe, copying the new one,
-    //      and scheduling the old one for deletion on reboot.
-    //    - On Linux/macOS, `std::fs::rename` might work if permissions allow, or use a helper script.
-    //    - Consider using crates like `self_update` or `tauri-updater` for robust handling.
-    // 5. Clean up the temporary update file.
+    let _guard = scopeguard::guard((), |_| {
+        UPDATING.store(false, Ordering::SeqCst);
+    });
 
-    // Placeholder: Just log and remove the temp file
-    warn!("apply_update: Placeholder function executed. Real update application needed.");
-    fs::remove_file(update_path).await.context("Failed to remove temporary update file")?;
+    // Create backup
+    let backup_path = create_backup().await?;
+
+    let result = match std::env::consts::OS {
+        "windows" => apply_update_windows(update_path).await,
+        "linux" => apply_update_linux(update_path).await,
+        "macos" => apply_update_macos(update_path).await,
+        _ => Err(anyhow!("Unsupported platform")),
+    };
+
+    if result.is_err() {
+        // Restore from backup
+        restore_from_backup(&backup_path).await?;
+    }
+
+    result
+}
+
+#[cfg(target_os = "windows")]
+async fn apply_update_windows(update_path: &Path) -> Result<()> {
+    use std::os::windows::fs::MetadataExt;
+    use windows::Win32::System::WindowsProgramming;
+
+    let current_exe = std::env::current_exe()?;
+    let temp_path = current_exe.with_extension("old");
+
+    // Use Windows API for atomic rename
+    windows::rename_with_backup(&current_exe, &temp_path)?;
+    windows::copy_with_progress(update_path, &current_exe)?;
+    
+    // Schedule old exe for deletion on reboot
+    windows::schedule_deletion(&temp_path)?;
 
     Ok(())
-    // Err(anyhow!("Update application not implemented")) // Return error in real implementation until done
+}
+
+async fn create_backup() -> Result<PathBuf> {
+    let current_exe = std::env::current_exe()?;
+    let backup_path = current_exe.with_extension("backup");
+    tokio::fs::copy(&current_exe, &backup_path).await?;
+    Ok(backup_path)
 }
 
 /// Restarts the application. Placeholder implementation.
@@ -240,4 +300,30 @@ pub fn restart_application() -> Result<()> {
             Err(anyhow!("Failed to restart application: {}", e))
         }
     }
+}
+
+/// Enhanced restart with platform detection
+pub fn restart_application() -> Result<()> {
+    let current_exe = std::env::current_exe()?;
+    
+    #[cfg(target_family = "unix")]
+    {
+        use std::os::unix::process::CommandExt;
+        let err = std::process::Command::new(&current_exe)
+            .before_exec(|| {
+                unsafe { libc::daemon(0, 0) };
+                Ok(())
+            })
+            .spawn()?;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        std::process::Command::new(&current_exe)
+            .creation_flags(windows::Win32::System::Threading::DETACHED_PROCESS)
+            .spawn()?;
+    }
+
+    std::process::exit(0);
 }

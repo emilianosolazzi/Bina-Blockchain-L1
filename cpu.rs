@@ -115,29 +115,53 @@ fn detect_cpu() -> Result<CpuIdentity, CpuDetectionError> {
         debug!("Brand string not available from CPUID");
     }
 
-    // Use a more explicit approach to feature flags using HashSet
-    let mut features = std::collections::HashSet::new();
-
-    // Safe feature detection with error handling
+    // Enhanced feature detection with protocol awareness
+    let mut features = std::collections::HashSet::with_capacity(32);
+    
     if let Some(fi) = cpuid.get_feature_info() {
-        // Insert features into HashSet when detected
-        if fi.has_sse()   { features.insert(CpuFeature::SSE); }
-        if fi.has_sse2()  { features.insert(CpuFeature::SSE2); }
-        if fi.has_sse3()  { features.insert(CpuFeature::SSE3); }
-        if fi.has_ssse3() { features.insert(CpuFeature::SSSE3); }
-        if fi.has_sse41() { features.insert(CpuFeature::SSE41); }
-        if fi.has_sse42() { features.insert(CpuFeature::SSE42); }
-        if fi.has_avx()   { features.insert(CpuFeature::AVX); }
-        if fi.has_avx2()  { features.insert(CpuFeature::AVX2); }
-        if fi.has_fma()   { features.insert(CpuFeature::FMA); }
-        if fi.has_bmi1()  { features.insert(CpuFeature::BMI1); }
-        if fi.has_bmi2()  { features.insert(CpuFeature::BMI2); }
-        if fi.has_sha()   { features.insert(CpuFeature::SHA); }
-        if fi.has_htt()   { features.insert(CpuFeature::HTT); }
-        if fi.has_sgx()   { features.insert(CpuFeature::SGX); }
-        if fi.has_hle()   { features.insert(CpuFeature::HLE); }
-        if fi.has_rtm()   { features.insert(CpuFeature::RTM); }
-        
+        // Use const arrays for better compile-time optimization
+        const BASE_FEATURES: [(fn(&raw_cpuid::FeatureInfo) -> bool, CpuFeature); 6] = [
+            (|f| f.has_sse(), CpuFeature::SSE),
+            (|f| f.has_sse2(), CpuFeature::SSE2),
+            (|f| f.has_sse3(), CpuFeature::SSE3),
+            (|f| f.has_ssse3(), CpuFeature::SSSE3),
+            (|f| f.has_sse41(), CpuFeature::SSE41),
+            (|f| f.has_sse42(), CpuFeature::SSE42),
+        ];
+
+        const SECURE_FEATURES: [(fn(&raw_cpuid::FeatureInfo) -> bool, CpuFeature); 4] = [
+            (|f| f.has_sha() && f.has_sgx(), CpuFeature::SHA),  // Only if SGX available
+            (|f| f.has_sgx(), CpuFeature::SGX),
+            (|f| f.has_hle() && !f.has_rtm(), CpuFeature::HLE), // HLE without RTM is vulnerable
+            (|f| f.has_rtm() && f.has_hle(), CpuFeature::RTM),  // RTM requires HLE
+        ];
+
+        const VECTOR_FEATURES: [(fn(&raw_cpuid::FeatureInfo) -> bool, CpuFeature); 4] = [
+            (|f| f.has_avx() && f.has_osxsave(), CpuFeature::AVX),    // Check OS support
+            (|f| f.has_avx2() && f.has_avx(), CpuFeature::AVX2),      // AVX2 requires AVX
+            (|f| f.has_fma() && f.has_avx(), CpuFeature::FMA),        // FMA requires AVX
+            (|f| f.has_htt() && verify_htt_support(), CpuFeature::HTT) // Verify HTT support
+        ];
+
+        // Batch process features using iterator chaining
+        features.extend(
+            BASE_FEATURES.iter()
+                .chain(SECURE_FEATURES.iter())
+                .chain(VECTOR_FEATURES.iter())
+                .filter(|(check, _)| check(fi))
+                .map(|(_, feature)| feature)
+        );
+
+        // Additional security verifications for specific feature combinations
+        if features.contains(&CpuFeature::AVX2) {
+            verify_avx_support(&mut features)?;
+        }
+
+        // Protocol harmonization features
+        if let Some(pi) = cpuid.get_processor_capacity_info() {
+            harmonize_features(&mut features, pi)?;
+        }
+
         // Convert the HashSet to a bit vector for backward compatibility if needed
         identity.features_bitfield = features_to_bitfield(&features);
         

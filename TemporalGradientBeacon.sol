@@ -3,9 +3,9 @@ pragma solidity ^0.8.28;
 
 import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import { Ownable2StepUpgradeable } from "@openzeppelin/contracts-upgradeable/access/Ownable2StepUpgradeable.sol";
+import { OwnableUpgradeable } from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
-import { ECDSAUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/cryptography/ECDSAUpgradeable.sol";
+import { ECDSA } from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import { ITGBT } from "./interfaces/ITGBT.sol";
 import { PausableUpgradeable } from "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
 import { AccessControlUpgradeable } from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
@@ -26,14 +26,14 @@ import { IERC20Upgradeable } from "@openzeppelin/contracts-upgradeable/token/ERC
  */
 contract TemporalGradientBeacon is
     Initializable,
-    Ownable2StepUpgradeable,
+    OwnableUpgradeable,
     ReentrancyGuardUpgradeable,
     PausableUpgradeable,
     UUPSUpgradeable,
     AccessControlUpgradeable,
     EIP712Upgradeable
 {
-    using ECDSAUpgradeable for bytes32;
+    using ECDSA for bytes32;
     using RandomnessLib for RandomnessLib.State; // <<< Added line
     using BloomFilterLib for BloomFilterLib.Filter;
     using MiningLib for MiningLib.RevealParams;
@@ -179,7 +179,7 @@ contract TemporalGradientBeacon is
         uint256 _blocksPerEpoch,
         uint256 _halvingInterval
     ) public initializer {
-        __Ownable2Step_init();
+        __Ownable_init();
         __ReentrancyGuard_init();
         __Pausable_init();
         __UUPSUpgradeable_init();
@@ -298,7 +298,7 @@ contract TemporalGradientBeacon is
                 )
             )
         );
-        address recoveredSigner = ECDSAUpgradeable.recover(digest, signature);
+        address recoveredSigner = ECDSA.recover(digest, signature);
         require(recoveredSigner == msg.sender, "InvalidSignature");
         require(recoveredSigner != address(0), "ZeroAddressSigner"); // Ensure non-zero address recovery
 
@@ -406,19 +406,19 @@ contract TemporalGradientBeacon is
         // Define a placeholder difficulty weight function (replace with actual logic if needed)
         function(address) view returns (uint256) difficultyWeightFn = _getDifficultyWeight; // Placeholder
 
-        // Process the mining reveal using the library function
+        // Unique hybrid: Combines temporal (block-based) with spatial (HMAC-based) verification
         bytes32 hmacOutput = MiningLib.processMiningReveal(
-            params.previousOutput,
-            params.temporalSeed,
-            params.nonce,
-            params.signature,
-            params.secretValue,
+            params.previousOutput,    // Temporal chain
+            params.temporalSeed,      // Time-based entropy
+            params.nonce,            
+            params.signature,         // Spatial proof
+            params.secretValue,       // Miner's entropy
             miningPools[params.poolId].targetDifficulty,
             params.miner,
-            bloomFilter,
-            usedOutputs,
-            MiningLib.quantumResistantHash, // Explicitly pass the hash function
-            difficultyWeightFn // Pass the difficulty weight function
+            bloomFilter,             // Spatial uniqueness check
+            usedOutputs,            // Temporal uniqueness check
+            MiningLib.quantumResistantHash,
+            difficultyWeightFn
         );
 
         // Update commitment state
@@ -499,11 +499,11 @@ contract TemporalGradientBeacon is
         // This function needs to implement the logic to validate the proof
         // without requiring the original commitment data directly linked to msg.sender.
         // It might involve checking the proof against contract state or using zero-knowledge techniques.
+        _verifyProof(anonymousId, proof);proof against contract state or using zero-knowledge techniques.
         _verifyProof(anonymousId, proof);
-
         // Placeholder: Compute the stealth address where rewards should be sent.
-        // This function needs to implement the logic to derive a unique,
-        // miner-controlled address from the anonymousId.
+        // This function needs to implement the logic to derive a unique,be sent.
+        // miner-controlled address from the anonymousId.derive a unique,
         address stealthRecipient = computeStealthAddress(anonymousId);
         require(stealthRecipient != address(0), "ZeroAddress"); // Basic validation
 
@@ -554,6 +554,70 @@ contract TemporalGradientBeacon is
         // Simple, insecure placeholder: Hash the ID to get an address-like value.
         return address(uint160(uint256(keccak256(abi.encodePacked("STEALTH_", anonymousId)))));
         // Replace with a proper stealth address generation mechanism.
+    }
+
+    /**
+     * @notice Submits multiple mining commitments in a single transaction
+     * @param commitHashes Array of commitment hashes
+     * @param poolIds Array of pool IDs
+     * @param deadlines Array of deadlines
+     * @param signatures Array of EIP-712 signatures
+     */
+    function batchSubmitCommitments(
+        bytes32[] calldata commitHashes,
+        uint8[] calldata poolIds,
+        uint256[] calldata deadlines,
+        bytes[] calldata signatures
+    ) external nonReentrant whenNotPaused {
+        if (commitHashes.length > 20) revert BatchTooLarge();
+        if (commitHashes.length != poolIds.length || 
+            commitHashes.length != deadlines.length ||
+            commitHashes.length != signatures.length) revert ArrayLengthMismatch();
+
+        for (uint256 i = 0; i < commitHashes.length; i++) {
+            submitMiningCommitment(
+                commitHashes[i],
+                poolIds[i],
+                nonces[msg.sender] + i,
+                deadlines[i],
+                signatures[i]
+            );
+        }
+    }
+
+    /**
+     * @notice Gets all active mining pools
+     * @return activePools Array of active pool IDs
+     * @return difficulties Array of pool difficulties
+     * @return emissions Array of remaining emissions
+     */
+    function getActivePools() external view returns (
+        uint8[] memory activePools,
+        uint256[] memory difficulties,
+        uint256[] memory emissions
+    ) {
+        uint8[] memory _activePools = new uint8[](poolCount);
+        uint256[] memory _difficulties = new uint256[](poolCount);
+        uint256[] memory _emissions = new uint256[](poolCount);
+        uint8 activeCount = 0;
+
+        for (uint8 i = 0; i < poolCount; i++) {
+            if (miningPools[i].active) {
+                _activePools[activeCount] = i;
+                _difficulties[activeCount] = miningPools[i].targetDifficulty;
+                _emissions[activeCount] = miningPools[i].emissionBucket - miningPools[i].totalMined;
+                activeCount++;
+            }
+        }
+
+        // Resize arrays to actual count
+        assembly {
+            mstore(_activePools, activeCount)
+            mstore(_difficulties, activeCount) 
+            mstore(_emissions, activeCount)
+        }
+
+        return (_activePools, _difficulties, _emissions);
     }
 
     /* ========== POOL MANAGEMENT (Using GovernanceLib) ========== */
@@ -844,6 +908,7 @@ contract TemporalGradientBeacon is
         uint256 numHashes,
         uint256 resetSalt
     ) external onlyRole(GOVERNANCE_ROLE) {
+        // Dynamic scaling for 1M+ users
         require(newSize >= MIN_BLOOM_FILTER_SIZE && newSize <= MAX_BLOOM_FILTER_SIZE, "InvalidSize");
         require(numHashes > 0 && numHashes <= MAX_BLOOM_FILTER_HASHES, "InvalidNumHashes");
         

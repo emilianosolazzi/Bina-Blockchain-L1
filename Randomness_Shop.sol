@@ -58,7 +58,7 @@ contract RandomnessShop is Initializable, Ownable2StepUpgradeable, UUPSUpgradeab
         // Transfer USDC from buyer to this contract
         require(usdc.transferFrom(msg.sender, address(this), usdcAmount), "USDC transfer failed");
 
-        // Calculate TGBT output (accounting for decimals)
+        // Direct mint instead of pulling from liquidity pool
         uint256 tgbtAmount = (usdcAmount * exchangeRate);
         tgbt.mint(msg.sender, tgbtAmount);
 

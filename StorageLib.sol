@@ -1,12 +1,19 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
+import {StorageSlot} from "@openzeppelin/contracts/utils/StorageSlot.sol";
+
 /**
  * @title StorageLib
  * @notice Library for managing historical block storage
  * @dev Uses a circular buffer pattern to optimize gas usage when storing beacon blocks
  */
 library StorageLib {
+    using Math for uint256;
+    using Strings for uint256;
+
     // BeaconBlock structure for storing comprehensive block data
     struct BeaconBlock {
         bytes32 output;
@@ -32,7 +39,12 @@ library StorageLib {
     event HistoricalStorageConfigChanged(bool enabled, uint256 maxBlocks);
     event BlockArchived(uint256 indexed blockIndex, bytes32 output, address indexed miner);
     
-    error AlreadyConfigured();
+    // Add custom errors
+    error InvalidMaxBlocks(uint256 provided);
+    error StorageDisabled();
+    error BlockIndexOutOfRange(uint256 blockIndex, uint256 oldest, uint256 newest);
+    error InvalidRange(uint256 start, uint256 end);
+    error ConfigurationLocked();
     
     function configureHistoricalStorage(
         HistoricalStorage storage self,
@@ -42,6 +54,9 @@ library StorageLib {
         uint256 genesisTimestamp,
         address sender
     ) internal {
+        if (maxBlocks == 0) revert InvalidMaxBlocks(0);
+        if (self.configured) revert ConfigurationLocked();
+        
         require(maxBlocks > 0, "Max blocks must be > 0");
         
         // Prevent changing maxBlocks after initial configuration to avoid orphaned data
@@ -198,14 +213,15 @@ library StorageLib {
         HistoricalStorage storage self,
         uint256 blockIndex
     ) internal view returns (BeaconBlock memory) {
-        require(self.enabled, "Historical storage not enabled");
+        if (!self.enabled) revert StorageDisabled();
         
         // Check that the requested block is within available range
-        uint256 oldestAvailable = self.totalBlocks > self.maxBlocks ? 
-            self.totalBlocks - self.maxBlocks : 0;
+        uint256 oldestAvailable = Math.max(0, self.totalBlocks > self.maxBlocks ? 
+            self.totalBlocks - self.maxBlocks : 0);
             
-        require(blockIndex >= oldestAvailable, "Block index out of range (too old)");
-        require(blockIndex < self.totalBlocks, "Block index out of range (future)");
+        if (blockIndex < oldestAvailable || blockIndex >= self.totalBlocks) {
+            revert BlockIndexOutOfRange(blockIndex, oldestAvailable, self.totalBlocks);
+        }
         
         // Calculate the physical index in the circular buffer
         uint256 actualIndex = blockIndex % self.maxBlocks;

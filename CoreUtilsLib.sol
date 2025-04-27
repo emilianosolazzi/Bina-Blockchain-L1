@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import { ECDSAUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/cryptography/ECDSAUpgradeable.sol";
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {Arrays} from "@openzeppelin/contracts/utils/Arrays.sol";
+import {BitMaps} from "@openzeppelin/contracts/utils/structs/BitMaps.sol";
 
 /**
  * @title CoreUtilsLib
@@ -9,7 +11,13 @@ import { ECDSAUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/cryp
  * @dev Provides core utilities for output history management and cryptographic operations
  */
 library CoreUtilsLib {
-    using ECDSAUpgradeable for bytes32;
+    using ECDSA for bytes32;
+    using Arrays for bytes32[];
+    using BitMaps for BitMaps.BitMap;
+
+    error InvalidOutputHistory();
+    error OutputNotFound();
+    error InvalidHistorySize(uint256 size);
 
     /**
      * @notice Creates a new bytes32 array of specified size
@@ -26,13 +34,7 @@ library CoreUtilsLib {
      * @return The keccak256 hash of all outputs in the history
      */
     function getHistoricalOutputsHash(bytes32[32] storage outputHistory) internal view returns (bytes32) {
-        bytes32[] memory outputs = new bytes32[](32);
-        // Use unchecked for loop counter
-        unchecked {
-            for (uint256 i = 0; i < 32; i++) {
-                outputs[i] = outputHistory[i];
-            }
-        }
+        bytes32[] memory outputs = Arrays.toArray(outputHistory);
         return keccak256(abi.encodePacked(outputs));
     }
 
@@ -65,18 +67,9 @@ library CoreUtilsLib {
         bytes32[32] storage history,
         uint256 historySize
     ) internal view returns (bool exists) {
-        if (output == bytes32(0)) return false; // Add consistency with MiningLib's validation
+        if (output == bytes32(0)) return false;
+        if (historySize > 32) revert InvalidHistorySize(historySize);
         
-        // Use unchecked for loop counter
-        unchecked {
-            // Ensure loop bound doesn't exceed actual array size (32)
-            uint256 bound = historySize > 32 ? 32 : historySize;
-            for (uint256 i = 0; i < bound; i++) {
-                if (history[i] == output) {
-                    return true;
-                }
-            }
-        }
-        return false;
+        return Arrays.contains(Arrays.toArray(history), output);
     }
 }

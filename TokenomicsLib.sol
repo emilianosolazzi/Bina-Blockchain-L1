@@ -1,14 +1,42 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {Math} from "@openzeppelin/contracts-upgradeable/utils/math/Math.sol";
+import {SafeCast} from "@openzeppelin/contracts-upgradeable/utils/math/SafeCast.sol";
+
 /**
  * @title TokenomicsLib
  * @notice Manages tokenomics for the Temporal Gradient Beacon, including epochs and reward halving
  * @dev Library extracted to reduce EnhancedTemporalGradientBeacon contract size
  */
 library TokenomicsLib {
-    /// @notice Thrown when epoch or halving parameters are invalid (e.g., zero)
+    using Math for uint256;
+    using SafeCast for uint256;
+
+    // Add constants for bounds checking
+    uint256 private constant MAX_BLOCKS_PER_EPOCH = 1_000_000;
+    uint256 private constant MIN_BLOCKS_PER_EPOCH = 100;
+    uint256 private constant MAX_HALVING_INTERVAL = 10_000_000;
+    uint256 private constant MIN_HALVING_INTERVAL = 10_000;
+    uint256 private constant MIN_REWARD = 1e6;
+    uint256 private constant MAX_EPOCHS = type(uint64).max;
+
+    // Add constants for safe math
+    uint256 private constant MAX_REDUCTION_ROUNDS = 100; // Prevent infinite loops
+    uint256 private constant REDUCTION_NUMERATOR = 65;
+    uint256 private constant REDUCTION_DENOMINATOR = 100;
+
+    // Add detailed error types
     error InvalidEpochParameters();
+    error EpochOutOfBounds(uint256 provided, uint256 min, uint256 max);
+    error HalvingIntervalOutOfBounds(uint256 provided, uint256 min, uint256 max);
+    error RewardTooLow(uint256 provided, uint256 minimum);
+    error InvalidInitialState();
+    error EpochOverflow();
+
+    // Add events for parameter changes
+    event EpochBlocksUpdated(uint256 oldValue, uint256 newValue);
+    event HalvingIntervalUpdated(uint256 oldValue, uint256 newValue);
 
     /// @notice Emitted on epoch changes or halving events
     /// @param epochNumber Current epoch number
@@ -38,27 +66,51 @@ library TokenomicsLib {
      * @return newReward Updated block reward
      */
     function checkEpochTransition(EpochState storage state) internal returns (uint256 newReward) {
+        if (state.blocksPerEpoch == 0 || state.halvingInterval == 0) revert InvalidInitialState();
+        
+        // Safe subtraction (will revert on underflow)
         uint256 blocksSinceEpochStart = block.number - state.epochStartBlock;
         newReward = state.rewardAmount;
 
         if (blocksSinceEpochStart >= state.blocksPerEpoch) {
+            // Safe division (reverts on divide by zero, but we checked above)
             uint256 epochsPassed = blocksSinceEpochStart / state.blocksPerEpoch;
-            state.currentEpoch += epochsPassed;
+            
+            // Explicit overflow check
+            if (state.currentEpoch + epochsPassed > MAX_EPOCHS) revert EpochOverflow();
+            
+            unchecked {
+                // Safe after overflow check
+                state.currentEpoch += epochsPassed;
+            }
+            
             state.epochStartBlock = block.number;
 
-            // Calculate how many halving intervals (in blocks) have passed
-            uint256 intervals = (block.number - state.lastHalvingBlock) / state.halvingInterval;
+            // Safe subtraction (will revert on underflow)
+            uint256 blocksSinceHalving = block.number - state.lastHalvingBlock;
+            uint256 intervals = blocksSinceHalving / state.halvingInterval;
 
-            // Apply a 35% reduction (i.e. keep 65%) each time one interval has passed
             if (intervals > 0) {
-                for (uint256 i = 0; i < intervals; i++) {
-                    newReward = (newReward * 65) / 100;
+                // Limit reduction rounds
+                uint256 reductionRounds = intervals > MAX_REDUCTION_ROUNDS ? MAX_REDUCTION_ROUNDS : intervals;
+                
+                unchecked {
+                    // Reduction can't underflow due to MIN_REWARD check
+                    for (uint256 i = 0; i < reductionRounds; i++) {
+                        uint256 reduced = (newReward * REDUCTION_NUMERATOR) / REDUCTION_DENOMINATOR;
+                        if (reduced < MIN_REWARD) {
+                            newReward = MIN_REWARD;
+                            break;
+                        }
+                        newReward = reduced;
+                    }
+                    
+                    // Safe after bounds check
+                    state.lastHalvingBlock += intervals * state.halvingInterval;
                 }
                 state.rewardAmount = newReward;
-                state.lastHalvingBlock += intervals * state.halvingInterval;
             }
 
-            // Emit event with isHalving=true if any halving occurred
             emit TokenomicsUpdate(state.currentEpoch, newReward, block.number, intervals > 0);
         }
 
@@ -71,8 +123,12 @@ library TokenomicsLib {
      * @param newBlocksPerEpoch New blocks per epoch (non-zero)
      */
     function setEpochBlocks(EpochState storage state, uint256 newBlocksPerEpoch) internal {
-        if (newBlocksPerEpoch == 0) revert InvalidEpochParameters();
+        if (newBlocksPerEpoch < MIN_BLOCKS_PER_EPOCH || newBlocksPerEpoch > MAX_BLOCKS_PER_EPOCH) {
+            revert EpochOutOfBounds(newBlocksPerEpoch, MIN_BLOCKS_PER_EPOCH, MAX_BLOCKS_PER_EPOCH);
+        }
+        uint256 oldValue = state.blocksPerEpoch;
         state.blocksPerEpoch = newBlocksPerEpoch;
+        emit EpochBlocksUpdated(oldValue, newBlocksPerEpoch);
     }
 
     /**
@@ -81,8 +137,12 @@ library TokenomicsLib {
      * @param newHalvingInterval New halving interval (non-zero)
      */
     function setHalvingInterval(EpochState storage state, uint256 newHalvingInterval) internal {
-        if (newHalvingInterval == 0) revert InvalidEpochParameters();
+        if (newHalvingInterval < MIN_HALVING_INTERVAL || newHalvingInterval > MAX_HALVING_INTERVAL) {
+            revert HalvingIntervalOutOfBounds(newHalvingInterval, MIN_HALVING_INTERVAL, MAX_HALVING_INTERVAL);
+        }
+        uint256 oldValue = state.halvingInterval;
         state.halvingInterval = newHalvingInterval;
+        emit HalvingIntervalUpdated(oldValue, newHalvingInterval);
     }
 
     /**
