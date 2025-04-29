@@ -52,19 +52,102 @@ type Filter @entity {
   # Network info
   networkId: Int!              # Chain ID
   implementation: String!      # Implementation address if proxy-based
+  
+  # Rate metrics
+  insertRatePerHour: Float     # Average inserts per hour
+  insertRatePerDay: Float      # Average inserts per day
+  fillRatePerDay: Float        # Change in fill ratio per day (basis points)
+  peakInsertRate: Float        # Peak insert rate observed
+  appealRatePerWeek: Float     # Appeals per week
+  rateTrend: String            # Trend description: INCREASING, STABLE, DECREASING
+  
+  rateMetrics: [RateMetrics!]! @derivedFrom(field: "filter")
+
+  # Rate limits and thresholds
+  rateLimit: Float             # Maximum rate allowed for this filter
+  rateLimitEnabled: Boolean    # Whether rate limiting is active for this filter
+  rateLimitType: String        # Type of rate limit (PER_BLOCK, PER_HOUR, etc)
+  rateLimitEvents: [RateLimitEvent!]! @derivedFrom(field: "filter")
+  lastRateLimitBreached: BigInt # When rate limit was last breached
+  rateLimitBreachCount: Int    # Number of times rate limits were breached
+  rateAlertThreshold: Float    # Alert threshold for abnormal rates
+  
+  # Rate reporting
+  peakRateTimestamp: BigInt    # When peak rate was observed
+  lastRateUpdate: BigInt       # Last time rates were updated
+  rateThresholdAlerts: [RateThresholdAlert!]! @derivedFrom(field: "filter")
+}
+
+# Define enum for migration states
+enum MigrationState {
+  PREPARING
+  MIGRATING
+  FINALIZING
+  COMPLETED
+  CANCELED
+}
+
+# Define enum for migration operation types
+enum MigrationOperationType {
+  START
+  BATCH
+  COMPLETE
+  CANCEL
+  ERROR
+}
+
+# Define enum for batch processing status
+enum BatchStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  RETRYING
+}
+
+# Define enum for error severity levels
+enum ErrorSeverity {
+  CRITICAL
+  MAJOR
+  MINOR
+}
+
+# Define enum for appeal status
+enum AppealStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  EXPIRED
+}
+
+// New entity for normalized transaction data
+type MigrationTransaction @entity {
+  id: ID!                                  # Unique identifier (migrationId + tx hash)
+  migration: Migration!                    # Reference to parent migration
+  batch: MigrationBatch                    # Reference to associated batch (if this is a batch transaction)
+  transactionHash: Bytes! @index           # The transaction hash (indexed for faster queries)
+  timestamp: BigInt! @index                # When transaction was executed (indexed for time-based queries)
+  blockNumber: BigInt!                     # Block number where transaction was processed
+  operationType: MigrationOperationType!   # What operation this transaction performed (using enum)
+  batchIndex: BigInt                       # Batch index if this is a batch transaction
+  gasUsed: BigInt                          # Gas used by this transaction
+  status: String!                          # Transaction status: SUCCESS, FAILED, PENDING
+  errorMessage: String                     # Error message if transaction failed
 }
 
 type Migration @entity {
   id: ID!                        # Migration ID (unique identifier)
   sourceFilter: Filter!          # Original filter being migrated from
   targetFilter: Filter!          # New filter being migrated to
-  state: String!                 # PREPARING, MIGRATING, FINALIZING, COMPLETED, CANCELED
-  startedAt: BigInt!             # When migration was initiated
+  state: MigrationState! @index  # Using enum instead of String, indexed for faster filtering
+  startedAt: BigInt! @index      # When migration was initiated, indexed for time-based queries
   completedAt: BigInt            # When migration was completed (if finished)
   totalBatches: BigInt!          # Total number of batches to process
   batchesCompleted: BigInt!      # Number of batches processed
   entriesMigrated: BigInt!       # Number of entries successfully migrated
   progress: BigInt!              # Progress as percentage in basis points (100 = 1%)
+  lastUpdatedAt: BigInt! @index  # When migration was last updated, indexed for recency filtering
+  version: Int!                  # Schema version for migration compatibility tracking
   
   # Batches tracking
   batches: [MigrationBatch!]! @derivedFrom(field: "migration")
@@ -74,14 +157,29 @@ type Migration @entity {
   averageBatchGasUsed: BigInt!   # Average gas used per batch
   totalGasUsed: BigInt!          # Total gas used for this migration
   estimatedRemainingGas: BigInt! # Estimated remaining gas needed
+  durationSeconds: BigInt        # Duration for completed migrations (completedAt - startedAt)
+  
+  # Rate limiting and throttling
+  rateLimitPerHour: Int          # Maximum batches processed per hour (if rate-limited)
+  currentRatePerHour: Int        # Current actual processing rate
+  isPaused: Boolean              # Whether migration processing is temporarily paused
+  lastPausedAt: BigInt           # When the migration was last paused
   
   # Issues tracking
   hasErrors: Boolean!            # Whether any errors occurred during migration
   errorCount: Int!               # Number of errors encountered
   errors: [MigrationError!]! @derivedFrom(field: "migration")
+  retryableErrorCount: Int       # Count of errors that can be retried
+  criticalErrorCount: Int        # Count of critical errors that prevented progress
   
-  # Transaction data
-  transactionHashes: [Bytes!]!   # All transaction hashes involved in this migration
+  # Error classification - counts by type
+  validationErrors: Int          # Schema/data validation errors
+  networkErrors: Int             # Network-related errors
+  gasErrors: Int                 # Gas estimation/limit errors
+  timeoutErrors: Int             # Timeout-related errors
+  
+  # Transaction data - using normalized entity instead of array
+  transactions: [MigrationTransaction!]! @derivedFrom(field: "migration")
   createdTxHash: Bytes!          # Transaction that initiated the migration
   completedTxHash: Bytes         # Transaction that completed the migration
   
@@ -93,25 +191,40 @@ type Migration @entity {
 type MigrationBatch @entity {
   id: ID!                      # Batch ID (migrationId + batchIndex)
   migration: Migration!        # Parent migration
-  batchIndex: BigInt!          # Sequential batch number
+  batchIndex: BigInt! @index   # Sequential batch number (indexed for faster sequence queries)
   entriesMigrated: BigInt!     # Entries migrated in this batch
   gasUsed: BigInt!             # Gas used for this batch
-  timestamp: BigInt!           # When this batch was processed
+  timestamp: BigInt! @index    # When this batch was processed (indexed for time-based queries)
   blockNumber: BigInt!         # Block number where batch was processed
   transactionHash: Bytes!      # Transaction hash
   processingTime: BigInt!      # How long batch processing took in seconds
-  successful: Boolean!         # Whether the batch completed successfully
+  status: BatchStatus!         # Status using enum instead of boolean+string combination
   errorMessage: String         # Error message if batch failed
+  
+  # Retry tracking
+  retryCount: Int              # Number of retry attempts
+  isRetry: Boolean             # Whether this batch is a retry of a previous failed attempt
+  originalBatchId: ID          # Reference to original batch if this is a retry
+  
+  # Related transaction
+  transaction: MigrationTransaction @derivedFrom(field: "batch")
+  
+  # Extensible properties
+  metadata: String             # JSON string for additional metadata
 }
 
 type MigrationError @entity {
   id: ID!                      # Error ID (tx hash + log index)
   migration: Migration!        # Parent migration
   batchIndex: BigInt           # Batch index where error occurred (if applicable)
+  batch: MigrationBatch        # Direct reference to the batch (if applicable)
   errorMessage: String!        # Error message
-  timestamp: BigInt!           # When error occurred
+  timestamp: BigInt! @index    # When error occurred (indexed for time-based queries)
   transactionHash: Bytes!      # Transaction where error occurred
-  severity: String!            # CRITICAL, MAJOR, MINOR
+  severity: ErrorSeverity! @index # Using enum instead of String (indexed for filtering)
+  errorType: String!           # Error classification (e.g., VALIDATION, NETWORK, GAS, TIMEOUT, DATA)
+  resolution: String           # Steps taken to resolve the error (if any)
+  stackTrace: String           # Extended technical details for debugging (if available)
 }
 
 type Appeal @entity {
@@ -121,10 +234,10 @@ type Appeal @entity {
   reporter: Bytes!             # Address that reported the false positive
   
   # Status fields
-  timestamp: BigInt!           # When the appeal was submitted
-  resolved: Boolean!           # Whether the appeal has been resolved
+  timestamp: BigInt! @index    # When the appeal was submitted (indexed for time-based queries)
+  resolved: Boolean! @index    # Whether the appeal has been resolved (indexed for filtering active appeals)
   accepted: Boolean!           # Whether the appeal was accepted
-  status: String!              # PENDING, ACCEPTED, REJECTED, EXPIRED
+  status: AppealStatus! @index # Using enum instead of String (indexed for status filtering)
   
   # Voting info
   voteCount: Int!              # Number of votes received
@@ -144,17 +257,39 @@ type Appeal @entity {
   
   # Time tracking
   pendingDuration: BigInt      # How long appeal was pending (in seconds)
-  createdAtTimestamp: BigInt!  # Redundant with timestamp but explicit naming
+  createdAtTimestamp: BigInt!  # When the appeal was created
+  updatedAt: BigInt!           # When the appeal was last updated
   expiryTimestamp: BigInt      # When this appeal will expire (if applicable)
+  
+  # Additional metadata
+  appealNumber: Int!           # Sequential identifier for this filter's appeals
+  reporterName: String         # Optional human-readable name of reporter
+  reporterRole: String         # Optional role of the reporter in the system
+}
+
+# Define enum for consortium member roles
+enum ConsortiumRole {
+  STANDARD
+  ADMIN
+  APPEAL_MANAGER
+  MODERATOR
+  OBSERVER
+}
+
+# Define enum for member activity status
+enum ActivityStatus {
+  ACTIVE      # Active within last 7 days
+  INACTIVE    # Inactive for 7-30 days
+  DORMANT     # Inactive for more than 30 days
 }
 
 type ConsortiumMember @entity {
   id: ID!                      # Address of consortium member
   filter: Filter!              # Reference to parent filter
-  active: Boolean!             # Whether member is currently active
+  active: Boolean! @index      # Whether member is currently active (indexed for faster queries)
   
   # Consortium role
-  role: String!                # STANDARD, ADMIN, APPEAL_MANAGER, etc.
+  role: ConsortiumRole! @index # Using enum instead of String (indexed for role-based queries)
   weight: Int!                 # Voting weight (default 1)
   
   # Temporal data
@@ -165,42 +300,84 @@ type ConsortiumMember @entity {
   votesCast: Int!              # Total number of votes cast by member
   votes: [Vote!]! @derivedFrom(field: "voter")
   lastActiveAt: BigInt         # Last activity timestamp
+  activityStatus: ActivityStatus! # Calculated from lastActiveAt timestamp
   
   # Identity (optional)
   name: String                 # Human-readable name (if provided)
-  metadata: String             # Additional member metadata (JSON)
+  metadata: String             # JSON metadata (e.g., {"profile": "...", "permissions": [...]})
+  
+  # Governance history
+  roleChanges: [ConsortiumMemberRoleChange!]! @derivedFrom(field: "member")
+}
+
+# Entity to track role changes for governance audit trail
+type ConsortiumMemberRoleChange @entity {
+  id: ID!                       # Unique identifier (member address + timestamp)
+  member: ConsortiumMember!     # Reference to consortium member
+  previousRole: ConsortiumRole! # Previous role before change
+  newRole: ConsortiumRole!      # New assigned role
+  changedAt: BigInt!            # When the role was changed
+  changedBy: Bytes!             # Address that authorized the change
+  reasonForChange: String       # Optional explanation for the role change
+  transactionHash: Bytes!       # Transaction hash of the role change
+}
+
+# Define enum for vote types
+enum VoteType {
+  STANDARD
+  EMERGENCY
+  OVERRIDE
+  ABSTAIN
 }
 
 type Vote @entity {
   id: ID!                      # Vote ID (appealId + voter)
   appeal: Appeal!              # Reference to appeal being voted on
   voter: ConsortiumMember!     # Consortium member who voted
-  voteInFavor: Boolean!        # Whether vote was in favor of accepting
+  voteInFavor: Boolean! @index # Whether vote was in favor of accepting (indexed for faster queries)
+  voteType: VoteType!          # Type of vote cast
   
   # Additional vote data
   weight: Int!                 # Vote weight (from consortium member)
   reason: String               # Optional reason for vote
   
   # Temporal data
-  timestamp: BigInt!           # When vote was cast
+  createdAt: BigInt! @index    # When vote was cast (standardized naming, indexed)
+  updatedAt: BigInt            # When vote was last modified (if applicable)
   blockNumber: BigInt!         # Block number when vote was cast
   transactionHash: Bytes!      # Transaction hash of the vote
   
   # Appeal state at time of vote
   appealVoteCount: Int!        # Vote count on appeal at time of this vote
-  isDecisive: Boolean!         # Whether this vote caused resolution
+  isDecisive: Boolean! @index  # Whether this vote caused resolution (indexed for filtering)
+  
+  # Analytics support
+  timeToCastFromAppeal: BigInt # Time elapsed between appeal creation and vote
+  relativeOrder: Int!          # Order of this vote among all votes for the appeal
+  modificationCount: Int       # Number of times this vote has been modified
+  previousValue: Boolean       # Previous vote value if it was changed
+}
+
+# Define enum for health status
+enum HealthStatus {
+  HEALTHY
+  DEGRADED
+  CRITICAL
 }
 
 type FilterMetrics @entity {
   id: ID!                      # Timestamp-based ID for each metrics snapshot
   filter: Filter!              # Reference to parent filter
-  timestamp: BigInt!           # When metrics were recorded
+  filterId: ID!                # Direct reference to parent filter ID (for join avoidance)
+  timestamp: BigInt! @index    # When metrics were recorded (indexed for time-range queries)
   blockNumber: BigInt!         # Block number when metrics were recorded
+  sequenceId: Int!             # Sequential identifier for efficient pagination
+  filter_timestamp: String! @index # Composite key for optimization (filterId-timestamp)
   
   # Core metrics
   size: BigInt!                # Filter size at this time
   insertCount: BigInt!         # Items inserted at this time
-  fillRatioBps: Int!           # Fill ratio at this time
+  fillRatioBps: Int! @index    # Fill ratio at this time (indexed for threshold alerts)
   estimatedFPRbps: Int!        # Estimated FPR at this time
   setbitsCount: BigInt!        # Number of set bits
   
@@ -209,7 +386,7 @@ type FilterMetrics @entity {
   pendingAppeals: Int!         # Number of pending appeals
   
   # Health indicators
-  healthStatus: String!        # Health: HEALTHY, DEGRADED, CRITICAL
+  healthStatus: HealthStatus! @index # Using enum instead of String (indexed for status filtering)
   
   # Change rates (calculated)
   insertRate: Float!           # Inserts per day
@@ -220,41 +397,75 @@ type FilterMetrics @entity {
   projectedFPRbps: Int         # Projected FPR at autoscale threshold
 }
 
+# Define enum for filter operation types
+enum OperationType {
+  INSERT
+  CLEAR
+  RESET
+  SCALE
+  ACTIVATE
+  APPEAL_REGISTER
+  APPEAL_RESOLVED
+  VOTE_CAST
+  SCALING_START
+  SCALING_COMPLETED
+  SCALING_CANCELED
+  BATCH_COMPLETED
+  CONFIG_UPDATED
+  PAUSE
+  UNPAUSE
+  EMERGENCY_ACTION
+}
+
 type FilterOperation @entity {
   id: ID!                      # Operation ID (tx hash + index)
   filter: Filter!              # Reference to parent filter
-  operationType: String!       # Type: INSERT, CLEAR, RESET, SCALE, ACTIVATE, ETC
+  operationType: OperationType! @index  # Type of operation (indexed for operation type queries)
   
   # Operation details
-  timestamp: BigInt!           # When operation occurred
-  blockNumber: BigInt!         # Block number of operation
+  timestamp: BigInt! @index    # When operation occurred (indexed for time-based queries)
+  blockNumber: BigInt! @index  # Block number of operation (indexed for block range queries)
   transactionHash: Bytes!      # Transaction hash of operation
-  caller: Bytes!               # Address that called the operation
+  caller: Bytes! @index        # Address that called the operation (indexed for caller-specific queries)
   
   # Data specific to operation type
   entryInserted: Bytes         # If INSERT operation, the inserted entry
-  details: String              # Additional operation details (JSON)
+  details: String              # Additional operation details as JSON object - structure depends on operationType
   
-  # Metrics
-  gasUsed: BigInt              # Gas used for this operation
-  gasPrice: BigInt             # Gas price for this operation
-  effectiveGasPrice: BigInt    # Effective gas price including priority fees
+  # Metrics (optional - populated based on operation context)
+  gasUsed: BigInt              # Gas used for this operation (null if not available from receipt)
+  gasPrice: BigInt             # Gas price for this operation (null if not available from transaction)
+  effectiveGasPrice: BigInt    # Effective gas price including priority fees (null for pre-EIP-1559 or if unavailable)
+  
+  # Composite index for common query patterns
+  filter_operationType_timestamp: String! @index  # Composite key for optimizing queries (filterId-operationType-timestamp)
+}
+
+# Define enum for metrics time periods
+enum MetricsPeriod {
+  HOURLY
+  DAILY
+  WEEKLY
+  MONTHLY
 }
 
 type PerformanceMetrics @entity {
   id: ID!                      # Time-based ID for performance metrics
   filter: Filter!              # Associated filter
-  period: String!              # HOURLY, DAILY, WEEKLY
-  timestamp: BigInt!           # Start of the period
+  period: MetricsPeriod! @index # Using enum instead of String for type safety (indexed for period-based queries)
+  timestamp: BigInt! @index    # Start of the period (indexed for time-based queries)
+  filter_period_timestamp: String! @index # Composite key for optimizing queries
   
   # Operation counts
   insertCount: Int!            # Number of insert operations
   queryCount: Int!             # Number of query operations
+  totalOperations: Int!        # Total operations (insertCount + queryCount)
   
   # Gas metrics
   totalGasUsed: BigInt!        # Total gas used in period
   averageGasPerInsert: BigInt! # Average gas per insert
   averageGasPerQuery: BigInt!  # Average gas per query
+  averageGasPerOperation: BigInt! # Average gas across all operations
   
   # Timing metrics
   averageInsertTime: BigInt!   # Average time per insert (ms)
@@ -266,21 +477,50 @@ type PerformanceMetrics @entity {
   totalCost: BigInt!           # Total cost in period
   costPerInsert: BigInt!       # Average cost per insert
   costPerQuery: BigInt!        # Average cost per query
+  
+  # Error metrics
+  errorCount: Int!             # Number of operation errors
+  failureRate: Float!          # Error rate as percentage
+  timeoutCount: Int!           # Number of timeout errors
+  validationErrorCount: Int!   # Number of validation errors
+}
+
+# Define enum for emergency action types
+enum EmergencyActionType {
+  PAUSE
+  UNPAUSE
+  EMERGENCY_CANCEL
+  FORCE_RESOLUTION
+  RESET_FILTER
+  ABORT_MIGRATION
+  OVERRIDE_CONSENSUS
+  RECONFIGURE
+}
+
+# Define enum for actor roles
+enum ActorRole {
+  ADMIN
+  EMERGENCY
+  MODERATOR
+  AUTOMATED
+  GOVERNANCE
+  SECURITY
 }
 
 type EmergencyAction @entity {
   id: ID!                      # Action ID (tx hash)
   filter: Filter!              # Associated filter
-  actionType: String!          # PAUSE, UNPAUSE, EMERGENCY_CANCEL, etc.
+  actionType: EmergencyActionType! @index # Using enum instead of String (indexed for action-type queries)
   
   # Actor info
-  actor: Bytes!                # Address that performed action
-  role: String!                # Role of the actor (ADMIN, EMERGENCY, etc)
+  actor: Bytes! @index         # Address that performed action (indexed for actor-specific queries)
+  role: ActorRole! @index      # Role of the actor using enum (indexed for role-specific queries)
   
   # Context
-  timestamp: BigInt!           # When action occurred
+  timestamp: BigInt! @index    # When action occurred (indexed for time-based queries)
   blockNumber: BigInt!         # Block where action occurred 
   transactionHash: Bytes!      # Transaction hash
+  operation: FilterOperation   # Related operation record
   
   # Details
   reason: String!              # Reason for emergency action
@@ -289,9 +529,20 @@ type EmergencyAction @entity {
   affectedAppeal: Appeal       # Affected appeal if applicable
   
   # Resolution
-  resolved: Boolean!           # Whether emergency has been resolved
+  resolved: Boolean! @index    # Whether emergency has been resolved (indexed for filtering)
   resolutionTimestamp: BigInt  # When emergency was resolved
   resolutionTxHash: Bytes      # Transaction that resolved the emergency
+  resolutionActor: Bytes       # Address that resolved the emergency
+  resolutionDetails: String    # Structured details about the resolution (JSON)
+  remediationSteps: [String!]  # List of steps taken to remediate the issue
+}
+
+// Define enum for system states
+enum SystemState {
+  ACTIVE
+  PAUSED
+  MAINTENANCE
+  EMERGENCY
 }
 
 type SystemConfig @entity {
@@ -301,6 +552,8 @@ type SystemConfig @entity {
   activeFilterId: BigInt!      # Current active filter ID
   previousFilterId: BigInt     # Previous filter ID during transitions
   transitionEndTime: BigInt    # When transition period ends
+  activeFilter: Filter         # Direct reference to active filter entity
+  previousFilter: Filter       # Direct reference to previous filter entity
   
   # Scaling settings
   batchSize: BigInt!           # Migration batch size
@@ -310,36 +563,82 @@ type SystemConfig @entity {
   autoScalingEnabled: Boolean! # Whether auto-scaling is enabled
   
   # System state
-  paused: Boolean!             # Whether system is paused
+  systemState: SystemState! @index # Enhanced state tracking (indexed for filtering)
+  paused: Boolean! @index      # Whether system is paused (indexed for quick status checks)
   lastPausedAt: BigInt         # When system was last paused
   lastUnpausedAt: BigInt       # When system was last unpaused
   
   # Update info
-  lastUpdated: BigInt!         # When config was last updated
+  lastUpdated: BigInt! @index  # When config was last updated (indexed for recency filtering)
   updatedBy: Bytes!            # Address that last updated config
   updateCount: Int!            # Number of configuration updates
+  configVersion: Int!          # Configuration version number
+  configHash: Bytes!           # Hash of current config values for integrity checks
+  previousConfigHash: Bytes    # Hash of previous configuration
+  
+  # Maintenance and monitoring
+  nextMaintenanceTimestamp: BigInt # When next scheduled maintenance will occur
+  maintenanceDuration: BigInt      # Expected duration of maintenance in seconds
+  healthCheckTimestamp: BigInt     # Last successful health check timestamp
+  healthStatus: HealthStatus       # Current system health status
   
   # Network info
   networkId: Int!              # Chain ID
   implementation: String!      # Implementation contract address
   deploymentVersion: String!   # Semantic version of deployed contract
+  
+  # Feature flags
+  featureFlags: String         # JSON string containing enabled/disabled features
+  
+  # Security and governance
+  lastSecurityAudit: BigInt    # When the last security audit was conducted
+  governanceContract: Bytes    # Address of contract controlling governance decisions
+  minConsensusRequired: Int    # Minimum consensus needed for config changes (%)
+  
+  # Rate limiting configuration
+  maxInsertRatePerHour: Float  # Maximum allowed inserts per hour
+  maxInsertRatePerMinute: Float # Maximum allowed inserts per minute
+  maxAppealRatePerDay: Float   # Maximum appeals allowed per day
+  rateLimitingEnabled: Boolean # Whether rate limiting is active
+  rateBurstCapacity: Int       # Allowed temporary burst capacity
+  rateLimitRefillPerSecond: Float # How quickly limit tokens refill
 }
 
 type DailyMetrics @entity {
   id: ID!                      # Filter ID + date (YYYY-MM-DD)
   filter: Filter!              # Reference to parent filter
-  date: String!                # The date in YYYY-MM-DD format
-  dayTimestamp: BigInt!        # Start of day timestamp
+  date: String! @index         # The date in YYYY-MM-DD format (indexed for date-based queries)
+  dayTimestamp: BigInt! @index # Start of day timestamp (indexed for timestamp range queries)
+  filter_date: String! @index  # Composite key (filterId-date) for optimizing common queries
+  
+  # Operation counts
   insertCount: Int!            # Number of inserts during this day
   queryCount: Int!             # Number of queries during this day
   appealCount: Int!            # Number of appeals filed during this day
   voteCount: Int!              # Number of votes cast during this day
+  transactionCount: Int!       # Total number of transactions on this day
+  
+  # Gas metrics (totalGasUsed should equal insertGasUsed + queryGasUsed + other operation gas)
   totalGasUsed: BigInt!        # Total gas used on this day
   insertGasUsed: BigInt!       # Gas used for inserts on this day
   queryGasUsed: BigInt!        # Gas used for queries on this day
+  averageGasPerTx: BigInt      # Average gas used per transaction (calculated field)
+  
+  # User metrics (more scalable approach)
   uniqueUsers: [Bytes!]!       # Array of unique user addresses active this day
+  uniqueUserCount: Int!        # Count of unique users (more efficient for queries than array length)
   activeConsortiumMembers: Int! # Number of consortium members active this day
-  transactionCount: Int!       # Total number of transactions on this day
+  
+  # Performance metrics summary
+  avgInsertTime: BigInt        # Average insert operation time in ms
+  avgQueryTime: BigInt         # Average query operation time in ms
+  errorCount: Int              # Number of errors that occurred
+  
+  # Time period categorization for easier filtering
+  weekNumber: Int              # ISO week number (1-53)
+  monthNumber: Int             # Month number (1-12)
+  quarterNumber: Int           # Quarter number (1-4)
+  year: Int                    # Year (YYYY)
 }
 
 type TimeWeightedMetrics @entity {
@@ -353,4 +652,95 @@ type TimeWeightedMetrics @entity {
   maxValue: Float!             # Maximum value seen
   minValue: Float!             # Minimum value seen
   cumulativeValue: Float!      # Sum of all values (for arithmetic mean)
+}
+
+# Define enum for rate period units
+enum RatePeriod {
+  SECOND
+  MINUTE
+  HOUR
+  DAY
+  WEEK
+  MONTH
+}
+
+# Define enum for rate trend direction
+enum RateTrend {
+  INCREASING
+  STABLE
+  DECREASING
+  SPIKING
+  VOLATILE
+  MINIMAL
+}
+
+# Entity for tracking operation rates over various time periods
+type RateMetrics @entity {
+  id: ID!                       # Unique identifier (filter + metric type + timestamp)
+  filter: Filter!               # Associated filter
+  metricType: String!           # Type of rate being tracked (INSERT, QUERY, APPEAL, etc.)
+  period: RatePeriod! @index    # Time period unit
+  timestamp: BigInt! @index     # When metrics were recorded
+  
+  # Rate values
+  rate: Float!                  # Main rate value (operations per period unit)
+  rateChange: Float!            # Change from previous measurement
+  ratePercentChange: Float!     # Percent change from previous period
+  trend: RateTrend!             # Direction of rate change
+  
+  # Additional context
+  baselineRate: Float!          # Expected baseline rate
+  anomalyScore: Float           # How anomalous current rate is (0-100)
+  peakRate: Float!              # Peak rate in this period
+  averageRate: Float!           # Average rate over multiple measurements
+  cumulativeCount: Int!         # Total count in this period
+  
+  # Time info
+  periodStart: BigInt!          # Start of this measurement period
+  periodEnd: BigInt!            # End of this measurement period
+  
+  # Forecasting
+  projectedNextRate: Float      # Projected rate for next period
+  seasonal: Boolean             # Whether this rate shows seasonal patterns
+  
+  # Composite indexes for queries
+  filter_metricType_timestamp: String! @index # Composite key for filtering
+}
+
+# Define enum for rate limit action
+enum RateLimitAction {
+  WARN        # Warning only - operation allowed
+  THROTTLE    # Operation delayed/queued
+  REJECT      # Operation rejected
+  ALERT       # Alert sent to monitoring
+  LOG         # Event logged only
+}
+
+# Entity to track rate limit enforcement
+type RateLimitEvent @entity {
+  id: ID!                      # Event ID (tx hash + timestamp)
+  filter: Filter!              # Associated filter
+  timestamp: BigInt! @index    # When the rate limit was enforced
+  callerAddress: Bytes! @index # Address that triggered the rate limit
+  operationType: String!       # Type of operation that was limited
+  currentRate: Float!          # Rate at time of enforcement
+  limitThreshold: Float!       # Threshold that was exceeded
+  action: RateLimitAction!     # Action taken for this violation
+  blockNumber: BigInt!         # Block where rate limit was enforced
+  transactionHash: Bytes!      # Transaction hash
+}
+
+# Entity to track rate threshold alerts
+type RateThresholdAlert @entity {
+  id: ID!                      # Alert ID (filter + timestamp)
+  filter: Filter!              # Associated filter
+  timestamp: BigInt! @index    # When the alert was triggered
+  metricType: String!          # Type of metric that triggered alert
+  currentRate: Float!          # Current rate value
+  thresholdValue: Float!       # Threshold that was exceeded
+  percentAboveThreshold: Float! # How far above threshold (percent)
+  severity: Int!               # Alert severity 1-5 (5=highest)
+  acknowledged: Boolean!       # Whether alert has been acknowledged
+  acknowledgedBy: Bytes        # Address that acknowledged the alert
+  acknowledgedAt: BigInt       # When alert was acknowledged
 }

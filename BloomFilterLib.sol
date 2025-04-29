@@ -33,6 +33,8 @@ library BloomFilterLib {
     error InsufficientVotes();
     error AppealAlreadyResolved();
     error InvalidConsortiumAction();
+    error AppealDoesNotExist();  // Added custom error for appeal check
+    error InvalidMemberAddress(); // Added custom error for member address check
 
     // Constants for hash function seeds
     uint256 private constant HASH_SEED_1 = 0x734f6e50;    // "sO_P"
@@ -224,12 +226,7 @@ library BloomFilterLib {
             }
         }
 
-        // Generate hashes and set bits in buckets, pre-allocate updated buckets array for gas savings
-        bytes32[] memory updatedBuckets = new bytes32[](numHashes);
-        uint256[] memory bucketIndices = new uint256[](numHashes);
-        uint256[] memory bitIndices = new uint256[](numHashes);
-
-        // Pre-compute all hash positions to batch storage operations
+        // Optimized: Combined read-modify-write in a single loop instead of two separate loops
         unchecked {
             for (uint256 i = 0; i < numHashes; i++) {
                 // Use pre-computed hash seeds and incorporate salt
@@ -237,25 +234,18 @@ library BloomFilterLib {
                     keccak256(abi.encodePacked(hashSeeds[i], entry, salt))
                 ) % (size * 256);
                 
-                bucketIndices[i] = hash / 256;
-                bitIndices[i] = hash % 256;
+                uint256 bucketIndex = hash / 256;
+                uint256 bitIndex = hash % 256;
                 
                 // Bounds checking still needed to prevent out-of-bounds storage manipulation
-                if (bucketIndices[i] >= size) revert IndexOutOfBounds();
+                if (bucketIndex >= size) revert IndexOutOfBounds();
                 
-                // Read buckets in one pass
-                updatedBuckets[i] = filter.buckets[bucketIndices[i]];
-            }
-        }
-        
-        // Set all bits and update storage in one pass
-        unchecked {
-            for (uint256 i = 0; i < numHashes; i++) {
-                // Set the bit
-                bytes32 updatedBucket = updatedBuckets[i] | bytes32(1 << bitIndices[i]);
-                filter.buckets[bucketIndices[i]] = updatedBucket;
+                // Read, modify, and write in a single pass - gas optimized
+                bytes32 bucket = filter.buckets[bucketIndex];
+                bucket = bucket | bytes32(1 << bitIndex);
+                filter.buckets[bucketIndex] = bucket;
                 
-                emit FilterUpdated(entry, bucketIndices[i]);
+                emit FilterUpdated(entry, bucketIndex);
             }
         }
         
@@ -751,8 +741,8 @@ library BloomFilterLib {
         
         Appeal storage appeal = filter.appeals[appealId];
         
-        // Check if appeal exists and not already resolved
-        require(appeal.timestamp > 0, "Appeal does not exist");
+        // Check if appeal exists and not already resolved - use custom error
+        if (appeal.timestamp == 0) revert AppealDoesNotExist();
         if (appeal.resolved) revert AppealAlreadyResolved();
         
         // Check if member has already voted
@@ -845,8 +835,9 @@ library BloomFilterLib {
         address[] memory initialMembers,
         uint256 minVotes
     ) internal {
-        require(initialMembers.length > 0, "Need at least one member");
-        require(minVotes > 0, "Min votes must be > 0");
+        // Replace string errors with custom errors for gas optimization
+        if (initialMembers.length == 0) revert InvalidConsortiumAction();
+        if (minVotes == 0) revert InsufficientVotes();
         
         // Reset any existing consortium settings
         filter.minVotesRequired = minVotes;
@@ -889,7 +880,8 @@ library BloomFilterLib {
         address member,
         bool isAdding
     ) internal {
-        require(member != address(0), "Invalid member address");
+        // Replace require with custom error for gas optimization
+        if (member == address(0)) revert InvalidMemberAddress();
         
         if (isAdding && !filter.consortiumMembers[member]) {
             filter.consortiumMembers[member] = true;

@@ -1711,124 +1711,327 @@ function getLatestMetrics(filterId: string, before: BigInt): FilterMetrics | nul
 }
 
 /**
- * Estimate FPR based on filter parameters
+ * Estimates the false positive rate (FPR) of a Bloom filter in basis points (1/100 of 1%)
+ * Uses the standard Bloom filter probability formula: (1-(1-1/m)^(k*n))^k
+ * where m=bits, k=hash functions, n=items
+ * 
+ * The function implements two calculation strategies for optimal precision:
+ * 1. For low fill levels: Uses the approximation (1-e^(-kn/m))^k which is more accurate when n*k/m is small
+ * 2. For higher fill levels: Uses logarithm transformation to avoid underflow in probability calculation
+ * 
+ * @param size - The filter size in words (each word is 256 bits)
+ * @param numHashes - Number of hash functions used (typically 1-8)
+ * @param itemCount - Number of items added to the filter
+ * @returns The estimated FPR in basis points (0-10000, where 10000 = 100%)
  */
 function estimateFPR(size: i32, numHashes: i32, itemCount: i32): i32 {
-  // Simple approximation for FPR calculation
-  // (1-(1-1/m)^(k*n))^k where m=bits, k=hash functions, n=items
+  // Number of bits in the filter (256 bits per word)
+  const BITS_PER_WORD = 256;
+  // BASIS_POINTS_SCALE = 10000 (defined elsewhere in file, 100% = 10000 basis points)
   
-  let m = size * 256
-  let k = numHashes
-  let n = itemCount
+  // Validate inputs - log warnings but still calculate best estimate
+  if (numHashes <= 0) {
+    log.warning("Invalid numHashes ({}) in estimateFPR. Using numHashes=1", [numHashes.toString()]);
+    numHashes = 1; // Default to 1 hash function as minimum
+  }
+  
+  if (numHashes > 20) {
+    log.warning("Unusually high numHashes ({}) in estimateFPR. May cause precision issues.", [numHashes.toString()]);
+  }
+  
+  // Calculate total bits in the filter
+  let m = size * BITS_PER_WORD;
+  let k = numHashes;
+  let n = itemCount;
   
   // For very small loads or empty filters
-  if (n == 0 || m == 0) return 0
+  if (n <= 0 || m <= 0) return 0;
   
-  // Simplified estimate using k*n/m approximation for small FPRs
-  let filling = (k * n * BASIS_POINTS_SCALE) / m
+  // Check for potential overflow before multiplication
+  if (n > 0x7FFFFFFF / k) {
+    log.warning("Potential overflow in estimateFPR. Using maximum FPR.", []);
+    return BASIS_POINTS_SCALE; // 100% FPR
+  }
   
-  // Apply probability scaling factor (simplified for AssemblyScript)
-  let fpr = Math.min(filling, BASIS_POINTS_SCALE)
+  // Fast path for extremely low fill rates (< 0.1%)
+  // Use linear approximation k*n/m which is accurate for very low fill rates
+  if ((k * n * 1000) < m) {
+    let linearApprox = (k * n * BASIS_POINTS_SCALE) / m;
+    return linearApprox;
+  }
   
-  return fpr
+  // More accurate FPR calculation based on fill level
+  if (n * k < m / 3) {
+    // Formula: (1 - e^(-k*n/m))^k - more accurate for lower fill levels
+    // This is mathematically equivalent to the standard formula but more numerically stable
+    let x = (k * n) / m;
+    
+    // Use direct exponential for better precision than Taylor approximation
+    let approx = 1.0 - Math.exp(-x);
+    
+    // For very small values, exp(-x) might have precision issues
+    // Ensure approx is in valid range [0,1]
+    approx = Math.max(0.0, Math.min(1.0, approx));
+    
+    // Raise to power k and convert to basis points
+    let fpr = Math.pow(approx, k) * BASIS_POINTS_SCALE;
+    return Math.min(i32(Math.round(fpr)), BASIS_POINTS_SCALE);
+  } else {
+    // For higher fill rates, use logarithm to avoid underflow
+    // Formula: (1-(1-1/m)^(k*n))^k
+    
+    let p = 1.0 - (1.0 / m);
+    
+    // Use logarithm for numerical stability with large exponents
+    let logP = Math.log(p) * k * n;
+    
+    // Check for very large negative values that could cause underflow in exp
+    if (logP < -700.0) {
+      // When probability not set approaches zero, probability set approaches 1
+      return BASIS_POINTS_SCALE; // 100% FPR
+    }
+    
+    let probabilityNotSet = Math.exp(logP);
+    let probabilitySet = 1.0 - probabilityNotSet;
+    
+    // Ensure probabilitySet is in valid range [0,1] to handle floating point errors
+    probabilitySet = Math.max(0.0, Math.min(1.0, probabilitySet));
+    
+    // Final FPR is (probability of bit being set)^k
+    let fpr = Math.pow(probabilitySet, k) * BASIS_POINTS_SCALE;
+    return Math.min(i32(Math.round(fpr)), BASIS_POINTS_SCALE);
+  }
 }
 
 // Other event handlers with stub implementations
 export function handleFilterCleared(event: FilterCleared): void {
-  let filterId = event.address.toHexString()
-  
-  // Update filter
-  let filter = Filter.load(filterId)
-  if (filter) {
-    filter.insertCount = BigInt.fromI32(0)
-    filter.fillRatioBps = 0
-    filter.estimatedFPRbps = 0
-    filter.updatedAt = event.block.timestamp
-    filter.save()
+  try {
+    let filterId = event.address.toHexString();
+    
+    // Update filter using safeLoadFilter utility
+    let filter = safeLoadFilter(filterId);
+    if (!filter) {
+      log.warning("Filter not found in handleFilterCleared: {}", [filterId]);
+      return;
+    }
+    
+    filter.insertCount = BigInt.fromI32(0);
+    filter.fillRatioBps = 0;
+    filter.estimatedFPRbps = 0;
+    filter.updatedAt = event.block.timestamp;
+    filter.save();
     
     // Create operation record
-    let operationId = event.transaction.hash.toHexString() + "-" + event.logIndex.toString()
-    let operation = new FilterOperation(operationId)
-    operation.filter = filterId
-    operation.operationType = 'CLEAR'
-    operation.timestamp = event.block.timestamp
-    operation.blockNumber = event.block.number
-    operation.transactionHash = event.transaction.hash
-    operation.caller = event.transaction.from
+    let operationId = event.transaction.hash.toHexString() + "-" + event.logIndex.toString();
+    let operation = new FilterOperation(operationId);
+    operation.filter = filterId;
+    operation.operationType = 'CLEAR';
+    operation.timestamp = event.block.timestamp;
+    operation.blockNumber = event.block.number;
+    operation.transactionHash = event.transaction.hash;
+    operation.caller = event.transaction.from;
     operation.details = JSON.stringify({
       'size': event.params.size.toString(),
       'numHashes': event.params.numHashes.toString()
-    })
-    operation.gasUsed = event.receipt ? event.receipt.gasUsed : null
-    operation.gasPrice = event.transaction.gasPrice
-    operation.save()
+    });
+    operation.gasUsed = event.receipt ? event.receipt.gasUsed : null;
+    operation.gasPrice = event.transaction.gasPrice;
+    operation.save();
     
     // Create metrics snapshot
-    createMetricsSnapshot(filterId, event.block.timestamp, event.block.number)
+    createMetricsSnapshot(filterId, event.block.timestamp, event.block.number);
+    
+    // Update time-weighted metrics
+    updateTimeWeightedMetrics(
+      filterId,
+      event.block.timestamp,
+      'CLEAR_OPERATION',
+      1 // Increment count by 1
+    );
+    
+    // Track gas usage with TWMA if available
+    if (event.receipt && event.receipt.gasUsed) {
+      updateTimeWeightedMetrics(
+        filterId,
+        event.block.timestamp,
+        'CLEAR_GAS_USED',
+        event.receipt.gasUsed.toI32()
+      );
+    }
+    
+    // Update daily metrics
+    updateDailyMetrics(
+      filterId,
+      event.block.timestamp,
+      'CLEAR',
+      event.receipt ? event.receipt.gasUsed : null
+    );
+    
+  } catch (error) {
+    log.error("Error handling FilterCleared: {}", [error.toString()]);
   }
 }
 
 export function handleFilterReset(event: FilterReset): void {
-  let filterId = event.address.toHexString()
-  
-  // Update filter
-  let filter = Filter.load(filterId)
-  if (filter) {
-    filter.size = event.params.newSize
-    filter.numHashes = event.params.newNumHashes.toI32()
-    filter.salt = event.params.newSalt
-    filter.insertCount = BigInt.fromI32(0)
-    filter.bitCount = filter.size.times(BigInt.fromI32(256))
-    filter.fillRatioBps = 0
-    filter.estimatedFPRbps = 0
-    filter.updatedAt = event.block.timestamp
-    filter.version = filter.version + 1
-    filter.save()
+  try {
+    let filterId = event.address.toHexString();
+    
+    // Use safeLoadFilter utility instead of direct Filter.load
+    let filter = safeLoadFilter(filterId);
+    if (!filter) {
+      log.warning("Filter not found in handleFilterReset: {}", [filterId]);
+      return;
+    }
+    
+    // Validate input parameters
+    if (event.params.newNumHashes.toI32() <= 0 || event.params.newNumHashes.toI32() > 20) {
+      log.warning("Unusual numHashes value in handleFilterReset: {}", [event.params.newNumHashes.toString()]);
+      // Continue anyway but log the warning
+    }
+    
+    // Update filter
+    filter.size = event.params.newSize;
+    filter.numHashes = event.params.newNumHashes.toI32();
+    filter.salt = event.params.newSalt;
+    filter.insertCount = BigInt.fromI32(0);
+    filter.bitCount = filter.size.times(BigInt.fromI32(256));
+    filter.fillRatioBps = 0;
+    filter.estimatedFPRbps = 0;
+    filter.updatedAt = event.block.timestamp;
+    filter.version = filter.version + 1;
+    filter.save();
     
     // Create operation record
-    let operationId = event.transaction.hash.toHexString() + "-" + event.logIndex.toString()
-    let operation = new FilterOperation(operationId)
-    operation.filter = filterId
-    operation.operationType = 'RESET'
-    operation.timestamp = event.block.timestamp
-    operation.blockNumber = event.block.number
-    operation.transactionHash = event.transaction.hash
-    operation.caller = event.transaction.from
+    let operationId = event.transaction.hash.toHexString() + "-" + event.logIndex.toString();
+    let operation = new FilterOperation(operationId);
+    operation.filter = filterId;
+    operation.operationType = 'RESET';
+    operation.timestamp = event.block.timestamp;
+    operation.blockNumber = event.block.number;
+    operation.transactionHash = event.transaction.hash;
+    operation.caller = event.transaction.from;
     operation.details = JSON.stringify({
       'newSize': event.params.newSize.toString(),
       'newNumHashes': event.params.newNumHashes.toString(),
       'newSalt': event.params.newSalt.toString()
-    })
-    operation.gasUsed = event.receipt ? event.receipt.gasUsed : null
-    operation.gasPrice = event.transaction.gasPrice
-    operation.save()
+    });
+    operation.gasUsed = event.receipt ? event.receipt.gasUsed : null;
+    operation.gasPrice = event.transaction.gasPrice;
+    operation.save();
     
     // Create metrics snapshot
-    createMetricsSnapshot(filterId, event.block.timestamp, event.block.number)
+    createMetricsSnapshot(filterId, event.block.timestamp, event.block.number);
+    
+    // Update time-weighted metrics
+    updateTimeWeightedMetrics(
+      filterId,
+      event.block.timestamp,
+      'RESET_OPERATION',
+      1 // Increment count by 1
+    );
+    
+    // Track gas usage with TWMA if available
+    if (event.receipt && event.receipt.gasUsed) {
+      updateTimeWeightedMetrics(
+        filterId,
+        event.block.timestamp,
+        'RESET_GAS_USED',
+        event.receipt.gasUsed.toI32()
+      );
+    }
+    
+    // Update daily metrics
+    updateDailyMetrics(
+      filterId,
+      event.block.timestamp,
+      'RESET',
+      event.receipt ? event.receipt.gasUsed : null
+    );
+    
+  } catch (error) {
+    log.error("Error handling FilterReset: {}", [error.toString()]);
   }
 }
 
 export function handleFilterScaled(event: FilterScaled): void {
-  let filterId = event.address.toHexString()
-  
-  // Create operation record
-  let operationId = event.transaction.hash.toHexString() + "-" + event.logIndex.toString()
-  let operation = new FilterOperation(operationId)
-  operation.filter = filterId
-  operation.operationType = 'SCALE'
-  operation.timestamp = event.block.timestamp
-  operation.blockNumber = event.block.number
-  operation.transactionHash = event.transaction.hash
-  operation.caller = event.transaction.from
-  operation.details = JSON.stringify({
-    'oldSize': event.params.oldSize.toString(),
-    'newSize': event.params.newSize.toString(),
-    'itemCount': event.params.itemCount.toString()
-  })
-  operation.gasUsed = event.receipt ? event.receipt.gasUsed : null
-  operation.gasPrice = event.transaction.gasPrice
-  operation.save()
-  
-  // Update filter metrics and create snapshot
-  createMetricsSnapshot(filterId, event.block.timestamp, event.block.number)
+  try {
+    let filterId = event.address.toHexString();
+    
+    // Use safeLoadFilter utility instead of direct Filter.load
+    let filter = safeLoadFilter(filterId);
+    if (!filter) {
+      log.warning("Filter not found in handleFilterScaled: {}", [filterId]);
+      return;
+    }
+    
+    // Validate input parameters
+    if (event.params.newSize.lt(BigInt.fromI32(1))) {
+      log.warning("Invalid new size in handleFilterScaled: {}", [event.params.newSize.toString()]);
+      // Continue anyway but log the warning
+    }
+    
+    // Update filter properties
+    filter.size = event.params.newSize;
+    filter.bitCount = filter.size.times(BigInt.fromI32(256));
+    filter.updatedAt = event.block.timestamp;
+    
+    // Recalculate fill ratio based on new size and itemCount
+    let size = filter.size.times(BigInt.fromI32(256));
+    if (!size.isZero()) {
+      let fillRatio = event.params.itemCount.times(BigInt.fromI32(BASIS_POINTS_SCALE)).div(size);
+      filter.fillRatioBps = Math.min(fillRatio.toI32(), BASIS_POINTS_SCALE);
+    }
+    
+    filter.save();
+    
+    // Create operation record
+    let operationId = event.transaction.hash.toHexString() + "-" + event.logIndex.toString();
+    let operation = new FilterOperation(operationId);
+    operation.filter = filterId;
+    operation.operationType = 'SCALE';
+    operation.timestamp = event.block.timestamp;
+    operation.blockNumber = event.block.number;
+    operation.transactionHash = event.transaction.hash;
+    operation.caller = event.transaction.from;
+    operation.details = JSON.stringify({
+      'oldSize': event.params.oldSize.toString(),
+      'newSize': event.params.newSize.toString(),
+      'itemCount': event.params.itemCount.toString()
+    });
+    operation.gasUsed = event.receipt ? event.receipt.gasUsed : null;
+    operation.gasPrice = event.transaction.gasPrice;
+    operation.save();
+    
+    // Update filter metrics and create snapshot
+    createMetricsSnapshot(filterId, event.block.timestamp, event.block.number);
+    
+    // Update time-weighted metrics
+    updateTimeWeightedMetrics(
+      filterId,
+      event.block.timestamp,
+      'SCALE_OPERATION',
+      1 // Increment count by 1
+    );
+    
+    // Track gas usage with TWMA if available
+    if (event.receipt && event.receipt.gasUsed) {
+      updateTimeWeightedMetrics(
+        filterId,
+        event.block.timestamp,
+        'SCALE_GAS_USED',
+        event.receipt.gasUsed.toI32()
+      );
+    }
+    
+    // Update daily metrics
+    updateDailyMetrics(
+      filterId,
+      event.block.timestamp,
+      'SCALE',
+      event.receipt ? event.receipt.gasUsed : null
+    );
+    
+  } catch (error) {
+    log.error("Error handling FilterScaled: {}", [error.toString()]);
+  }
 }

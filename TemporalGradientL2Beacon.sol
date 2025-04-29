@@ -20,11 +20,11 @@ import { GovernanceLib } from "./GovernanceLib.sol"; // <<< Added import (Needed
 import { IERC20Upgradeable } from "@openzeppelin/contracts-upgradeable/token/ERC20/IERC20Upgradeable.sol"; // <<< Added import
 
 /**
- * @title TemporalGradientBeacon
+ * @title TemporalGradientL2Beacon
  * @notice A temporal gradient beacon with mining, randomness generation, and governance features
  * @dev Uses UUPS upgrade pattern with role-based access control
  */
-contract TemporalGradientBeacon is
+contract TemporalGradientL2Beacon is
     Initializable,
     OwnableUpgradeable,
     ReentrancyGuardUpgradeable,
@@ -34,7 +34,7 @@ contract TemporalGradientBeacon is
     EIP712Upgradeable
 {
     using ECDSA for bytes32;
-    using RandomnessLib for RandomnessLib.State; 
+    using RandomnessLib for RandomnessLib.State; // <<< Added line
     using BloomFilterLib for BloomFilterLib.Filter;
     using MiningLib for MiningLib.RevealParams;
     using TokenomicsLib for TokenomicsLib.EpochState;
@@ -76,7 +76,7 @@ contract TemporalGradientBeacon is
     ITGBT public tstakeToken;
     uint256 public targetDifficulty;
     TokenomicsLib.EpochState internal epochState;
-    RandomnessLib.State internal randomnessState; 
+    RandomnessLib.State internal randomnessState; // <<< Changed type
     bytes32[OUTPUT_HISTORY_SIZE] public outputHistory;
     uint64 public currentOutputIndex;
     uint64 public lastOutputTimestamp;
@@ -106,6 +106,11 @@ contract TemporalGradientBeacon is
     mapping(address => uint256) public lastActivityBlock;  
     mapping(address => uint256) public missedContributions; 
 
+    // L2-specific state variables
+    address public l1BeaconAddress;
+    bytes32 public latestL1Output;
+    bytes32 public l2EntropyAccumulator;
+
     // Events
     event BeaconBlockMined(address indexed miner, bytes32 hmacOutput, uint256 reward, uint64 nonce, uint64 timestamp, uint8 poolId);
     event CommitmentSubmitted(address indexed miner, bytes32 commitHash, uint8 poolId);
@@ -126,6 +131,7 @@ contract TemporalGradientBeacon is
     event TokenomicsUpdate(uint256 indexed epochNumber, uint256 blockReward, uint256 blockNumber, bool isHalving);
     event AutoSlashed(address indexed account, uint8 violationType, uint8 severity, uint256 amount);
     event AutoBurned(address indexed account, uint8 burnType, uint256 parameter, uint256 amount);
+    event BeaconUpdated(bytes32 newEntropy);
 
     // Errors
     error ZeroToken();
@@ -268,6 +274,15 @@ contract TemporalGradientBeacon is
         _grantRole(TOKENOMICS_ROLE, msg.sender);
         _grantRole(SLASHER_ROLE, msg.sender);
         _grantRole(BURNER_ROLE, msg.sender);
+
+        // Initialize L2-specific state
+        l2EntropyAccumulator = keccak256(abi.encodePacked(
+            "L2_GENESIS",
+            block.timestamp,
+            block.prevrandao,
+            _tgbtToken,
+            _tstakeToken
+        ));
     }
 
     /* ========== MINING FUNCTIONS ========== */
@@ -421,7 +436,7 @@ contract TemporalGradientBeacon is
             params.secretValue,       // Miner's entropy
             miningPools[params.poolId].targetDifficulty,
             params.miner,
-            bloomFilter,             // Bloom filter causing false positives
+            bloomFilter,             // Spatial uniqueness check
             usedOutputs,            // Temporal uniqueness check
             MiningLib.quantumResistantHash,
             difficultyWeightFn
@@ -1062,5 +1077,65 @@ contract TemporalGradientBeacon is
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
+    }
+
+    // Get randomness using the L2 beacon
+    function getRandomness(uint256 numWords) external view returns (uint256[] memory) {
+        require(numWords > 0, "Invalid number of words");
+        require(l2EntropyAccumulator != bytes32(0), "EntropyNotInitialized");
+
+        uint256[] memory randomWords = new uint256[](numWords);
+        bytes32 seed = l2EntropyAccumulator;
+
+        for (uint256 i = 0; i < numWords; i++) {
+            seed = keccak256(abi.encodePacked(seed, block.timestamp, block.prevrandao, i, msg.sender));
+            randomWords[i] = uint256(seed);
+        }
+
+        return randomWords;
+    }
+    
+    // Event emitted when the beacon is updated
+    event BeaconUpdated(bytes32 newEntropy);
+    
+    // Placeholder for L1 output verification
+    function verifyL1Output(bytes32 newOutput, bytes calldata proof) internal pure returns (bool) {
+        // Implement L1 proof verification logic here
+        return true; // Placeholder
+    }
+
+    /**
+     * @notice Updates L2 entropy from an L1 beacon output
+     * @param newOutput New output hash from L1 beacon
+     * @param proof Proof data to verify the L1 source (e.g., merkle proof)
+     */
+    function updateFromL1(bytes32 newOutput, bytes calldata proof) external whenNotPaused {
+        require(newOutput != bytes32(0), "ZeroOutput");
+        require(l1BeaconAddress != address(0), "L1BeaconNotSet");
+        require(verifyL1Output(newOutput, proof), "InvalidL1Proof");
+        
+        // Update our L1 reference
+        latestL1Output = newOutput;
+        
+        // Mix with L2-specific entropy
+        l2EntropyAccumulator = keccak256(
+            abi.encodePacked(
+                l2EntropyAccumulator,
+                latestL1Output,
+                blockhash(block.number - 1),
+                block.prevrandao
+            )
+        );
+        
+        emit BeaconUpdated(l2EntropyAccumulator);
+    }
+
+    /**
+     * @notice Sets the L1 beacon reference address
+     * @param newL1 Address of the L1 beacon
+     */
+    function setL1BeaconAddress(address newL1) external onlyRole(GOVERNANCE_ROLE) {
+        require(newL1 != address(0), "ZeroAddress");
+        l1BeaconAddress = newL1;
     }
 }
