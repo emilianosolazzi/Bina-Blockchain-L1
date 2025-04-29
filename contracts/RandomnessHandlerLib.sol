@@ -27,18 +27,45 @@ library RandomnessHandlerLib {
         RandomnessLib.State state;
     }
     
+    /**
+     * @notice Updates the entropy accumulator and merkle root
+     * @dev Now compatible with RandomnessLib structure, processes pending requests
+     * @param self The randomness context
+     * @param historicalHash Historical entropy for additional randomness
+     */
     function processRandomnessAndUpdateMerkle(
         RandomnessContext storage self, 
         bytes32 historicalHash
     ) internal {
-        // Call the function correctly using direct library call
-        RandomnessLib.processBatch(
-            self.state,
-            3, // Process a small batch each time
-            historicalHash,
-            self.entropyAccumulator
-        );
+        // Process up to 3 pending requests instead of using non-existent processBatch
+        uint256 startId = self.state.nextRequestId > 3 ? self.state.nextRequestId - 3 : 0;
+        uint256 endId = self.state.nextRequestId;
+        uint256 processedCount = 0;
+        
+        // Try to fulfill any pending requests that have enough contributions
+        for (uint256 i = startId; i < endId && processedCount < 3; i++) {
+            // Skip if request doesn't exist or is already fulfilled
+            (address requester, , bool fulfilled, uint256 contributions) = 
+                RandomnessLib.getRequestState(self.state, i);
+                
+            if (requester != address(0) && !fulfilled && 
+                contributions >= self.state.minContributions) {
+                // Attempt to fulfill the request
+                try RandomnessLib.fulfillRequest(
+                    self.state,
+                    i,
+                    historicalHash,
+                    bytes32(self.entropyAccumulator)
+                ) returns (bytes32 result) {
+                    emit RandomnessFulfilled(i, result);
+                    processedCount++;
+                } catch {
+                    // Silently continue if fulfillment fails
+                }
+            }
+        }
 
+        // Update merkle root with accumulated entropy
         bytes32 newRoot = keccak256(abi.encodePacked(
             self.entropyMerkleRoot, 
             self.entropyAccumulator, 
@@ -51,6 +78,17 @@ library RandomnessHandlerLib {
         emit MerkleRootUpdated(newRoot);
     }
     
+    /**
+     * @notice Contributes entropy to a randomness request
+     * @param self The randomness context
+     * @param requestId The ID of the request to contribute to
+     * @param entropyContribution The entropy contribution
+     * @param entropySignature Signature of the contributor
+     * @param sender The message sender
+     * @param historicalHash Additional entropy from historical outputs
+     * @return fulfilled Whether the request was fulfilled
+     * @return randomValue The random value if fulfilled, otherwise zero
+     */
     function contributeEntropy(
         RandomnessContext storage self,
         uint256 requestId,
@@ -81,6 +119,13 @@ library RandomnessHandlerLib {
         }
     }
     
+    /**
+     * @notice Fulfills a randomness request
+     * @param self The randomness context
+     * @param requestId The ID of the request to fulfill
+     * @param historicalHash Additional entropy
+     * @return randomValue The generated random value
+     */
     function fulfillRandomness(
         RandomnessContext storage self,
         uint256 requestId,
@@ -91,18 +136,26 @@ library RandomnessHandlerLib {
             self.state, 
             requestId, 
             historicalHash, 
-            self.entropyAccumulator
+            bytes32(self.entropyAccumulator)
         );
         emit RandomnessFulfilled(requestId, randomValue);
         return randomValue;
     }
     
+    /**
+     * @notice Requests a new random value
+     * @param self The randomness context
+     * @param userSeed The user-provided seed
+     * @param requester The address requesting randomness
+     * @return requestId The ID of the created request
+     */
     function requestRandomness(
         RandomnessContext storage self,
         bytes32 userSeed,
         address requester
     ) internal returns (uint256 requestId) {
-        if (self.state.fee == 0) revert FeeNotSet();
+        // Check if fees are configured - using baseEmergencyFee instead of non-existent 'fee'
+        if (self.state.baseEmergencyFee == 0 && self.state.feePerContributor == 0) revert FeeNotSet();
         
         // Call the function correctly using direct library call
         requestId = RandomnessLib.createRequest(
