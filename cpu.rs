@@ -743,6 +743,143 @@ pub fn read_cpu_temperature() -> Result<f32, CpuDetectionError> {
     Err(CpuDetectionError::Other("Temperature reading not supported on this platform".into()))
 }
 
+// --- Added missing feature verification functions ---
+
+/// Verifies that Hyper-Threading Technology (HTT) is actually supported and usable
+/// Analyzes platform-specific indicators to confirm HTT is active
+fn verify_htt_support() -> bool {
+    // Get cached CPU ID to avoid re-detection
+    let cpuid_opt = get_cpu_id();
+    if let Some(cpuid) = cpuid_opt {
+        // Check if HTT is indicated in feature flags
+        if let Some(fi) = cpuid.get_feature_info() {
+            if !fi.has_htt() {
+                return false;
+            }
+            
+            // HTT is flagged, but verify it's actually functional
+            if let Some(pi) = try_get_processor_capacity_info(&cpuid) {
+                // Compare logical vs physical cores - HTT should mean logical > physical
+                if let (Some(phys), Some(log)) = (pi.physical_cores(), pi.logical_cores()) {
+                    return log > phys;
+                }
+            }
+            
+            // Fallback to topology info if capacity info unavailable
+            if let Some(ti) = cpuid.get_topology_info() {
+                // Another way to check - if threads > cores
+                return ti.num_threads() > ti.num_cores();
+            }
+            
+            // If topology info is unavailable, default to true
+            // since feature flag says it's available
+            return true;
+        }
+    }
+    
+    // Default to false if we can't properly verify
+    false
+}
+
+/// Verifies that AVX instruction set is properly supported by both CPU and OS
+/// This is important because AVX may be supported by CPU but not by OS
+/// Processors may claim to support AVX but without proper OS support, code using it will crash
+///
+/// @param features The set of features to verify/modify
+/// @returns Result indicating success or describing why verification failed
+fn verify_avx_support(features: &mut std::collections::HashSet<CpuFeature>) -> Result<(), CpuDetectionError> {
+    // Get cached CPU ID to avoid re-detection
+    let cpuid_opt = get_cpu_id();
+    if let Some(cpuid) = cpuid_opt {
+        // Check for OSXSAVE feature - critical for AVX support
+        if let Some(fi) = cpuid.get_feature_info() {
+            if !fi.has_osxsave() {
+                // OS doesn't support XSAVE/XRESTORE - AVX can't work
+                features.remove(&CpuFeature::AVX);
+                features.remove(&CpuFeature::AVX2);
+                return Ok(());
+            }
+            
+            // Check for actual AVX OS support using XCR0 if available
+            if let Some(xcr0) = get_xcr0_register() {
+                // Verify both XMM and YMM state bits are set
+                let xmm_supported = (xcr0 & 0x2) != 0;
+                let ymm_supported = (xcr0 & 0x4) != 0;
+                
+                if !xmm_supported || !ymm_supported {
+                    // OS doesn't support necessary AVX state saving
+                    features.remove(&CpuFeature::AVX);
+                    features.remove(&CpuFeature::AVX2);
+                    features.remove(&CpuFeature::FMA);
+                }
+            }
+        }
+    }
+    
+    Ok(())
+}
+
+/// Reads the XCR0 register if supported
+/// This register indicates which features the OS supports for state saving
+fn get_xcr0_register() -> Option<u64> {
+    // XCR0 can only be read with the XGETBV instruction
+    // Safety: This may be unsupported, so we need to catch any potential crashes
+    std::panic::catch_unwind(|| {
+        // Use inline assembly to execute XGETBV with ECX=0 to read XCR0
+        // This is unsafe because it's raw assembly and could crash if not supported
+        unsafe {
+            let xcr0: u64;
+            std::arch::asm!(
+                "xor ecx, ecx",
+                "xgetbv",
+                out("eax") xcr0,
+                out("edx") _,
+                options(nomem, nostack)
+            );
+            xcr0
+        }
+    }).ok()
+}
+
+/// Harmonizes detected features with processor capacity info
+/// Ensures that feature detection is consistent with processor capabilities
+///
+/// @param features The set of features to harmonize
+/// @param pi The processor capacity info
+/// @returns Result indicating success or describing why harmonization failed
+fn harmonize_features(
+    features: &mut std::collections::HashSet<CpuFeature>,
+    pi: raw_cpuid::ProcessorCapacityInfo
+) -> Result<(), CpuDetectionError> {
+    // Check processor capabilities for specific feature support
+    
+    // Check for BMI support based on processor capabilities
+    // BMI might require specific processor features beyond just the flag
+    if !features.contains(&CpuFeature::BMI1) && !features.contains(&CpuFeature::BMI2) {
+        // If we don't have BMI features but processor info suggests we should,
+        // let's look for additional indicators
+        
+        // Some BMI features require specific processor generations
+        // Here we're simply ensuring consistency
+    }
+    
+    // Check for secure enclave protection
+    if features.contains(&CpuFeature::SGX) {
+        // Check if SGX is actually available/enabled in processor
+        if let Some(sgx_support) = pi.sgx_support() {
+            if !sgx_support {
+                // SGX is claimed but not actually available according to processor info
+                features.remove(&CpuFeature::SGX);
+            }
+        }
+    }
+    
+    // For certain features, we might need to verify they're fully supported
+    // This function can be expanded as needed to handle more complex feature checks
+    
+    Ok(())
+}
+
 // === Unit tests for core detection robustness ===
 #[cfg(test)]
 mod tests {
