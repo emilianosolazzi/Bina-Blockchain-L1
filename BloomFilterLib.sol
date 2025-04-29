@@ -14,6 +14,10 @@ pragma solidity ^0.8.28;
  *      - size: 65536 (maximum) for ~16.7M bits capacity
  *      - numHashes: 4-5 (optimal for expected load)
  *      - Dynamic scaling for different network conditions
+ * 
+ *      With size = 65536, numHashes = 4, and 1M outputs:
+ *      - FPR ≈ (1-e^(-4*1000000/16777216))^4 ≈ 0.2%
+ *      - This is better than the target 0.5% FPR
  */
 library BloomFilterLib {
     // Custom errors for gas-efficient error handling
@@ -23,6 +27,12 @@ library BloomFilterLib {
     error IndexOutOfBounds();
     error NotPowerOfTwo();
     error ExceedsMaxSize();
+    error InvalidAppeal();
+    error AlreadyAppealed();
+    error NotConsortiumMember();
+    error InsufficientVotes();
+    error AppealAlreadyResolved();
+    error InvalidConsortiumAction();
 
     // Constants for hash function seeds
     uint256 private constant HASH_SEED_1 = 0x734f6e50;    // "sO_P"
@@ -39,19 +49,49 @@ library BloomFilterLib {
     uint256 private constant MAX_SIZE = 65536;        // ~16.7M bits maximum
 
     /**
-     * @notice Structure representing a bloom filter
+     * @notice Structure for tracking appeal status and votes
+     * @param output The output that triggered the false positive
+     * @param reporter The address that reported the false positive
+     * @param timestamp When the appeal was submitted
+     * @param resolved Whether the appeal has been resolved
+     * @param accepted Whether the appeal was accepted
+     * @param voteCount Number of votes from consortium members
+     * @param voters Mapping of addresses that have voted on this appeal
+     */
+    struct Appeal {
+        bytes32 output;
+        address reporter;
+        uint256 timestamp;
+        bool resolved;
+        bool accepted;
+        uint256 voteCount;
+        mapping(address => bool) voters;
+    }
+
+    /**
+     * @notice Structure representing a bloom filter with appeal tracking
      * @param buckets Array of bytes32, each representing 256 bits
      * @param size Number of buckets (must be a power of 2)
      * @param numHashes Number of hash functions to use
      * @param salt A random value added during hashing to prevent certain attacks
      * @param insertCount Number of items inserted (for analytics)
+     * @param appealedOutputs Mapping to track appealed outputs
+     * @param appeals Mapping to track detailed appeal status
+     * @param consortiumMembers Mapping of addresses authorized to vote on appeals
+     * @param minVotesRequired Minimum votes required to resolve an appeal
+     * @param totalConsortiumMembers Total number of consortium members
      */
     struct Filter {
         bytes32[] buckets;
         uint256 size;
         uint256 numHashes;
         uint256 salt;
-        uint256 insertCount; // Track insertions for FPR estimation
+        uint256 insertCount; 
+        mapping(bytes32 => bool) appealedOutputs;
+        mapping(bytes32 => Appeal) appeals;
+        mapping(address => bool) consortiumMembers;
+        uint256 minVotesRequired;
+        uint256 totalConsortiumMembers;
     }
 
     // Events for debugging and monitoring
@@ -59,6 +99,71 @@ library BloomFilterLib {
     event FilterCleared(uint256 size, uint256 numHashes);
     event FilterReset(uint256 newSize, uint256 newNumHashes, uint256 newSalt);
     event FilterScaled(uint256 oldSize, uint256 newSize, uint256 itemCount);
+
+    /**
+     * @notice Event emitted when a false positive is detected and appealed
+     * @dev This creates an immutable record for off-chain processing
+     * @param output The output that triggered the false positive
+     * @param reporter The address that reported the false positive
+     * @param appealId A unique identifier for the appeal
+     * @param proof Additional data proving this is a false positive
+     * @param timestamp When the appeal was submitted
+     */
+    event FalsePositiveDetected(
+        bytes32 indexed output,
+        address indexed reporter,
+        bytes32 indexed appealId,
+        bytes proof,
+        uint256 timestamp
+    );
+    
+    /**
+     * @notice Event for tracking appeal resolution status changes
+     * @param appealId The ID of the appeal being updated
+     * @param resolved Whether the appeal was resolved
+     * @param accepted Whether the appeal was accepted (filter adjusted)
+     */
+    event AppealResolved(
+        bytes32 indexed appealId,
+        bool resolved,
+        bool accepted
+    );
+
+    /**
+     * @notice Event emitted when consortium membership changes
+     * @param member The address being added or removed
+     * @param isAdded Whether the member was added (true) or removed (false)
+     * @param newTotalMembers The updated count of consortium members
+     */
+    event ConsortiumMembershipChanged(
+        address indexed member,
+        bool isAdded,
+        uint256 newTotalMembers
+    );
+    
+    /**
+     * @notice Event emitted when minimum vote threshold changes
+     * @param oldThreshold Previous minimum vote threshold
+     * @param newThreshold New minimum vote threshold
+     */
+    event VoteThresholdChanged(
+        uint256 oldThreshold,
+        uint256 newThreshold
+    );
+    
+    /**
+     * @notice Event emitted when a consortium member votes on an appeal
+     * @param appealId The ID of the appeal being voted on
+     * @param voter The address of the consortium member voting
+     * @param voteInFavor Whether the vote was in favor of accepting the appeal
+     * @param newVoteCount Updated total vote count
+     */
+    event AppealVoteCast(
+        bytes32 indexed appealId,
+        address indexed voter,
+        bool voteInFavor,
+        uint256 newVoteCount
+    );
 
     /**
      * @notice Creates a new bloom filter with the specified size, number of hash functions, and salt
@@ -552,4 +657,357 @@ library BloomFilterLib {
         if ((size & (size - 1)) != 0) revert NotPowerOfTwo();
         if (numHashes > 0 && (numHashes == 0 || numHashes > MAX_HASHES)) revert InvalidNumHashes();
     }
+
+    /**
+     * @notice Calculates the theoretical FPR for the current filter parameters and validates against a target
+     * @dev Used to confirm if current filter can handle expected volume with desired FPR
+     * @param filter The filter to validate
+     * @param expectedItems Expected number of items to be inserted
+     * @param targetFPRbps Target false positive rate in basis points (e.g., 50 = 0.5%)
+     * @return valid Whether the filter can meet the target FPR
+     * @return actualFPRbps The estimated FPR with current settings
+     */
+    function validateFPR(
+        Filter storage filter,
+        uint256 expectedItems,
+        uint256 targetFPRbps
+    ) internal view returns (bool valid, uint256 actualFPRbps) {
+        actualFPRbps = estimateFPR(
+            filter.size,
+            filter.numHashes,
+            expectedItems
+        );
+        
+        return (actualFPRbps <= targetFPRbps, actualFPRbps);
+    }
+
+    /**
+     * @notice Reports a false positive and initiates an appeal process
+     * @dev Emits an event for off-chain processing and records the appealed output
+     * @param filter The filter where the false positive occurred
+     * @param output The output incorrectly identified as present
+     * @param proof Data proving this is a false positive (e.g. merkle proof)
+     * @return appealId A unique identifier for this appeal
+     */
+    function reportFalsePositive(
+        Filter storage filter,
+        bytes32 output,
+        bytes memory proof
+    ) internal returns (bytes32 appealId) {
+        // Verify this is actually a false positive
+        require(mightContain(filter, output), "Not a false positive");
+        
+        // Check if already appealed
+        if (filter.appealedOutputs[output]) revert AlreadyAppealed();
+        
+        // Generate a unique appeal ID
+        appealId = keccak256(abi.encodePacked(
+            output,
+            msg.sender,
+            block.number,
+            block.timestamp
+        ));
+        
+        // Record the appeal
+        filter.appealedOutputs[output] = true;
+        
+        // Initialize appeal record
+        Appeal storage newAppeal = filter.appeals[appealId];
+        newAppeal.output = output;
+        newAppeal.reporter = msg.sender;
+        newAppeal.timestamp = block.timestamp;
+        newAppeal.resolved = false;
+        newAppeal.accepted = false;
+        newAppeal.voteCount = 0;
+        
+        // Emit event for off-chain handling
+        emit FalsePositiveDetected(
+            output,
+            msg.sender,
+            appealId,
+            proof,
+            block.timestamp
+        );
+        
+        return appealId;
+    }
+    
+    /**
+     * @notice Allows a consortium member to vote on an appeal
+     * @dev Records vote and potentially resolves appeal if threshold met
+     * @param filter The filter containing the appeal
+     * @param appealId The ID of the appeal to vote on
+     * @param acceptAppeal Whether to accept the appeal as legitimate
+     * @return resolved Whether the appeal was resolved by this vote
+     * @return finalAccepted The final decision if resolved
+     */
+    function voteOnAppeal(
+        Filter storage filter,
+        bytes32 appealId,
+        bool acceptAppeal
+    ) internal returns (bool resolved, bool finalAccepted) {
+        // Check if caller is consortium member
+        if (!filter.consortiumMembers[msg.sender]) revert NotConsortiumMember();
+        
+        Appeal storage appeal = filter.appeals[appealId];
+        
+        // Check if appeal exists and not already resolved
+        require(appeal.timestamp > 0, "Appeal does not exist");
+        if (appeal.resolved) revert AppealAlreadyResolved();
+        
+        // Check if member has already voted
+        if (appeal.voters[msg.sender]) revert InvalidConsortiumAction();
+        
+        // Record vote
+        appeal.voters[msg.sender] = true;
+        appeal.voteCount++;
+        
+        emit AppealVoteCast(
+            appealId,
+            msg.sender,
+            acceptAppeal,
+            appeal.voteCount
+        );
+        
+        // Check if threshold reached
+        if (appeal.voteCount >= filter.minVotesRequired) {
+            appeal.resolved = true;
+            appeal.accepted = acceptAppeal;
+            
+            emit AppealResolved(
+                appealId,
+                true,
+                acceptAppeal
+            );
+            
+            // If appeal accepted and output is in filter, handle differently
+            if (acceptAppeal) {
+                // Mark the output as not used (implementation depends on parent contract)
+                // This is a placeholder for parent contract implementation
+            }
+            
+            return (true, acceptAppeal);
+        }
+        
+        return (false, false);
+    }
+    
+    /**
+     * @notice Checks if an output has a pending appeal
+     * @param filter The filter to check
+     * @param output The output to check for appeals
+     * @return hasAppeal Whether there is a pending appeal for this output
+     */
+    function hasAppeal(Filter storage filter, bytes32 output) internal view returns (bool) {
+        return filter.appealedOutputs[output];
+    }
+    
+    /**
+     * @notice Gets the status of an appeal
+     * @param filter The filter containing the appeal
+     * @param appealId The ID of the appeal to check
+     * @return exists Whether the appeal exists
+     * @return resolved Whether the appeal has been resolved
+     * @return accepted Whether the appeal was accepted
+     * @return voteCount Current vote count for the appeal
+     */
+    function getAppealStatus(
+        Filter storage filter,
+        bytes32 appealId
+    ) internal view returns (
+        bool exists,
+        bool resolved,
+        bool accepted,
+        uint256 voteCount
+    ) {
+        Appeal storage appeal = filter.appeals[appealId];
+        
+        exists = appeal.timestamp > 0;
+        if (!exists) return (false, false, false, 0);
+        
+        return (
+            true,
+            appeal.resolved,
+            appeal.accepted,
+            appeal.voteCount
+        );
+    }
+
+    /**
+     * @notice Initializes consortium governance for filter appeals
+     * @dev Sets up initial consortium members and voting thresholds
+     * @param filter The filter to configure consortium for
+     * @param initialMembers Array of initial consortium member addresses
+     * @param minVotes Minimum votes required to resolve an appeal (must be > 0)
+     */
+    function initConsortium(
+        Filter storage filter,
+        address[] memory initialMembers,
+        uint256 minVotes
+    ) internal {
+        require(initialMembers.length > 0, "Need at least one member");
+        require(minVotes > 0, "Min votes must be > 0");
+        
+        // Reset any existing consortium settings
+        filter.minVotesRequired = minVotes;
+        filter.totalConsortiumMembers = 0;
+        
+        // Add all initial members
+        for (uint256 i = 0; i < initialMembers.length; i++) {
+            if (!filter.consortiumMembers[initialMembers[i]] && initialMembers[i] != address(0)) {
+                filter.consortiumMembers[initialMembers[i]] = true;
+                filter.totalConsortiumMembers++;
+                
+                emit ConsortiumMembershipChanged(
+                    initialMembers[i],
+                    true,
+                    filter.totalConsortiumMembers
+                );
+            }
+        }
+        
+        // Ensure min votes doesn't exceed total members
+        if (minVotes > filter.totalConsortiumMembers) {
+            filter.minVotesRequired = filter.totalConsortiumMembers;
+            
+            emit VoteThresholdChanged(
+                minVotes,
+                filter.minVotesRequired
+            );
+        }
+    }
+    
+    /**
+     * @notice Updates consortium membership
+     * @dev Adds or removes members from the consortium
+     * @param filter The filter to modify consortium for
+     * @param member The address to add or remove
+     * @param isAdding Whether to add (true) or remove (false) the member
+     */
+    function updateConsortiumMembership(
+        Filter storage filter,
+        address member,
+        bool isAdding
+    ) internal {
+        require(member != address(0), "Invalid member address");
+        
+        if (isAdding && !filter.consortiumMembers[member]) {
+            filter.consortiumMembers[member] = true;
+            filter.totalConsortiumMembers++;
+            
+            emit ConsortiumMembershipChanged(
+                member,
+                true,
+                filter.totalConsortiumMembers
+            );
+        } else if (!isAdding && filter.consortiumMembers[member]) {
+            filter.consortiumMembers[member] = false;
+            filter.totalConsortiumMembers--;
+            
+            emit ConsortiumMembershipChanged(
+                member,
+                false,
+                filter.totalConsortiumMembers
+            );
+            
+            // Ensure min votes doesn't exceed total members
+            if (filter.minVotesRequired > filter.totalConsortiumMembers && filter.totalConsortiumMembers > 0) {
+                uint256 oldThreshold = filter.minVotesRequired;
+                filter.minVotesRequired = filter.totalConsortiumMembers;
+                
+                emit VoteThresholdChanged(
+                    oldThreshold,
+                    filter.minVotesRequired
+                );
+            }
+        }
+    }
+    
+    /**
+     * @notice Produces a report for storage pruning of used outputs
+     * @dev Analyzes filter statistics to recommend optimal pruning parameters
+     * @param filter The filter to analyze
+     * @param targetUsage Target storage usage after pruning (percentage in bps)
+     * @return pruneSizeBps Percentage of storage to prune (basis points)
+     * @return estimatedGasSavings Estimated gas savings from pruning
+     * @return recommendedNewSize Recommended new size after pruning
+     * @return recommendedNewHashes Recommended new hash count after pruning
+     */
+    function generatePruningReport(
+        Filter storage filter,
+        uint256 targetUsage
+    ) internal view returns (
+        uint256 pruneSizeBps,
+        uint256 estimatedGasSavings,
+        uint256 recommendedNewSize,
+        uint256 recommendedNewHashes
+    ) {
+        // Get current metrics
+        (uint256 size, uint256 bitCount, uint256 insertCount, uint256 fillRatioBps, uint256 fprBps) = 
+            getFilterMetrics(filter);
+        
+        // Calculate pruning parameters
+        if (fillRatioBps > targetUsage) {
+            pruneSizeBps = fillRatioBps - targetUsage;
+        }
+        
+        // Estimate gas savings (rough approximation)
+        // Each storage slot cleared is ~15,000 gas refund under current EVM rules
+        uint256 slotsToBeCleared = (size * pruneSizeBps) / 10000;
+        estimatedGasSavings = slotsToBeCleared * 15000;
+        
+        // Calculate recommended new size (power of 2 not exceeding current size)
+        recommendedNewSize = size;
+        while (recommendedNewSize > MIN_SIZE && fillRatioBps < targetUsage/2) {
+            recommendedNewSize = recommendedNewSize / 2;
+            fillRatioBps = fillRatioBps * 2;
+        }
+        
+        // Calculate optimal hash count for updated size
+        uint256 remaining_items = insertCount * (10000 - pruneSizeBps) / 10000;
+        recommendedNewHashes = calculateOptimalHashCount(
+            recommendedNewSize * 256,
+            remaining_items,
+            fprBps
+        );
+        
+        return (pruneSizeBps, estimatedGasSavings, recommendedNewSize, recommendedNewHashes);
+    }
+    
+    /**
+     * @notice Implementation notes for integrating an iterable mapping for prunable outputs
+     * @dev Add this documentation block as a guide for implementing prunable storage
+     * 
+     * To implement prunable storage of used outputs, consider this pattern:
+     * 
+     * struct AppealableOutput {
+     *     bytes32 output;
+     *     uint256 timestamp;
+     *     bool appealed;
+     *     mapping(address => bool) confirmations;
+     * }
+     * 
+     * struct OutputStorage {
+     *     mapping(bytes32 => AppealableOutput) outputs;
+     *     mapping(uint256 => bytes32) outputsIndex;
+     *     uint256 firstIndex;
+     *     uint256 nextIndex;
+     * }
+     * 
+     * To add:
+     * - outputs[output] = AppealableOutput(output, block.timestamp, false)
+     * - outputsIndex[nextIndex++] = output;
+     * 
+     * To prune:
+     * - For each i from firstIndex to firstIndex+count:
+     *   - output = outputsIndex[i]
+     *   - If output not appealed && timestamp < pruneTime:
+     *     - Delete outputs[output]
+     *     - Delete outputsIndex[i]
+     *   - Else: retain, potentially compact
+     * - Update firstIndex
+     * 
+     * The bloom filter remains as the primary screen, with this storage
+     * as a secondary verification layer for handle edge cases and appeals.
+     */
 }

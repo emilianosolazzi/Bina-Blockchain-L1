@@ -1,0 +1,356 @@
+type Filter @entity {
+  id: ID!                      # Contract address
+  version: Int!                # Filter version number for tracking upgrades
+  size: BigInt!                # Number of buckets
+  numHashes: Int!              # Number of hash functions
+  salt: BigInt!                # Current salt value
+  insertCount: BigInt!         # Number of items inserted
+  bitCount: BigInt!            # Total bit capacity (size * 256)
+  fillRatioBps: Int!           # Fill percentage in basis points
+  estimatedFPRbps: Int!        # Estimated false positive rate in basis points
+  
+  # Relationships
+  appeals: [Appeal!]! @derivedFrom(field: "filter")
+  consortiumMembers: [ConsortiumMember!]! @derivedFrom(field: "filter")
+  migrations: [Migration!]! @derivedFrom(field: "targetFilter")
+  predecessorMigration: Migration @derivedFrom(field: "sourceFilter")
+  operations: [FilterOperation!]! @derivedFrom(field: "filter")
+  metrics: [FilterMetrics!]! @derivedFrom(field: "filter")
+  performanceData: [PerformanceMetrics!]! @derivedFrom(field: "filter")
+  
+  # Consortium management
+  minVotesRequired: Int!
+  totalConsortiumMembers: Int!
+  
+  # Appeal statistics
+  totalAppeals: Int!
+  resolvedAppeals: Int!
+  acceptedAppeals: Int!
+  pendingAppeals: Int!
+  rejectedAppeals: Int!
+  
+  # Status indicators
+  isActive: Boolean!           # Whether this is the currently active filter
+  isPrevious: Boolean!         # Whether this is the previous active filter (during transition)
+  status: String!              # Status: CREATED, ACTIVE, PREVIOUS, INACTIVE, MIGRATING, FAILED
+  
+  # Health indicators
+  healthStatus: String!        # Health: HEALTHY, DEGRADED, CRITICAL
+  alertLevel: Int!             # 0=None, 1=Info, 2=Warning, 3=Critical
+  lastAlertTimestamp: BigInt   # When the last alert was triggered
+  
+  # Config values
+  targetFPRbps: Int!           # Target FPR in basis points
+  autoScaleThresholdBps: Int!  # Auto-scale threshold in basis points
+  
+  # Temporal data 
+  createdAt: BigInt!           # Timestamp when filter was created
+  updatedAt: BigInt!           # Timestamp when filter was last updated
+  createdAtBlock: BigInt!      # Block when filter was created
+  activatedAt: BigInt          # When the filter was activated
+  
+  # Network info
+  networkId: Int!              # Chain ID
+  implementation: String!      # Implementation address if proxy-based
+}
+
+type Migration @entity {
+  id: ID!                        # Migration ID (unique identifier)
+  sourceFilter: Filter!          # Original filter being migrated from
+  targetFilter: Filter!          # New filter being migrated to
+  state: String!                 # PREPARING, MIGRATING, FINALIZING, COMPLETED, CANCELED
+  startedAt: BigInt!             # When migration was initiated
+  completedAt: BigInt            # When migration was completed (if finished)
+  totalBatches: BigInt!          # Total number of batches to process
+  batchesCompleted: BigInt!      # Number of batches processed
+  entriesMigrated: BigInt!       # Number of entries successfully migrated
+  progress: BigInt!              # Progress as percentage in basis points (100 = 1%)
+  
+  # Batches tracking
+  batches: [MigrationBatch!]! @derivedFrom(field: "migration")
+  batchSize: Int!                # Number of entries per batch
+  
+  # Performance metrics
+  averageBatchGasUsed: BigInt!   # Average gas used per batch
+  totalGasUsed: BigInt!          # Total gas used for this migration
+  estimatedRemainingGas: BigInt! # Estimated remaining gas needed
+  
+  # Issues tracking
+  hasErrors: Boolean!            # Whether any errors occurred during migration
+  errorCount: Int!               # Number of errors encountered
+  errors: [MigrationError!]! @derivedFrom(field: "migration")
+  
+  # Transaction data
+  transactionHashes: [Bytes!]!   # All transaction hashes involved in this migration
+  createdTxHash: Bytes!          # Transaction that initiated the migration
+  completedTxHash: Bytes         # Transaction that completed the migration
+  
+  # Time metrics
+  estimatedTimeRemaining: BigInt # Estimated seconds remaining (calculated)
+  averageBatchTime: BigInt!      # Average time per batch in seconds
+}
+
+type MigrationBatch @entity {
+  id: ID!                      # Batch ID (migrationId + batchIndex)
+  migration: Migration!        # Parent migration
+  batchIndex: BigInt!          # Sequential batch number
+  entriesMigrated: BigInt!     # Entries migrated in this batch
+  gasUsed: BigInt!             # Gas used for this batch
+  timestamp: BigInt!           # When this batch was processed
+  blockNumber: BigInt!         # Block number where batch was processed
+  transactionHash: Bytes!      # Transaction hash
+  processingTime: BigInt!      # How long batch processing took in seconds
+  successful: Boolean!         # Whether the batch completed successfully
+  errorMessage: String         # Error message if batch failed
+}
+
+type MigrationError @entity {
+  id: ID!                      # Error ID (tx hash + log index)
+  migration: Migration!        # Parent migration
+  batchIndex: BigInt           # Batch index where error occurred (if applicable)
+  errorMessage: String!        # Error message
+  timestamp: BigInt!           # When error occurred
+  transactionHash: Bytes!      # Transaction where error occurred
+  severity: String!            # CRITICAL, MAJOR, MINOR
+}
+
+type Appeal @entity {
+  id: ID!                      # Appeal ID (hash)
+  filter: Filter!              # Reference to parent filter
+  output: Bytes!               # The output being appealed (bytes32)
+  reporter: Bytes!             # Address that reported the false positive
+  
+  # Status fields
+  timestamp: BigInt!           # When the appeal was submitted
+  resolved: Boolean!           # Whether the appeal has been resolved
+  accepted: Boolean!           # Whether the appeal was accepted
+  status: String!              # PENDING, ACCEPTED, REJECTED, EXPIRED
+  
+  # Voting info
+  voteCount: Int!              # Number of votes received
+  votesRequired: Int!          # Votes needed to resolve
+  approvalPercentage: Int!     # Percentage of votes in favor (basis points)
+  votes: [Vote!]! @derivedFrom(field: "appeal")
+  
+  # Evidence and resolution
+  proof: Bytes!                # Proof data submitted with appeal
+  resolutionTime: BigInt       # When the appeal was resolved (if applicable)
+  resolutionReason: String     # Reason for resolution decision
+  resolutionTxHash: Bytes      # Transaction that resolved the appeal
+
+  # Transaction info
+  blockNumber: BigInt!         # Block where appeal was created
+  transactionHash: Bytes!      # Transaction hash where appeal was created
+  
+  # Time tracking
+  pendingDuration: BigInt      # How long appeal was pending (in seconds)
+  createdAtTimestamp: BigInt!  # Redundant with timestamp but explicit naming
+  expiryTimestamp: BigInt      # When this appeal will expire (if applicable)
+}
+
+type ConsortiumMember @entity {
+  id: ID!                      # Address of consortium member
+  filter: Filter!              # Reference to parent filter
+  active: Boolean!             # Whether member is currently active
+  
+  # Consortium role
+  role: String!                # STANDARD, ADMIN, APPEAL_MANAGER, etc.
+  weight: Int!                 # Voting weight (default 1)
+  
+  # Temporal data
+  addedAt: BigInt!             # When member was added
+  removedAt: BigInt            # When member was removed (if applicable)
+  
+  # Activity metrics
+  votesCast: Int!              # Total number of votes cast by member
+  votes: [Vote!]! @derivedFrom(field: "voter")
+  lastActiveAt: BigInt         # Last activity timestamp
+  
+  # Identity (optional)
+  name: String                 # Human-readable name (if provided)
+  metadata: String             # Additional member metadata (JSON)
+}
+
+type Vote @entity {
+  id: ID!                      # Vote ID (appealId + voter)
+  appeal: Appeal!              # Reference to appeal being voted on
+  voter: ConsortiumMember!     # Consortium member who voted
+  voteInFavor: Boolean!        # Whether vote was in favor of accepting
+  
+  # Additional vote data
+  weight: Int!                 # Vote weight (from consortium member)
+  reason: String               # Optional reason for vote
+  
+  # Temporal data
+  timestamp: BigInt!           # When vote was cast
+  blockNumber: BigInt!         # Block number when vote was cast
+  transactionHash: Bytes!      # Transaction hash of the vote
+  
+  # Appeal state at time of vote
+  appealVoteCount: Int!        # Vote count on appeal at time of this vote
+  isDecisive: Boolean!         # Whether this vote caused resolution
+}
+
+type FilterMetrics @entity {
+  id: ID!                      # Timestamp-based ID for each metrics snapshot
+  filter: Filter!              # Reference to parent filter
+  timestamp: BigInt!           # When metrics were recorded
+  blockNumber: BigInt!         # Block number when metrics were recorded
+  
+  # Core metrics
+  size: BigInt!                # Filter size at this time
+  insertCount: BigInt!         # Items inserted at this time
+  fillRatioBps: Int!           # Fill ratio at this time
+  estimatedFPRbps: Int!        # Estimated FPR at this time
+  setbitsCount: BigInt!        # Number of set bits
+  
+  # Appeal metrics
+  appealCount: Int!            # Number of appeals at this time
+  pendingAppeals: Int!         # Number of pending appeals
+  
+  # Health indicators
+  healthStatus: String!        # Health: HEALTHY, DEGRADED, CRITICAL
+  
+  # Change rates (calculated)
+  insertRate: Float!           # Inserts per day
+  fillRateChange: Float!       # Change in fill ratio since last measurement
+  
+  # Forecasting
+  daysToThreshold: Float       # Estimated days until auto-scale threshold 
+  projectedFPRbps: Int         # Projected FPR at autoscale threshold
+}
+
+type FilterOperation @entity {
+  id: ID!                      # Operation ID (tx hash + index)
+  filter: Filter!              # Reference to parent filter
+  operationType: String!       # Type: INSERT, CLEAR, RESET, SCALE, ACTIVATE, ETC
+  
+  # Operation details
+  timestamp: BigInt!           # When operation occurred
+  blockNumber: BigInt!         # Block number of operation
+  transactionHash: Bytes!      # Transaction hash of operation
+  caller: Bytes!               # Address that called the operation
+  
+  # Data specific to operation type
+  entryInserted: Bytes         # If INSERT operation, the inserted entry
+  details: String              # Additional operation details (JSON)
+  
+  # Metrics
+  gasUsed: BigInt              # Gas used for this operation
+  gasPrice: BigInt             # Gas price for this operation
+  effectiveGasPrice: BigInt    # Effective gas price including priority fees
+}
+
+type PerformanceMetrics @entity {
+  id: ID!                      # Time-based ID for performance metrics
+  filter: Filter!              # Associated filter
+  period: String!              # HOURLY, DAILY, WEEKLY
+  timestamp: BigInt!           # Start of the period
+  
+  # Operation counts
+  insertCount: Int!            # Number of insert operations
+  queryCount: Int!             # Number of query operations
+  
+  # Gas metrics
+  totalGasUsed: BigInt!        # Total gas used in period
+  averageGasPerInsert: BigInt! # Average gas per insert
+  averageGasPerQuery: BigInt!  # Average gas per query
+  
+  # Timing metrics
+  averageInsertTime: BigInt!   # Average time per insert (ms)
+  averageQueryTime: BigInt!    # Average time per query (ms)
+  p95InsertTime: BigInt!       # 95th percentile insert time
+  p95QueryTime: BigInt!        # 95th percentile query time
+  
+  # Cost metrics (in wei)
+  totalCost: BigInt!           # Total cost in period
+  costPerInsert: BigInt!       # Average cost per insert
+  costPerQuery: BigInt!        # Average cost per query
+}
+
+type EmergencyAction @entity {
+  id: ID!                      # Action ID (tx hash)
+  filter: Filter!              # Associated filter
+  actionType: String!          # PAUSE, UNPAUSE, EMERGENCY_CANCEL, etc.
+  
+  # Actor info
+  actor: Bytes!                # Address that performed action
+  role: String!                # Role of the actor (ADMIN, EMERGENCY, etc)
+  
+  # Context
+  timestamp: BigInt!           # When action occurred
+  blockNumber: BigInt!         # Block where action occurred 
+  transactionHash: Bytes!      # Transaction hash
+  
+  # Details
+  reason: String!              # Reason for emergency action
+  details: String              # Additional details (JSON)
+  related: Migration           # Related migration if applicable
+  affectedAppeal: Appeal       # Affected appeal if applicable
+  
+  # Resolution
+  resolved: Boolean!           # Whether emergency has been resolved
+  resolutionTimestamp: BigInt  # When emergency was resolved
+  resolutionTxHash: Bytes      # Transaction that resolved the emergency
+}
+
+type SystemConfig @entity {
+  id: ID!                      # Singleton ID (always "current")
+  
+  # Current active filters
+  activeFilterId: BigInt!      # Current active filter ID
+  previousFilterId: BigInt     # Previous filter ID during transitions
+  transitionEndTime: BigInt    # When transition period ends
+  
+  # Scaling settings
+  batchSize: BigInt!           # Migration batch size
+  targetFPRbps: Int!           # Target FPR in basis points
+  parallelQueryPeriod: BigInt! # Parallel query period in seconds
+  autoScaleThresholdBps: Int!  # Auto-scale threshold in basis points
+  autoScalingEnabled: Boolean! # Whether auto-scaling is enabled
+  
+  # System state
+  paused: Boolean!             # Whether system is paused
+  lastPausedAt: BigInt         # When system was last paused
+  lastUnpausedAt: BigInt       # When system was last unpaused
+  
+  # Update info
+  lastUpdated: BigInt!         # When config was last updated
+  updatedBy: Bytes!            # Address that last updated config
+  updateCount: Int!            # Number of configuration updates
+  
+  # Network info
+  networkId: Int!              # Chain ID
+  implementation: String!      # Implementation contract address
+  deploymentVersion: String!   # Semantic version of deployed contract
+}
+
+type DailyMetrics @entity {
+  id: ID!                      # Filter ID + date (YYYY-MM-DD)
+  filter: Filter!              # Reference to parent filter
+  date: String!                # The date in YYYY-MM-DD format
+  dayTimestamp: BigInt!        # Start of day timestamp
+  insertCount: Int!            # Number of inserts during this day
+  queryCount: Int!             # Number of queries during this day
+  appealCount: Int!            # Number of appeals filed during this day
+  voteCount: Int!              # Number of votes cast during this day
+  totalGasUsed: BigInt!        # Total gas used on this day
+  insertGasUsed: BigInt!       # Gas used for inserts on this day
+  queryGasUsed: BigInt!        # Gas used for queries on this day
+  uniqueUsers: [Bytes!]!       # Array of unique user addresses active this day
+  activeConsortiumMembers: Int! # Number of consortium members active this day
+  transactionCount: Int!       # Total number of transactions on this day
+}
+
+type TimeWeightedMetrics @entity {
+  id: ID!                      # Filter ID + metric type
+  filter: Filter!              # Reference to parent filter
+  metricType: String!          # Type of metric (GAS_USED, INSERT_TIME, etc.)
+  lastUpdated: BigInt!         # When this metric was last updated
+  fastTWMA: Float!             # Fast-responding time-weighted moving average
+  slowTWMA: Float!             # Slow-responding time-weighted moving average
+  sampleCount: Int!            # Number of samples in this average
+  maxValue: Float!             # Maximum value seen
+  minValue: Float!             # Minimum value seen
+  cumulativeValue: Float!      # Sum of all values (for arithmetic mean)
+}
