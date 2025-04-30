@@ -9,6 +9,7 @@ enum KeyError {
     MemoryError,
     ProcessError,
     CleanupError,
+    InvalidKeyData, // Add this new variant
 }
 
 fn validate_entropy(data: &[u8]) -> bool {
@@ -80,4 +81,14 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         result |= x ^ y;
     }
     result == 0
+}
+
+/// Processes the key material
+fn process_key(key: &[u8]) -> Result<(), KeyError> {
+    // Actual key processing would go here
+    // For now just validate it's not all zeros
+    if key.iter().all(|&x| x == 0) {
+        return Err(KeyError::InvalidKeyData);
+    }
+    Ok(())
 }
