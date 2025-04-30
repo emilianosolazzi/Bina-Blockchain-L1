@@ -1001,6 +1001,12 @@ pub enum CpuDetectionError {
     Other(String),
 }
 
+// The system collects hardware-specific information as entropy sources:
+// - CPU features (SSE, AVX, SGX)
+// - Hardware-level signatures
+// - CPU temperature variations (thermal noise)
+// - Execution timing variations
+
 /// Improved temperature reading implementation
 #[inline(never)] // Security: prevent inlining of sensitive function
 pub fn read_cpu_temperature() -> Result<f32, CpuDetectionError> {
