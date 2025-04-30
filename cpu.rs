@@ -8,6 +8,7 @@ use sha2::{Sha256, Digest}; // For more robust fingerprinting (optional)
 use blake3; // For faster fingerprinting
 use std::sync::{Once, Mutex};
 use lazy_static::lazy_static;
+use rand::SeedableRng;
 
 // --- Cache the CpuId and detected identity (Improvement) ---
 lazy_static! {
@@ -942,5 +943,336 @@ mod tests {
         let unseeded2 = mask_cpu_identity(None, None);
         
         assert_ne!(unseeded1.timestamp, unseeded2.timestamp, "Auto-generated seeds should differ");
+    }
+}
+
+use std::time::{SystemTime, UNIX_EPOCH};
+use serde::{Serialize, Deserialize};
+use rand::SeedableRng;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CpuIdentity {
+    pub vendor: String,
+    pub brand: String,
+    pub cores: u16,
+    pub logical_cores: Option<u16>,
+    pub cache_size: u64,
+    pub frequency: Option<f64>,
+    pub timestamp: u64,
+    
+    // Enhanced platform-specific information storage
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub platform_specific: Option<PlatformSpecific>,
+    
+    // Temperature and thermal data (privacy sensitive)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    
+    // NUMA topology information
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub numa_nodes: Option<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "platform", content = "data")]
+pub enum PlatformSpecific {
+    #[cfg(target_os = "linux")]
+    Linux {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        lscpu: Option<LscpuData>,
+    },
+    #[cfg(target_os = "windows")]
+    Windows {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        wmi: Option<WmiCpuData>,
+    },
+    // Other platforms can be added here
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum CpuDetectionError {
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+    
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+    
+    #[error("Other error: {0}")]
+    Other(String),
+}
+
+/// Improved temperature reading implementation
+#[inline(never)] // Security: prevent inlining of sensitive function
+pub fn read_cpu_temperature() -> Result<f32, CpuDetectionError> {
+    #[cfg(target_os = "linux")]
+    {
+        // Try all known thermal zones
+        let thermal_zones = glob::glob("/sys/class/thermal/thermal_zone*/temp")
+            .map_err(|_| CpuDetectionError::Other("Glob pattern error".into()))?;
+        
+        for zone in thermal_zones.filter_map(Result::ok) {
+            if let Ok(temp_str) = std::fs::read_to_string(&zone) {
+                if let Ok(millidegrees) = temp_str.trim().parse::<f32>() {
+                    return Ok(millidegrees / 1000.0);
+                }
+            }
+        }
+        
+        // Fallback to hwmon
+        let hwmon_paths = glob::glob("/sys/class/hwmon/hwmon*/temp*_input")
+            .map_err(|_| CpuDetectionError::Other("Glob pattern error".into()))?;
+        
+        for path in hwmon_paths.filter_map(Result::ok) {
+            if let Ok(temp_str) = std::fs::read_to_string(&path) {
+                if let Ok(millidegrees) = temp_str.trim().parse::<f32>() {
+                    return Ok(millidegrees / 1000.0);
+                }
+            }
+        }
+    }
+    
+    #[cfg(target_os = "windows")]
+    {
+        // Use WMI to get temperature on Windows
+        // Implementation would be platform-specific
+    }
+    
+    Err(CpuDetectionError::Other("Temperature reading not supported".into()))
+}
+
+/// Enhanced NUMA node detection
+#[inline(never)] // Security: prevent inlining of sensitive function
+fn detect_numa_nodes(cpuid: &CpuId) -> Option<u8> {
+    // First try ACPI SRAT/SLIT if available
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(srat) = std::fs::read_to_string("/sys/firmware/acpi/tables/SRAT") {
+            // Parse SRAT for NUMA nodes
+            // This is simplified - real implementation would parse the ACPI table
+            let nodes = srat.matches("NUMA").count();
+            return Some(nodes as u8);
+        }
+    }
+    
+    // Fallback to CPUID topology
+    if let Some(ext_topo) = cpuid.get_extended_topology_info() {
+        let mut nodes = 1;
+        let mut last_l3 = None;
+        
+        for core in ext_topo {
+            if let Some(l3) = core.l3_cache_id() {
+                if last_l3.map_or(true, |last| last != l3) {
+                    nodes += 1;
+                    last_l3 = Some(l3);
+                }
+            }
+        }
+        
+        return Some(nodes.min(u8::MAX as u32) as u8);
+    }
+    
+    None
+}
+
+/// Enhanced masking with probabilistic distribution for better privacy
+#[inline(never)] // Security: prevent inlining of sensitive function
+fn mask_cpu_identity(seed: Option<u64>, real_temp: Option<f32>) -> CpuIdentity {
+    let time_seed = seed.unwrap_or_else(|| {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    });
+    
+    // Create a masked identity that preserves privacy
+    let mut masked = CpuIdentity {
+        vendor: String::new(),
+        brand: String::new(),
+        cores: 0,
+        logical_cores: None,
+        cache_size: 0,
+        frequency: None,
+        timestamp: time_seed,
+        platform_specific: None,
+        temperature: None,
+        numa_nodes: None,
+    };
+    
+    // Improved vendor masking with probability distribution
+    let vendor_distribution = [
+        ("GenuineIntel", 0.45),
+        ("AuthenticAMD", 0.45),
+        ("CentaurHauls", 0.03),
+        ("KVMKVMKVM", 0.03),
+        ("Microsoft Hv", 0.02),
+        ("bhyve bhyve", 0.02),
+    ];
+    
+    let mut rng = rand::rngs::StdRng::seed_from_u64(time_seed);
+    let vendor_choice = rand::distributions::WeightedIndex::new(
+        vendor_distribution.iter().map(|(_, weight)| weight)
+    ).unwrap();
+    
+    masked.vendor = vendor_distribution[vendor_choice.sample(&mut rng)].0.to_string();
+    
+    // More masking logic would go here...
+    
+    // Apply sanitization to ensure values are reasonable
+    masked.sanitize();
+    
+    // Add realistic temperature if requested
+    if let Some(temp) = real_temp {
+        masked.temperature = Some(temp);
+    }
+    
+    masked
+}
+
+/// Enhanced entropy validation with chi-squared test
+#[inline(never)] // Security: prevent inlining of sensitive function
+fn enhanced_entropy_check(data: &[u8]) -> bool {
+    if data.is_empty() {
+        return false;
+    }
+    
+    // Standard bit balance test first
+    let mut zeros = 0;
+    let mut ones = 0;
+    for byte in data {
+        zeros += byte.count_zeros();
+        ones += byte.count_ones();
+    }
+    
+    // Require roughly balanced 0s and 1s
+    let bit_balance_ok = (zeros as f64 / ones as f64).abs_diff(1.0) < 0.3;
+    
+    // Chi-squared test for uniform distribution
+    let mut counts = [0u16; 256];
+    for &b in data {
+        counts[b as usize] += 1;
+    }
+    
+    let expected = data.len() as f64 / 256.0;
+    let chi_sq: f64 = counts.iter()
+        .map(|&c| {
+            let diff = c as f64 - expected;
+            diff * diff / expected
+        })
+        .sum();
+    
+    // Critical value for 255 degrees of freedom at 0.01 significance
+    let chi_square_ok = chi_sq < 310.0;
+    
+    bit_balance_ok && chi_square_ok
+}
+
+impl CpuIdentity {
+    pub fn sanitize(&mut self) {
+        // Ensure core counts are reasonable
+        self.cores = self.cores.clamp(1, 128);
+        if let Some(lc) = self.logical_cores {
+            self.logical_cores = Some(lc.clamp(1, 256));
+        }
+        
+        // Ensure cache size is reasonable
+        self.cache_size = self.cache_size.clamp(0, 256 * 1024 * 1024); // 0-256MB
+        
+        // Ensure timestamp isn't in the future
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if self.timestamp > now {
+            self.timestamp = now;
+        }
+    }
+    
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(self)
+    }
+    
+    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(json)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn test_sanitize() {
+        let mut identity = CpuIdentity {
+            vendor: "GenuineIntel".to_string(),
+            brand: "Intel Core i9-9900K".to_string(),
+            cores: 300, // Unrealistic value
+            logical_cores: Some(600), // Unrealistic value
+            cache_size: 1024 * 1024 * 1024, // 1GB - unrealistic
+            frequency: Some(5.0),
+            timestamp: u64::MAX, // Future date
+            platform_specific: None,
+            temperature: Some(100.0),
+            numa_nodes: None,
+        };
+        
+        identity.sanitize();
+        
+        assert_eq!(identity.cores, 128); // Capped at 128
+        assert_eq!(identity.logical_cores, Some(256)); // Capped at 256
+        assert_eq!(identity.cache_size, 256 * 1024 * 1024); // Capped at 256MB
+        assert!(identity.timestamp <= SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs());
+    }
+    
+    #[test]
+    fn test_enhanced_entropy_check() {
+        // Good entropy test
+        let good_entropy = (0..256).map(|i| i as u8).collect::<Vec<_>>();
+        assert!(enhanced_entropy_check(&good_entropy));
+        
+        // Bad entropy test (all zeros)
+        let bad_entropy = vec![0u8; 256];
+        assert!(!enhanced_entropy_check(&bad_entropy));
+    }
+}
+
+#[cfg(test)]
+mod fuzz_tests {
+    use super::*;
+    
+    #[test]
+    fn fuzz_cpu_identity_parsing() {
+        // Simple pseudo-fuzzing for demonstration
+        let mut data = [0u8; 1024];
+        for _ in 0..10 {  // Reduced iterations for example
+            // Create randomized JSON
+            let identity = CpuIdentity {
+                vendor: format!("Vendor{}", data[0] % 10),
+                brand: format!("Brand{}", data[1] % 10),
+                cores: u16::from_le_bytes([data[2], data[3]]).clamp(1, 128),
+                logical_cores: Some(u16::from_le_bytes([data[4], data[5]]).clamp(1, 256)),
+                cache_size: u16::from_le_bytes([data[6], data[7]]) as u64 * 1024,
+                frequency: Some((data[8] as f64) / 10.0),
+                timestamp: u64::from_le_bytes([data[9], data[10], data[11], data[12], 
+                                              data[13], data[14], data[15], data[16]]),
+                platform_specific: None,
+                temperature: Some((data[17] as f32) / 10.0),
+                numa_nodes: Some(data[18] % 8),
+            };
+            
+            // Serialize and deserialize
+            if let Ok(json) = identity.to_json() {
+                if let Ok(parsed) = CpuIdentity::from_json(&json) {
+                    assert_eq!(identity.vendor, parsed.vendor);
+                }
+            }
+            
+            // Mutate data for next iteration
+            for byte in data.iter_mut() {
+                *byte = byte.wrapping_add(17);
+            }
+        }
     }
 }
