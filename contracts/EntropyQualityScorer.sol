@@ -17,6 +17,16 @@ contract EntropyQualityScorer {
     event EntropyScored(address indexed contributor, bytes32 entropy, uint256 score);
     
     /**
+     * @notice Initialize parameters for scoring
+     * @param _minEntropy Minimum acceptable entropy bits
+     * @param _idealEntropy Ideal entropy bits target
+     */
+    function initialize(uint256 _minEntropy, uint256 _idealEntropy) external {
+        minEntropyBits = _minEntropy;
+        idealEntropyBits = _idealEntropy;
+    }
+
+    /**
      * @notice Score entropy based on statistical quality measures
      * @dev Uses entropy estimation algorithms to score randomness quality
      */
@@ -32,6 +42,16 @@ contract EntropyQualityScorer {
         return score;
     }
     
+    /**
+     * @notice Get the score for a contributor
+     * @param contributor Address of contributor to check
+     * @return score Current score
+     * @return count Number of contributions
+     */
+    function getContributorScore(address contributor) external view returns (uint256 score, uint256 count) {
+        return (contributorScores[contributor], contributionCount[contributor]);
+    }
+
     /**
      * @notice Calculate quality metrics for entropy
      * @dev Uses multiple statistical tests to evaluate entropy quality
