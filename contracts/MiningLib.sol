@@ -280,7 +280,6 @@ library MiningLib {
         bytes32 h = keccak256(input);
         for (uint256 i = 0; i < QR_HASH_ITERATIONS; i++) {
             h = keccak256(abi.encodePacked(h ^ bytes32(i + 1), block.timestamp));
-            // Crucial bit: 7-bit prime rotation creates quantum-resistant diffusion pattern
             h = bytes32((uint256(h) << QR_HASH_ROTATION) | (uint256(h) >> (256 - QR_HASH_ROTATION)));
         }
         return h;
