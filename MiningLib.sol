@@ -172,11 +172,11 @@ library MiningLib {
     }
 
     function processMiningReveal(
-        bytes32 previousOutput,
-        bytes memory temporalSeed,
+        bytes32 previousOutput,   // Temporal: Links to previous output in chain
+        bytes memory temporalSeed, // Temporal: Time-based seed
         uint64 nonce,
-        bytes memory signature,
-        bytes32 secretValue,
+        bytes memory signature,   // Spatial: Cryptographic proof of identity
+        bytes32 secretValue,      // Spatial: Miner's entropy contribution
         uint256 baseDifficulty,
         address sender,
         BloomFilterLib.Filter storage bloomFilter,
