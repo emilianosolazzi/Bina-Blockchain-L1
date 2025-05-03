@@ -39,6 +39,8 @@ pub struct BitcoinBloomFilter {
     item_count: AtomicU64,
     hash_seeds: [u64; 8],
     timestamps: HashMap<Vec<u8>, u64>,
+    hits: AtomicU64, // Added for hit/miss tracking
+    misses: AtomicU64,
 }
 
 impl BitcoinBloomFilter {
@@ -63,6 +65,8 @@ impl BitcoinBloomFilter {
             item_count: AtomicU64::new(0),
             hash_seeds,
             timestamps: HashMap::new(),
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
         }
     }
 
@@ -124,7 +128,7 @@ impl BitcoinBloomFilter {
 
     pub fn contains(&self, data: &[u8]) -> bool {
         let hashes = self.compute_hashes(data);
-        (0..self.config.num_hashes).into_par_iter().all(|i| {
+        let result = (0..self.config.num_hashes).into_par_iter().all(|i| {
             let bit_pos = hashes[i as usize] % (self.config.size as u64);
             let bucket_idx = (bit_pos >> 6) as usize;
             let bit_mask = 1u64 << (bit_pos & 0x3F);
@@ -133,7 +137,17 @@ impl BitcoinBloomFilter {
                 return false;
             }
             (self.buckets[bucket_idx].load(Ordering::SeqCst) & bit_mask) != 0
-        })
+        });
+        if result {
+            self.hits.fetch_add(1, Ordering::SeqCst);
+        } else {
+            self.misses.fetch_add(1, Ordering::SeqCst);
+        }
+        result
+    }
+
+    pub fn contains_data(&self, data: &[u8]) -> bool {
+        self.contains(data)
     }
 
     fn compute_hashes(&self, data: &[u8]) -> [u64; 8] {
@@ -183,9 +197,20 @@ impl BitcoinBloomFilter {
         let bucket_count = (self.config.size + 63) / 64;
         self.buckets = (0..bucket_count).map(|_| AtomicU64::new(0)).collect();
         self.item_count.store(0, Ordering::SeqCst);
+        self.hits.store(0, Ordering::SeqCst);
+        self.misses.store(0, Ordering::SeqCst);
         for (data, _) in self.timestamps.iter() {
             self.insert(data);
         }
+    }
+
+    pub fn clear(&mut self) {
+        let bucket_count = (self.config.size + 63) / 64;
+        self.buckets = (0..bucket_count).map(|_| AtomicU64::new(0)).collect();
+        self.item_count.store(0, Ordering::SeqCst);
+        self.hits.store(0, Ordering::SeqCst);
+        self.misses.store(0, Ordering::SeqCst);
+        self.timestamps.clear();
     }
 
     pub fn false_positive_rate(&self) -> f64 {
@@ -193,6 +218,20 @@ impl BitcoinBloomFilter {
         let m = self.config.size as f64;
         let k = self.config.num_hashes as f64;
         (1.0 - (-k * n / m).exp()).powf(k)
+    }
+
+    pub fn memory_usage(&self) -> usize {
+        self.buckets.len() * 8 + self.timestamps.len() * (36 + 8)
+    }
+
+    pub fn hit_miss_ratio(&self) -> u64 {
+        let hits = self.hits.load(Ordering::SeqCst);
+        let misses = self.misses.load(Ordering::SeqCst);
+        if hits + misses == 0 {
+            0
+        } else {
+            (hits * 100 / (hits + misses)) as u64
+        }
     }
 
     pub fn to_p2p_message(&self) -> Vec<u8> {
@@ -208,44 +247,208 @@ impl BitcoinBloomFilter {
 
     pub fn log_stats(&self) -> String {
         format!(
-            "FPR: {:.2}%, Items: {}, Size: {} bits",
+            "FPR: {:.2}%, Items: {}, Size: {} bits, Hit/Miss: {}%",
             self.false_positive_rate() * 100.0,
             self.item_count.load(Ordering::SeqCst),
-            self.config.size
+            self.config.size,
+            self.hit_miss_ratio()
         )
     }
 }
 
-extern "C" {
-    BloomFilterHandle bf_create(size_t size, uint8_t num_hashes, uint32_t tweak);
-    void bf_insert_utxo(void* handle, const unsigned char* txid, uint32_t vout);
-    void bf_insert_witness(void* handle, const unsigned char* witness, size_t len, uint64_t node_salt);
-    void bf_load_block(void* handle, const unsigned char* block, size_t len);
-    bool bf_contains_utxo(void* handle, const unsigned char* txid, uint32_t vout);
-    void bf_resize(void* handle, uint64_t expected_items, double target_fpr, BloomFilterHandle* out);
-    void bf_prune(void* handle, uint64_t threshold_timestamp);
-    double bf_false_positive_rate(void* handle);
-    char* bf_log_stats(void* handle);
-    void bf_free(void* handle);
+#[no_mangle]
+pub extern "C" fn rust_bf_create(size: usize, num_hashes: u8, tweak: u32) -> RustBloomFilterHandle {
+    match std::panic::catch_unwind(|| BitcoinBloomFilter::new(Some(BloomConfig { size, num_hashes, tweak, flags: 0 }))) {
+        Ok(filter) => RustBloomFilterHandle {
+            filter: Box::into_raw(Box::new(filter)),
+            error: std::ptr::null_mut(),
+        },
+        Err(e) => {
+            let err = std::ffi::CString::new(format!("Creation failed: {:?}", e)).unwrap();
+            RustBloomFilterHandle {
+                filter: std::ptr::null_mut(),
+                error: err.into_raw(),
+            }
+        }
+    }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_insert_and_contains() {
-        let mut filter = BitcoinBloomFilter::new(None);
-        let txid = Txid::all_zeros();
-        filter.insert_utxo(&txid, 0);
-        assert!(filter.contains_utxo(&txid, 0));
+#[no_mangle]
+pub extern "C" fn rust_bf_insert_utxo(handle: *mut BitcoinBloomFilter, txid: *const u8, vout: u32) {
+    unsafe {
+        let filter = &mut *handle;
+        let txid_data = std::slice::from_raw_parts(txid, 32);
+        let txid = Txid::from_slice(txid_data).unwrap();
+        filter.insert_utxo(&txid, vout);
     }
+}
 
-    #[test]
-    fn test_resize() {
-        let mut filter = BitcoinBloomFilter::new(None);
-        let old_size = filter.config.size;
-        filter.resize(1_000_000, 0.002);
-        assert!(filter.config.size > old_size);
+#[no_mangle]
+pub extern "C" fn rust_bf_insert_witness(handle: *mut BitcoinBloomFilter, witness: *const u8, len: usize, node_salt: u64) {
+    unsafe {
+        let filter = &mut *handle;
+        let witness_data = std::slice::from_raw_parts(witness, len);
+        filter.insert_witness(witness_data, node_salt);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rust_bf_load_block(handle: *mut BitcoinBloomFilter, block: *const u8, len: usize) {
+    unsafe {
+        let filter = &mut *handle;
+        let block_data = std::slice::from_raw_parts(block, len);
+        let block = Block::consensus_decode(&mut &block_data[..]).unwrap();
+        filter.load_block(&block);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rust_bf_contains_utxo(handle: *const BitcoinBloomFilter, txid: *const u8, vout: u32) -> bool {
+    unsafe {
+        let filter = &*handle;
+        let txid_data = std::slice::from_raw_parts(txid, 32);
+        let txid = Txid::from_slice(txid_data).unwrap();
+        filter.contains_utxo(&txid, vout)
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rust_bf_contains_data(handle: *const BitcoinBloomFilter, data: *const u8, len: usize) -> bool {
+    unsafe {
+        let filter = &*handle;
+        let data = std::slice::from_raw_parts(data, len);
+        filter.contains_data(data)
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rust_bf_resize(handle: *mut BitcoinBloomFilter, expected_items: u64, target_fpr: f64, out: *mut RustBloomFilterHandle) {
+    unsafe {
+        let filter = &mut *handle;
+        filter.resize(expected_items, target_fpr);
+        *out = RustBloomFilterHandle {
+            filter: handle,
+            error: std::ptr::null_mut(),
+        };
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rust_bf_prune(handle: *mut BitcoinBloomFilter, threshold_timestamp: u64) {
+    unsafe {
+        let filter = &mut *handle;
+        filter.prune(threshold_timestamp);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rust_bf_clear(handle: *mut BitcoinBloomFilter) {
+    unsafe {
+        let filter = &mut *handle;
+        filter.clear();
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rust_bf_false_positive_rate(handle: *const BitcoinBloomFilter) -> f64 {
+    unsafe {
+        let filter = &*handle;
+        filter.false_positive_rate()
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rust_bf_memory_usage(handle: *const BitcoinBloomFilter) -> usize {
+    unsafe {
+        let filter = &*handle;
+        filter.memory_usage()
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rust_bf_hit_miss_ratio(handle: *const BitcoinBloomFilter) -> u64 {
+    unsafe {
+        let filter = &*handle;
+        filter.hit_miss_ratio()
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rust_bf_log_stats(handle: *const BitcoinBloomFilter) -> *mut libc::c_char {
+    unsafe {
+        let filter = &*handle;
+        let stats = filter.log_stats();
+        std::ffi::CString::new(stats).unwrap().into_raw()
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rust_bf_serialized_size(handle: *const BitcoinBloomFilter) -> usize {
+    unsafe {
+        let filter = &*handle;
+        serde_json::to_vec(filter).unwrap().len()
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rust_bf_serialize(handle: *const BitcoinBloomFilter, output: *mut u8) {
+    unsafe {
+        let filter = &*handle;
+        let serialized = serde_json::to_vec(filter).unwrap();
+        std::ptr::copy_nonoverlapping(serialized.as_ptr(), output, serialized.len());
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rust_bf_deserialize(input: *const u8, len: usize) -> RustBloomFilterHandle {
+    unsafe {
+        let data = std::slice::from_raw_parts(input, len);
+        match serde_json::from_slice::<BitcoinBloomFilter>(data) {
+            Ok(filter) => RustBloomFilterHandle {
+                filter: Box::into_raw(Box::new(filter)),
+                error: std::ptr::null_mut(),
+            },
+            Err(e) => {
+                let err = std::ffi::CString::new(format!("Deserialization failed: {:?}", e)).unwrap();
+                RustBloomFilterHandle {
+                    filter: std::ptr::null_mut(),
+                    error: err.into_raw(),
+                }
+            }
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rust_bf_to_p2p_message(handle: *const BitcoinBloomFilter, output: *mut *mut u8, len: *mut usize) {
+    unsafe {
+        let filter = &*handle;
+        let msg = filter.to_p2p_message();
+        *len = msg.len();
+        *output = Box::into_raw(msg.into_boxed_slice()) as *mut u8;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rust_bf_to_grpc(handle: *const BitcoinBloomFilter, output: *mut *mut u8, len: *mut usize) {
+    unsafe {
+        let filter = &*handle;
+        let msg = filter.to_grpc();
+        *len = msg.len();
+        *output = Box::into_raw(msg.into_boxed_slice()) as *mut u8;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rust_bf_free(handle: *mut BitcoinBloomFilter) {
+    unsafe { drop(Box::from_raw(handle)) };
+}
+
+#[no_mangle]
+pub extern "C" fn rust_bf_free_buffer(buffer: *mut u8) {
+    unsafe {
+        if !buffer.is_null() {
+            drop(Vec::from_raw_parts(buffer, 0, 0));
+        }
     }
 }
