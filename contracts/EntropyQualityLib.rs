@@ -3,6 +3,10 @@ use num_bigint::BigUint;
 use num_traits::{Zero, One};
 use rayon::prelude::*; // For parallel processing
 use serde::{Serialize, Deserialize};
+use fixed::types::U64F64; // Fixed-point arithmetic for improved precision
+use rand::{Rng, SeedableRng};
+use rand::rngs::StdRng;
+use rand::RngCore;
 
 // Constants aligned with Solidity
 const ENTROPY_MIN_SCORE: u64 = 100;
@@ -16,6 +20,17 @@ const ERROR_PATTERN_DETECTED: u8 = 2;
 const ERROR_PREDICTABILITY_RISK: u8 = 3;
 const ERROR_DISTRIBUTION_ANOMALY: u8 = 4;
 
+// Enhanced error handling with an enum
+#[derive(Debug)]
+pub enum EntropyError {
+    TooShort,
+    LowShannonEntropy(u64, u64), // (actual, required)
+    LowMinEntropy(u64, u64),     // (actual, required)
+    PatternDetected(i64),        // pattern score
+    DistributionAnomaly(f64),    // chi-square value
+    InsufficientVariance(u32),   // unique byte count
+}
+
 // Struct for ZK proof preparation results
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ZKProofPrepResult {
@@ -24,6 +39,28 @@ pub struct ZKProofPrepResult {
     shannon_entropy: u64,
     min_entropy: u64,
     suitable: bool,
+    // Add validation report
+    pub validation_details: Option<ValidationDetails>,
+}
+
+// Added for more detailed validation reporting
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ValidationDetails {
+    pub unique_bytes: u32,
+    pub chi_square: f64,
+    pub autocorrelation: i32,
+    pub bit_balance_ratio: f64,
+    pub pattern_findings: Vec<String>,
+}
+
+// For cross-language validation
+#[derive(Serialize, Deserialize)]
+pub struct VerificationResult {
+    pub score: u64,
+    pub tier: u8,
+    pub passed: bool,
+    pub shannon_entropy: u64,
+    pub min_entropy: u64,
 }
 
 // Offline EntropyQualityLib implementation
@@ -31,11 +68,15 @@ pub struct EntropyQualityLib;
 
 impl EntropyQualityLib {
     /// Assess pattern quality of entropy (returns -100 to +100 adjustment)
+    /// Enhanced with autocorrelation detection for subtle patterns
     pub fn assess_pattern_quality(entropy: &[u8; 32]) -> i64 {
         let mut frequencies = [0u8; 256];
         for &b in entropy.iter() {
             frequencies[b as usize] += 1;
         }
+
+        // Count unique bytes (for variability check)
+        let unique_bytes = frequencies.iter().filter(|&&freq| freq > 0).count() as u32;
 
         let mut chi_squared = 0;
         for &freq in frequencies.iter() {
@@ -51,9 +92,40 @@ impl EntropyQualityLib {
             }
         }
 
+        // Add autocorrelation check for subtle patterns
+        let mut autocorr = 0;
+        for lag in 1..8 { // Check various lag values
+            let mut lag_score = 0;
+            for i in lag..32 {
+                lag_score += (entropy[i] as i32 - entropy[i-lag] as i32).pow(2);
+            }
+            autocorr += lag_score / (32 - lag) as i32;
+        }
+        let autocorr_score = if autocorr < 100 { -50 } else if autocorr < 200 { -20 } else { 0 };
+
+        // Check for sequential byte patterns
+        let mut seq_patterns = 0;
+        for i in 2..32 {
+            if entropy[i] == entropy[i-2] {
+                seq_patterns += 1;
+            }
+        }
+        let seq_score = if seq_patterns > 10 { -30 } else if seq_patterns > 5 { -15 } else { 0 };
+
+        // Standard adjustments
         let mut adjustment = 0;
         if chi_squared < 5 { adjustment += 50; } else if chi_squared < 10 { adjustment += 20; } else if chi_squared > 20 { adjustment -= 50; } else if chi_squared > 15 { adjustment -= 20; }
         if run_count < 3 { adjustment += 50; } else if run_count < 5 { adjustment += 20; } else if run_count > 10 { adjustment -= 50; } else if run_count > 8 { adjustment -= 20; }
+        
+        // Add new pattern scores
+        adjustment += autocorr_score;
+        adjustment += seq_score;
+        
+        // Penalize severely if very few unique bytes
+        if unique_bytes < 16 { 
+            adjustment -= 70; 
+        }
+        
         adjustment.clamp(-100, 100)
     }
 
@@ -77,10 +149,23 @@ impl EntropyQualityLib {
         entropy
     }
 
-    /// Approximate log2(x) for a value scaled by 1e18
+    /// Improved log2 approximation using fixed-point arithmetic
     fn approximate_log2_scaled(x: u64) -> u64 {
         if x == 0 { return 0; }
         if x == 1_000_000_000_000_000_000 { return 0; }
+        
+        // Use fixed-point arithmetic for better precision
+        let x_fp = U64F64::from_num(x) / U64F64::from_num(1_000_000_000_000_000_000);
+        let log2 = x_fp.checked_log2().unwrap_or(U64F64::ZERO);
+        (log2 * U64F64::from_num(1_000_000_000_000_000_000)).to_num()
+    }
+
+    /// Alternative implementation using Taylor series if fixed-point isn't available
+    fn fallback_log2_scaled(x: u64) -> u64 {
+        if x == 0 { return 0; }
+        if x == 1_000_000_000_000_000_000 { return 0; }
+        
+        // Existing approximation as fallback
         let y = (1_000_000_000_000_000_000 - x) * 1_000_000_000 / x; // Scaled
         let y2 = (y * y) / 1_000_000_000;
         let y3 = (y2 * y) / 1_000_000_000;
@@ -89,7 +174,7 @@ impl EntropyQualityLib {
         (ln_scaled * log2_e_scaled) / 1_000_000_000
     }
 
-    /// Approximate min-entropy (scaled by 1e18)
+    /// Improved min-entropy calculation
     pub fn approximate_min_entropy(data: &[u8]) -> u64 {
         let len = data.len() as u64;
         if len == 0 { return 0; }
@@ -110,36 +195,63 @@ impl EntropyQualityLib {
         if score >= ENTROPY_TIER_3_THRESHOLD { 4 } else if score >= ENTROPY_TIER_2_THRESHOLD { 3 } else if score >= ENTROPY_TIER_1_THRESHOLD { 2 } else { 1 }
     }
 
-    /// Validate entropy for ZK proof compatibility
-    pub fn validate_entropy_for_zk_proof(data: &[u8], min_shannon_entropy: u64, min_min_entropy: u64) -> (bool, u8) {
+    /// Enhanced entropy validation with richer error information
+    pub fn validate_entropy_for_zk_proof(data: &[u8], min_shannon_entropy: u64, min_min_entropy: u64) -> Result<(), EntropyError> {
         if data.len() < 16 {
-            return (false, ERROR_INSUFFICIENT_ENTROPY);
+            return Err(EntropyError::TooShort);
         }
 
         let shannon_entropy = Self::calculate_shannon_entropy(data);
         if shannon_entropy < min_shannon_entropy {
-            return (false, ERROR_INSUFFICIENT_ENTROPY);
-        }
-
-        let pattern_score = Self::assess_pattern_quality(&data[0..32].try_into().unwrap());
-        if pattern_score < -50 {
-            return (false, ERROR_PATTERN_DETECTED);
+            return Err(EntropyError::LowShannonEntropy(shannon_entropy, min_shannon_entropy));
         }
 
         let min_entropy = Self::approximate_min_entropy(data);
         if min_entropy < min_min_entropy {
-            return (false, ERROR_PREDICTABILITY_RISK);
+            return Err(EntropyError::LowMinEntropy(min_entropy, min_min_entropy));
         }
 
-        (true, 0)
+        // Check byte distribution and variety
+        let mut counts = [0u16; 256];
+        for &b in data {
+            counts[b as usize] += 1;
+        }
+        let unique_bytes = counts.iter().filter(|&&c| c > 0).count() as u32;
+        if unique_bytes < 16 {
+            return Err(EntropyError::InsufficientVariance(unique_bytes));
+        }
+
+        // Chi-square test for uniform distribution
+        let expected = data.len() as f64 / 256.0;
+        let chi_sq: f64 = counts.iter()
+            .map(|&c| {
+                let diff = c as f64 - expected;
+                diff * diff / expected
+            })
+            .sum();
+            
+        if chi_sq > 350.0 {
+            return Err(EntropyError::DistributionAnomaly(chi_sq));
+        }
+
+        // Pattern analysis
+        if data.len() >= 32 {
+            let pattern_score = Self::assess_pattern_quality(&data[0..32].try_into().unwrap());
+            if pattern_score < -50 {
+                return Err(EntropyError::PatternDetected(pattern_score));
+            }
+        }
+
+        Ok(())
     }
 
-    /// Prepare entropy for ZK proof (offline version)
+    /// Enhanced ZK proof preparation with validation details
     pub fn prepare_for_zk_proof(entropy: &[u8; 32]) -> ZKProofPrepResult {
         let entropy_bytes = entropy.to_vec();
         let shannon_entropy = Self::calculate_shannon_entropy(&entropy_bytes);
         let min_entropy = Self::approximate_min_entropy(&entropy_bytes);
 
+        // Calculate scores as before
         let shannon_score = (shannon_entropy * 500) / (8 * 1_000_000_000_000_000_000); // Scaled by 1e18
         let min_entropy_score = (min_entropy * 500) / (8 * 1_000_000_000_000_000_000);
         let shannon_score = if shannon_score > 500 { 500 } else { shannon_score };
@@ -160,18 +272,81 @@ impl EntropyQualityLib {
                        min_entropy >= 4 * 1_000_000_000_000_000_000 &&
                        pattern_adjustment >= -25;
 
-        ZKProofPrepResult { score, tier, shannon_entropy, min_entropy, suitable }
+        // Calculate additional validation metrics
+        let mut validation_details = ValidationDetails {
+            unique_bytes: 0,
+            chi_square: 0.0,
+            autocorrelation: 0,
+            bit_balance_ratio: 0.0,
+            pattern_findings: Vec::new(),
+        };
+
+        // Count unique bytes and calculate chi-square
+        let mut counts = [0u16; 256];
+        for &b in entropy {
+            counts[b as usize] += 1;
+        }
+        validation_details.unique_bytes = counts.iter().filter(|&&c| c > 0).count() as u32;
+        
+        let expected = entropy.len() as f64 / 256.0;
+        validation_details.chi_square = counts.iter()
+            .map(|&c| {
+                let diff = c as f64 - expected;
+                diff * diff / expected
+            })
+            .sum();
+
+        // Calculate bit balance
+        let mut zeros = 0;
+        let mut ones = 0;
+        for byte in entropy {
+            zeros += byte.count_zeros();
+            ones += byte.count_ones();
+        }
+        validation_details.bit_balance_ratio = if ones > 0 { zeros as f64 / ones as f64 } else { f64::MAX };
+
+        // Calculate autocorrelation
+        let mut autocorr = 0;
+        for i in 1..32 {
+            autocorr += (entropy[i] as i32 - entropy[i-1] as i32).pow(2);
+        }
+        validation_details.autocorrelation = autocorr;
+
+        // Add findings
+        if validation_details.unique_bytes < 16 {
+            validation_details.pattern_findings.push(format!("Low entropy: Only {} unique bytes", validation_details.unique_bytes));
+        }
+        if validation_details.chi_square > 350.0 {
+            validation_details.pattern_findings.push(format!("Distribution anomaly: Chi-square {:.2}", validation_details.chi_square));
+        }
+        if (validation_details.bit_balance_ratio - 1.0).abs() > 0.3 {
+            validation_details.pattern_findings.push(format!("Bit imbalance: Ratio {:.2}", validation_details.bit_balance_ratio));
+        }
+
+        ZKProofPrepResult { 
+            score, 
+            tier, 
+            shannon_entropy, 
+            min_entropy, 
+            suitable,
+            validation_details: Some(validation_details) 
+        }
     }
 
-    /// Batch process entropy for offline efficiency
+    /// Optimized batch processing with chunking for better memory management
     pub fn batch_prepare_for_zk_proof(entropy_batch: &[Vec<u8>]) -> Vec<ZKProofPrepResult> {
-        entropy_batch.par_iter().map(|e| {
-            let entropy_array: [u8; 32] = e[0..32].try_into().unwrap_or([0; 32]);
-            Self::prepare_for_zk_proof(&entropy_array)
-        }).collect()
+        // Process in chunks of 100 for better memory management
+        entropy_batch.par_chunks(100)
+            .flat_map(|chunk| {
+                chunk.par_iter().map(|e| {
+                    let entropy_array: [u8; 32] = e[0..32].try_into().unwrap_or([0; 32]);
+                    Self::prepare_for_zk_proof(&entropy_array)
+                }).collect::<Vec<_>>()
+            })
+            .collect()
     }
 
-    /// Measure performance for offline optimization
+    /// Performance measurement
     pub fn measure_performance(batch_size: usize) -> (f64, f64) {
         let mut test_data = Vec::with_capacity(batch_size);
         for i in 0..batch_size {
@@ -189,6 +364,32 @@ impl EntropyQualityLib {
         let avg_time_ms = duration.as_secs_f64() * 1000.0 / batch_size as f64;
         let total_time_ms = duration.as_secs_f64() * 1000.0;
         (avg_time_ms, total_time_ms)
+    }
+    
+    /// Convert result to JSON for cross-language validation
+    pub fn to_json(result: &ZKProofPrepResult) -> String {
+        serde_json::to_string(&VerificationResult {
+            score: result.score,
+            tier: result.tier,
+            passed: result.suitable,
+            shannon_entropy: result.shannon_entropy,
+            min_entropy: result.min_entropy,
+        }).unwrap_or_else(|_| "".to_string())
+    }
+    
+    /// Export batch results to JSON for integration testing
+    pub fn export_batch_results(results: &[ZKProofPrepResult]) -> String {
+        let verification_results: Vec<VerificationResult> = results.iter()
+            .map(|r| VerificationResult {
+                score: r.score,
+                tier: r.tier,
+                passed: r.suitable,
+                shannon_entropy: r.shannon_entropy,
+                min_entropy: r.min_entropy,
+            })
+            .collect();
+            
+        serde_json::to_string(&verification_results).unwrap_or_else(|_| "[]".to_string())
     }
 }
 
@@ -281,6 +482,8 @@ fn run_offline_simulation(batch_size: usize) -> (f64, f64, f64, u8, f64, f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::{thread_rng, RngCore};
+    use std::convert::TryInto;
 
     #[test]
     fn test_pattern_quality() {
@@ -311,6 +514,83 @@ mod tests {
         let (avg_time, total_time) = EntropyQualityLib::measure_performance(100);
         println!("Avg time per item: {:.3}ms, Total time: {:.3}ms", avg_time, total_time);
         assert!(avg_time < 1.0); // Should be efficient
+    }
+    
+    // Additional edge case tests
+    
+    #[test]
+    fn test_all_zeros() {
+        let data = [0u8; 32];
+        let result = EntropyQualityLib::prepare_for_zk_proof(&data);
+        assert!(result.score < ENTROPY_TIER_1_THRESHOLD); // Should not reach tier 2
+        assert!(!result.suitable); // Should not be suitable
+    }
+    
+    #[test]
+    fn test_all_ones() {
+        let data = [255u8; 32];
+        let result = EntropyQualityLib::prepare_for_zk_proof(&data);
+        assert!(result.score < ENTROPY_TIER_1_THRESHOLD); // Should not reach tier 2
+        assert!(!result.suitable); // Should not be suitable
+    }
+    
+    #[test]
+    fn test_alternating_pattern() {
+        let mut data = [0u8; 32];
+        for i in 0..32 {
+            data[i] = if i % 2 == 0 { 0 } else { 255 };
+        }
+        let result = EntropyQualityLib::prepare_for_zk_proof(&data);
+        let validation = result.validation_details.unwrap();
+        assert!(validation.pattern_findings.len() > 0); // Should detect pattern
+    }
+    
+    #[test]
+    fn test_cryptographic_entropy() {
+        let mut data = [0u8; 32];
+        let mut rng = thread_rng();
+        rng.fill_bytes(&mut data);
+        let result = EntropyQualityLib::prepare_for_zk_proof(&data);
+        assert!(result.suitable); // Should be suitable
+        assert!(result.score >= ENTROPY_TIER_2_THRESHOLD); // Should be at least tier 2
+    }
+    
+    #[test]
+    fn test_incremental_bytes() {
+        let mut data = [0u8; 32];
+        for i in 0..32 {
+            data[i] = i as u8;
+        }
+        let result = EntropyQualityLib::prepare_for_zk_proof(&data);
+        println!("Incremental score: {}, tier: {}", result.score, result.tier);
+        // This is predictable but has good distribution, so check validation details
+        let validation = result.validation_details.unwrap();
+        assert!(validation.unique_bytes == 32); // All bytes should be unique
+    }
+    
+    #[test]
+    fn test_fixed_point_log2() {
+        // Test the fixed-point log2 implementation vs fallback
+        let values = [1, 10, 100, 1000, 10000, 1000000, 1_000_000_000_000_000_000u64];
+        for value in values {
+            let scaled = value * 1_000_000_000_000_000_000;
+            if value > 1 { // Skip 1 which is exactly 0
+                let fixed_result = EntropyQualityLib::approximate_log2_scaled(scaled);
+                let fallback_result = EntropyQualityLib::fallback_log2_scaled(scaled);
+                
+                // The fixed-point result should be more accurate, but within 5% of the fallback
+                let difference = if fixed_result > fallback_result {
+                    fixed_result - fallback_result
+                } else {
+                    fallback_result - fixed_result
+                };
+                
+                let tolerance = if fallback_result > 0 { (fallback_result * 5) / 100 } else { 1 };
+                assert!(difference <= tolerance, 
+                    "Log2 results differ too much: fixed {}, fallback {}", 
+                    fixed_result, fallback_result);
+            }
+        }
     }
 }
 

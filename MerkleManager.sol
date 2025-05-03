@@ -271,15 +271,103 @@ contract MerkleManager is
      * @return A quantum-resistant hash
      */
     function quantumResistantHash(bytes32 input) public view returns (bytes32) {
+        return enhancedQuantumHash(input);
+    }
+    
+    /**
+     * @notice Enhanced quantum-resistant hash with improved entropy sources
+     * @dev Uses previous block hash as seed for additional entropy and prevents
+     *      time-based precomputation attacks
+     * @param input The input data to transform
+     * @return A quantum-resistant hash with enhanced security properties
+     */
+    function enhancedQuantumHash(bytes32 input) internal view returns (bytes32) {
         bytes32 h = input;
+        uint256 seed = uint256(blockhash(block.number - 1));
         
-        // Apply multiple iterations of hashing with bit rotation
         for (uint256 i = 0; i < QR_HASH_ITERATIONS; i++) {
-            h = keccak256(abi.encodePacked(h ^ bytes32(i + 1), block.timestamp));
+            h = keccak256(abi.encodePacked(h, seed ^ bytes32(i)));
             h = bytes32((uint256(h) << QR_HASH_ROTATION) | (uint256(h) >> (256 - QR_HASH_ROTATION)));
+            seed = uint256(keccak256(abi.encodePacked(seed, h)));
+        }
+        return h;
+    }
+    
+    /**
+     * @notice Optimized batch verification using flattened proof structure for gas efficiency
+     * @dev Uses a single array with indices for substantial gas savings with large batches
+     * @param leaves Array of leaf nodes to verify
+     * @param proofs Flattened array containing all proof elements concatenated
+     * @param proofLengths Array indicating the length of each proof
+     * @return results Array of booleans indicating validity of each proof
+     */
+    function optimizedBatchVerify(
+        bytes32[] calldata leaves,
+        bytes32[] calldata proofs,
+        uint256[] calldata proofLengths
+    ) external view returns (bool[] memory results) {
+        require(leaves.length == proofLengths.length, "Length mismatch");
+        require(leaves.length <= MAX_BATCH_SIZE, "Batch too large");
+        
+        results = new bool[](leaves.length);
+        uint256 proofIndex = 0;
+        
+        for (uint256 i = 0; i < leaves.length; i++) {
+            // Extract the proof for this leaf
+            bytes32[] memory proof = new bytes32[](proofLengths[i]);
+            for (uint256 j = 0; j < proofLengths[i]; j++) {
+                proof[j] = proofs[proofIndex + j];
+            }
+            
+            // Verify this leaf against the current merkle root
+            results[i] = MerkleProof.verify(proof, merkleRoot, leaves[i]);
+            
+            // Update index for the next proof
+            proofIndex += proofLengths[i];
         }
         
-        return h;
+        require(proofIndex == proofs.length, "Invalid proof structure");
+        return results;
+    }
+    
+    /**
+     * @notice Optimized quantum-resistant batch verification using flattened proof structure
+     * @dev Combines quantum resistance with gas-efficient proof structure
+     * @param leaves Array of leaf nodes to verify
+     * @param proofs Flattened array containing all proof elements concatenated
+     * @param proofLengths Array indicating the length of each proof
+     * @return results Array of booleans indicating validity of each proof
+     */
+    function optimizedBatchVerifyQuantumResistant(
+        bytes32[] calldata leaves,
+        bytes32[] calldata proofs,
+        uint256[] calldata proofLengths
+    ) external view returns (bool[] memory results) {
+        require(leaves.length == proofLengths.length, "Length mismatch");
+        require(leaves.length <= MAX_BATCH_SIZE, "Batch too large");
+        
+        results = new bool[](leaves.length);
+        uint256 proofIndex = 0;
+        
+        for (uint256 i = 0; i < leaves.length; i++) {
+            // Convert leaf to quantum-resistant version
+            bytes32 qrLeaf = enhancedQuantumHash(leaves[i]);
+            
+            // Extract and convert the proof for this leaf
+            bytes32[] memory qrProof = new bytes32[](proofLengths[i]);
+            for (uint256 j = 0; j < proofLengths[i]; j++) {
+                qrProof[j] = enhancedQuantumHash(proofs[proofIndex + j]);
+            }
+            
+            // Verify this leaf against the quantum-resistant merkle root
+            results[i] = MerkleProof.verify(qrProof, qrMerkleRoot, qrLeaf);
+            
+            // Update index for the next proof
+            proofIndex += proofLengths[i];
+        }
+        
+        require(proofIndex == proofs.length, "Invalid proof structure");
+        return results;
     }
     
     /**

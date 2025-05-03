@@ -8,6 +8,7 @@ import { AccessControlUpgradeable } from "@openzeppelin/contracts-upgradeable/ac
 import { PausableUpgradeable } from "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
 import { Ownable2StepUpgradeable } from "@openzeppelin/contracts-upgradeable/access/Ownable2StepUpgradeable.sol";
 import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import { ITGBT } from "./interfaces/ITGBT.sol";
 
 /**
  * @title TGBT - Temporal Gradient Beacon Token
@@ -20,7 +21,8 @@ contract TGBT is
     AccessControlUpgradeable,
     PausableUpgradeable,
     Ownable2StepUpgradeable,
-    UUPSUpgradeable
+    UUPSUpgradeable,
+    ITGBT // ✅ Add this to guarantee interface conformance
 {
     // --- Constants ---
     // Consider reviewing MAX_SUPPLY for healthy tokenomics based on distribution and utility.

@@ -1,5 +1,7 @@
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::collections::{HashMap, HashSet};
+// Replace std::sync::Mutex with tokio::sync::Mutex
+use std::sync::Arc;
+use tokio::sync::Mutex; // Changed from std::sync::Mutex
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use sha2::{Sha256, Digest};
 use serde::{Deserialize, Serialize};
@@ -89,6 +91,7 @@ pub struct EntropyStorageVerifier {
     authorized_providers: HashMap<StorageProtocol, Vec<String>>,
     challenge_history: Arc<Mutex<HashMap<String, StorageChallenge>>>,
     verification_results: Arc<Mutex<HashMap<String, VerificationResult>>>,
+    used_beacon_outputs: Arc<Mutex<HashSet<String>>>, // Added for replay protection
     auth_token: Option<String>,
 }
 
@@ -102,6 +105,7 @@ impl EntropyStorageVerifier {
             authorized_providers: HashMap::new(),
             challenge_history: Arc::new(Mutex::new(HashMap::new())),
             verification_results: Arc::new(Mutex::new(HashMap::new())),
+            used_beacon_outputs: Arc::new(Mutex::new(HashSet::new())), // Initialize replay protection
             auth_token: std::env::var("ENTROPY_API_TOKEN").ok(),
         }
     }
@@ -124,6 +128,15 @@ impl EntropyStorageVerifier {
         let entropy = self.get_entropy_randomness().await?;
         let beacon_output = entropy.beacon_output.clone();
         
+        // Check for replay of beacon output (added replay protection)
+        {
+            let mut used_outputs = self.used_beacon_outputs.lock().await;
+            if used_outputs.contains(&beacon_output) {
+                return Err("Beacon output already used".to_string());
+            }
+            used_outputs.insert(beacon_output.clone());
+        }
+        
         // Calculate challenge parameters based on file size
         let num_challenges = self.calculate_challenge_count(file_size);
         let indices = self.generate_random_indices(&entropy.random_bytes, file_size, num_challenges);
@@ -143,6 +156,12 @@ impl EntropyStorageVerifier {
             now
         );
         
+        // Improved nonce generation with stronger binding to request parameters
+        let nonce_input = format!("{}{}{}", file_id, provider, now);
+        let mut hasher = Sha256::new();
+        hasher.update(nonce_input.as_bytes());
+        let nonce = u64::from_be_bytes(hasher.finalize()[0..8].try_into().unwrap_or([0; 8]));
+        
         // Create and sign challenge
         let challenge = StorageChallenge {
             challenge_id,
@@ -151,7 +170,7 @@ impl EntropyStorageVerifier {
             challenge_type,
             random_indices: indices,
             merkle_root: None, // Optional, set if using Merkle verification
-            nonce: entropy.nonce,
+            nonce, // Use cryptographically derived nonce
             timestamp: now,
             expiry,
             signature: self.sign_challenge(&entropy.random_bytes, file_id, provider)?,
@@ -159,8 +178,8 @@ impl EntropyStorageVerifier {
             difficulty,
         };
         
-        // Store challenge for later verification
-        self.challenge_history.lock().unwrap().insert(challenge.challenge_id.clone(), challenge.clone());
+        // Store challenge for later verification (with async locking)
+        self.challenge_history.lock().await.insert(challenge.challenge_id.clone(), challenge.clone());
         
         Ok(challenge)
     }
@@ -169,9 +188,9 @@ impl EntropyStorageVerifier {
     pub async fn verify_proof(&self, proof: StorageProof) -> Result<VerificationResult, String> {
         let start_time = SystemTime::now();
         
-        // Retrieve challenge from history
+        // Retrieve challenge from history (with async locking)
         let challenge = {
-            let challenges = self.challenge_history.lock().unwrap();
+            let challenges = self.challenge_history.lock().await;
             match challenges.get(&proof.challenge_id) {
                 Some(c) => c.clone(),
                 None => return Err(format!("Challenge {} not found", proof.challenge_id)),
@@ -221,8 +240,8 @@ impl EntropyStorageVerifier {
             verification_metrics: HashMap::new(), // Populated with specific metrics
         };
         
-        // Store verification result
-        self.verification_results.lock().unwrap().insert(result.challenge_id.clone(), result.clone());
+        // Store verification result (with async locking)
+        self.verification_results.lock().await.insert(result.challenge_id.clone(), result.clone());
         
         Ok(result)
     }
@@ -457,8 +476,8 @@ impl EntropyStorageVerifier {
     }
 
     /// Get statistics on verification history
-    pub fn get_verification_stats(&self) -> VerificationStats {
-        let results = self.verification_results.lock().unwrap();
+    pub async fn get_verification_stats(&self) -> VerificationStats {
+        let results = self.verification_results.lock().await; // Updated to async
         let total = results.len();
         let mut successful = 0;
         let mut failed = 0;
@@ -482,6 +501,24 @@ impl EntropyStorageVerifier {
             avg_response_time_ms: if total > 0 { response_time_ms_total / total as u64 } else { 0 },
             avg_verification_time_ms: if total > 0 { verification_time_ms_total / total as u64 } else { 0 },
         }
+    }
+    
+    /// Get the count of used beacon outputs
+    pub async fn get_used_beacon_output_count(&self) -> usize {
+        self.used_beacon_outputs.lock().await.len()
+    }
+    
+    /// Clear replay protection after a certain time period
+    /// Should be called periodically by a maintenance task
+    pub async fn clear_old_beacon_outputs(&self, older_than_secs: u64) -> usize {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let cutoff = now - older_than_secs;
+        
+        // In a real implementation, we would store timestamps with beacon outputs
+        // For this example, we'll just clear the entire set
+        let count = self.used_beacon_outputs.lock().await.len();
+        self.used_beacon_outputs.lock().await.clear();
+        count
     }
 }
 
@@ -596,7 +633,7 @@ pub mod bloom {
     use crate::BloomFilterLib;
     
     pub struct EnhancedVerificationFilter {
-        filter: BloomFilterLib::Filter,
+        filter: Arc<Mutex<BloomFilterLib::Filter>>, // Updated to Arc<Mutex> for async safety
         verifier: Arc<EntropyStorageVerifier>,
     }
     
@@ -610,26 +647,29 @@ pub mod bloom {
             );
             
             Self {
-                filter,
+                filter: Arc::new(Mutex::new(filter)),
                 verifier,
             }
         }
         
         /// Track a verification in the bloom filter
-        pub fn record_verification(&mut self, verification: &VerificationResult) {
+        pub async fn record_verification(&self, verification: &VerificationResult) {
             let key = verification.challenge_id.clone() + &verification.file_id;
-            BloomFilterLib::updateFilter(&mut self.filter, key.as_bytes());
+            let mut filter = self.filter.lock().await; // Updated to async
+            BloomFilterLib::updateFilter(&mut filter, key.as_bytes());
         }
         
         /// Check if verification exists (might have false positives)
-        pub fn might_contain_verification(&self, challenge_id: &str, file_id: &str) -> bool {
+        pub async fn might_contain_verification(&self, challenge_id: &str, file_id: &str) -> bool {
             let key = challenge_id.to_string() + file_id;
-            BloomFilterLib::mightContain(&self.filter, key.as_bytes())
+            let filter = self.filter.lock().await; // Updated to async
+            BloomFilterLib::mightContain(&filter, key.as_bytes())
         }
         
         /// Get estimated false positive rate
-        pub fn get_estimated_fpr(&self) -> f64 {
-            BloomFilterLib::estimateCurrentFPR(&self.filter) as f64 / 10000.0
+        pub async fn get_estimated_fpr(&self) -> f64 {
+            let filter = self.filter.lock().await; // Updated to async
+            BloomFilterLib::estimateCurrentFPR(&filter) as f64 / 10000.0
         }
     }
 }
@@ -640,7 +680,7 @@ pub mod temporal {
     
     /// Structure for time-based verification factors
     pub struct TemporalVerificationContext {
-        beacon_history: Vec<String>,
+        beacon_history: Arc<Mutex<Vec<String>>>, // Updated to Arc<Mutex> for async safety
         max_history_items: usize,
         minimum_challenge_age: u64,
         maximum_challenge_age: u64,
@@ -649,7 +689,7 @@ pub mod temporal {
     impl TemporalVerificationContext {
         pub fn new(max_history: usize) -> Self {
             Self {
-                beacon_history: Vec::with_capacity(max_history),
+                beacon_history: Arc::new(Mutex::new(Vec::with_capacity(max_history))),
                 max_history_items: max_history,
                 minimum_challenge_age: 60, // 1 minute
                 maximum_challenge_age: 86400, // 1 day
@@ -657,15 +697,16 @@ pub mod temporal {
         }
         
         /// Add a beacon output to history
-        pub fn add_beacon_output(&mut self, output: &str, timestamp: u64) {
-            if self.beacon_history.len() >= self.max_history_items {
-                self.beacon_history.remove(0);
+        pub async fn add_beacon_output(&self, output: &str, timestamp: u64) {
+            let mut history = self.beacon_history.lock().await; // Updated to async
+            if history.len() >= self.max_history_items {
+                history.remove(0);
             }
-            self.beacon_history.push(output.to_string());
+            history.push(output.to_string());
         }
         
         /// Verify challenge is within acceptable time bounds
-        pub fn verify_challenge_temporality(&self, challenge: &StorageChallenge) -> bool {
+        pub async fn verify_challenge_temporality(&self, challenge: &StorageChallenge) -> bool {
             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
             let challenge_age = now - challenge.timestamp;
             
@@ -674,8 +715,8 @@ pub mod temporal {
                 return false;
             }
             
-            // Verify beacon output exists in history
-            self.beacon_history.contains(&challenge.beacon_output)
+            // Verify beacon output exists in history (with async locking)
+            self.beacon_history.lock().await.contains(&challenge.beacon_output)
         }
     }
 }

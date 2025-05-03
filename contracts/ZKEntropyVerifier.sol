@@ -27,6 +27,7 @@ contract ZKEntropyVerifier is
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
     bytes32 public constant UPDATER_ROLE = keccak256("UPDATER_ROLE");
     bytes32 public constant BEACON_ROLE = keccak256("BEACON_ROLE");
+    bytes32 public constant MULTI_SIG_ROLE = keccak256("MULTI_SIG_ROLE"); // For multi-sig operations
     
     // Constants for entropy scoring
     uint256 public constant ENTROPY_MIN_SCORE = 100;
@@ -45,6 +46,36 @@ contract ZKEntropyVerifier is
     mapping(bytes32 => bool) public usedCommitments;
     mapping(bytes32 => uint256) public entropyScores;
     mapping(bytes32 => uint8) public entropyTiers;
+    
+    // Multi-sig zkVerifier change proposal
+    struct VerifierChangeProposal {
+        address proposedVerifier;
+        uint256 proposedAt;
+        uint256 approvalCount;
+        uint256 requiredApprovals;
+        uint256 timelock;
+        bool executed;
+        mapping(address => bool) hasApproved;
+    }
+    VerifierChangeProposal public verifierChangeProposal;
+    uint256 public verifierChangeTimelockPeriod = 2 days;
+    uint256 public requiredApprovals = 3;
+    
+    // Staking and slashing
+    mapping(address => uint256) public stakedAmount;
+    mapping(address => uint256) public lastVerificationTime; // Track verification timing for withdrawal cooldown
+    uint256 public requiredStake = 0.1 ether;
+    uint256 public slashAmount = 0.01 ether;
+    uint256 public stakeCooldownPeriod = 1 days; // Cooldown period before withdrawal
+    
+    // Manual verification
+    mapping(bytes32 => bool) public manuallyApproved;
+    mapping(bytes32 => uint256) public manualApprovalsCount;
+    mapping(bytes32 => mapping(address => bool)) public manualApprovals; // Track per-admin approvals
+    uint256 public requiredManualApprovals = 2;
+    
+    // Context for replay protection
+    uint256 public contextId;
     
     // Configuration parameters
     struct VerificationParams {
@@ -65,6 +96,15 @@ contract ZKEntropyVerifier is
     event ZKVerifierUpdated(address oldVerifier, address newVerifier);
     event VerificationParamsUpdated();
     event QualityAssessmentComplete(bytes32 indexed commitment, uint256 shannonEntropy, uint256 minEntropy);
+    event VerifierChangeProposed(address indexed proposer, address newVerifier);
+    event VerifierChangeApproved(address indexed approver, address newVerifier);
+    event VerifierChangeExecuted(address oldVerifier, address newVerifier);
+    event StakeAdded(address indexed staker, uint256 amount);
+    event StakeWithdrawn(address indexed staker, uint256 amount);
+    event Slashed(address indexed staker, uint256 amount, string reason);
+    event ManualVerificationRequested(address indexed requester, bytes32 commitment);
+    event ManualVerificationApproved(address indexed approver, bytes32 commitment);
+    event ContextUpdated(uint256 oldContext, uint256 newContext);
     
     // Errors
     error InvalidProof();
@@ -75,6 +115,16 @@ contract ZKEntropyVerifier is
     error InvalidScoreThreshold();
     error InvalidEntropy();
     error TimelockNotSatisfied(uint256 current, uint256 required);
+    error InsufficientStake(uint256 required, uint256 provided);
+    error NoActiveProposal();
+    error AlreadyApproved();
+    error TimelockNotExpired(uint256 current, uint256 required);
+    error InsufficientApprovals(uint256 current, uint256 required);
+    error InvalidContext(uint256 expected, uint256 provided);
+    error BatchSizeMismatch();
+    error ProofTooShort();
+    error ProofTooLong();
+    error InvalidProofFormat();
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -118,6 +168,34 @@ contract ZKEntropyVerifier is
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
         _grantRole(ADMIN_ROLE, msg.sender);
         _grantRole(UPDATER_ROLE, msg.sender);
+
+        // Initialize context ID with a unique value
+        contextId = uint256(keccak256(abi.encodePacked(block.chainid, address(this), block.timestamp)));
+    }
+
+    /**
+     * @notice Add stake to participate in entropy verification
+     * @dev Required to submit entropy to prevent spam and enable slashing
+     */
+    function addStake() external payable {
+        stakedAmount[msg.sender] += msg.value;
+        emit StakeAdded(msg.sender, msg.value);
+    }
+    
+    /**
+     * @notice Withdraw staked amount
+     * @param amount Amount to withdraw
+     */
+    function withdrawStake(uint256 amount) external {
+        require(stakedAmount[msg.sender] >= amount, "Insufficient balance");
+        require(block.timestamp > lastVerificationTime[msg.sender] + stakeCooldownPeriod, "Cooldown period active");
+        
+        stakedAmount[msg.sender] -= amount;
+        
+        (bool success, ) = msg.sender.call{value: amount}("");
+        require(success, "Transfer failed");
+        
+        emit StakeWithdrawn(msg.sender, amount);
     }
 
     /**
@@ -125,17 +203,33 @@ contract ZKEntropyVerifier is
      * @dev Validates that the entropy meets quality thresholds without revealing the value
      * @param entropyCommitment Commitment to the entropy value (hash of entropy)
      * @param zkProof Zero-knowledge proof that entropy meets quality criteria
+     * @param proofContext Context ID to prevent replay attacks
      * @return valid Whether the proof is valid
      * @return entropyScore Quality score of the entropy (0-1000)
      */
     function verifyZKEntropyProof(
         bytes32 entropyCommitment,
-        bytes calldata zkProof
+        bytes calldata zkProof,
+        uint256 proofContext
     ) external whenNotPaused returns (bool valid, uint256 entropyScore) {
         if (entropyCommitment == bytes32(0)) revert InvalidCommitment();
         if (usedCommitments[entropyCommitment]) revert CommitmentAlreadyUsed();
+        if (stakedAmount[msg.sender] < requiredStake) revert InsufficientStake(requiredStake, stakedAmount[msg.sender]);
+        if (proofContext != contextId) revert InvalidContext(contextId, proofContext);
         
         totalContributions++;
+        
+        // Check if manually approved
+        if (manuallyApproved[entropyCommitment]) {
+            usedCommitments[entropyCommitment] = true;
+            entropyScore = minRequiredScore; // Assign minimum acceptable score
+            entropyScores[entropyCommitment] = entropyScore;
+            entropyTiers[entropyCommitment] = determineEntropyTier(entropyScore);
+            successfulVerifications++;
+            
+            emit EntropyVerified(entropyCommitment, entropyScore, entropyTiers[entropyCommitment]);
+            return (true, entropyScore);
+        }
         
         // Parse ZK proof components
         (
@@ -150,6 +244,13 @@ contract ZKEntropyVerifier is
         if (!proofValid) {
             failedVerifications++;
             emit VerificationFailed(entropyCommitment, "Invalid ZK proof");
+            
+            // Slash for invalid proof
+            if (slashAmount > 0 && stakedAmount[msg.sender] >= slashAmount) {
+                stakedAmount[msg.sender] -= slashAmount;
+                emit Slashed(msg.sender, slashAmount, "Invalid ZK proof");
+            }
+            
             return (false, 0);
         }
         
@@ -187,6 +288,13 @@ contract ZKEntropyVerifier is
         if (entropyScore < minRequiredScore) {
             failedVerifications++;
             emit VerificationFailed(entropyCommitment, "Score below threshold");
+            
+            // Slash for low quality entropy
+            if (slashAmount > 0 && stakedAmount[msg.sender] >= slashAmount) {
+                stakedAmount[msg.sender] -= slashAmount;
+                emit Slashed(msg.sender, slashAmount, "Entropy score below threshold");
+            }
+            
             revert ScoreTooLow(entropyScore, minRequiredScore);
         }
         
@@ -211,7 +319,12 @@ contract ZKEntropyVerifier is
         emit EntropyVerified(entropyCommitment, entropyScore, tier);
         emit QualityAssessmentComplete(entropyCommitment, shannonEntropy, minEntropy);
         
-        return (true, entropyScore);
+        // If verification is successful, update last verification time
+        if (valid) {
+            lastVerificationTime[msg.sender] = block.timestamp;
+        }
+        
+        return (valid, entropyScore);
     }
 
     /**
@@ -297,7 +410,12 @@ contract ZKEntropyVerifier is
         uint256[2] memory c,
         uint256[4] memory inputs
     ) {
-        require(zkProof.length >= 256, "Invalid proof length");
+        // Enhanced validation
+        if (zkProof.length < 384) revert ProofTooShort();
+        if (zkProof.length > 416) revert ProofTooLong(); // Allow some extra data
+        
+        // Verify proof structure - check some basic validity conditions
+        // (would normally check if points are on curve, but that's complex)
         
         // Extract components using assembly for efficiency
         assembly {
@@ -321,8 +439,165 @@ contract ZKEntropyVerifier is
             mstore(add(inputs, 64), calldataload(add(zkProof.offset, 320)))
             mstore(add(inputs, 96), calldataload(add(zkProof.offset, 352)))
         }
+        
+        // Additional validation: verify inputs are within field modulus
+        // Groth16 operates in Fr field with modulus < 2^256
+        uint256 fieldModulus = 21888242871839275222246405745257275088548364400416034343698204186575808495617;
+        for (uint i = 0; i < 2; i++) {
+            if (a[i] >= fieldModulus) revert InvalidProofFormat();
+        }
+        for (uint i = 0; i < 2; i++) {
+            for (uint j = 0; j < 2; j++) {
+                if (b[i][j] >= fieldModulus) revert InvalidProofFormat();
+            }
+        }
+        for (uint i = 0; i < 2; i++) {
+            if (c[i] >= fieldModulus) revert InvalidProofFormat();
+        }
+        
+        return (a, b, c, inputs);
     }
     
+    /**
+     * @notice Batch verify multiple ZK proofs for efficient gas usage
+     * @param commitments Array of entropy commitments
+     * @param zkProofs Array of ZK proofs
+     * @param proofContext Context ID to prevent replay attacks
+     * @return validProofs Array indicating which proofs were valid
+     * @return scores Array of entropy scores for valid proofs
+     */
+    function batchVerifyZKProofs(
+        bytes32[] calldata commitments,
+        bytes[] calldata zkProofs,
+        uint256 proofContext
+    ) external whenNotPaused returns (
+        bool[] memory validProofs,
+        uint256[] memory scores
+    ) {
+        if (commitments.length != zkProofs.length) revert BatchSizeMismatch();
+        if (commitments.length > 10) revert BatchTooLarge();
+        if (proofContext != contextId) revert InvalidContext(contextId, proofContext);
+        
+        // Track gas consumption to prevent excessive usage
+        uint256 gasAtStart = gasleft();
+        
+        validProofs = new bool[](commitments.length);
+        scores = new uint256[](commitments.length);
+        
+        for (uint256 i = 0; i < commitments.length; i++) {
+            // Skip if insufficient stake
+            if (stakedAmount[msg.sender] < requiredStake) {
+                continue;
+            }
+            
+            // Skip already used commitments
+            if (usedCommitments[commitments[i]]) {
+                continue;
+            }
+            
+            totalContributions++;
+            
+            // Check if manually approved
+            if (manuallyApproved[commitments[i]]) {
+                usedCommitments[commitments[i]] = true;
+                scores[i] = minRequiredScore;
+                entropyScores[commitments[i]] = scores[i];
+                entropyTiers[commitments[i]] = determineEntropyTier(scores[i]);
+                validProofs[i] = true;
+                successfulVerifications++;
+                emit EntropyVerified(commitments[i], scores[i], entropyTiers[commitments[i]]);
+                continue;
+            }
+            
+            try this.verifyIndividualProof(commitments[i], zkProofs[i]) returns (bool isValid, uint256 score) {
+                if (isValid) {
+                    usedCommitments[commitments[i]] = true;
+                    entropyScores[commitments[i]] = score;
+                    entropyTiers[commitments[i]] = determineEntropyTier(score);
+                    validProofs[i] = true;
+                    scores[i] = score;
+                    successfulVerifications++;
+                    emit EntropyVerified(commitments[i], score, entropyTiers[commitments[i]]);
+                } else {
+                    failedVerifications++;
+                }
+            } catch {
+                failedVerifications++;
+            }
+        }
+        
+        // If any verification was successful, update last verification time
+        for (uint256 i = 0; i < validProofs.length; i++) {
+            if (validProofs[i]) {
+                lastVerificationTime[msg.sender] = block.timestamp;
+                break; // Only need to set once
+            }
+        }
+        
+        // Ensure batch verification doesn't consume excessive gas
+        require(gasAtStart - gasleft() < 5_000_000, "Gas limit exceeded");
+        
+        return (validProofs, scores);
+    }
+    
+    /**
+     * @notice Helper function for batch verification that validates a single proof
+     * @dev This is internal logic separated out for cleaner error handling in batch verification
+     * @param commitment Entropy commitment
+     * @param zkProof ZK proof
+     * @return isValid Whether the proof is valid
+     * @return score Entropy score
+     */
+    function verifyIndividualProof(
+        bytes32 commitment, 
+        bytes calldata zkProof
+    ) external view returns (bool isValid, uint256 score) {
+        // Only allow this contract to call itself
+        require(msg.sender == address(this), "External calls not allowed");
+        
+        // Parse ZK proof
+        (
+            uint256[2] memory a,
+            uint256[2][2] memory b,
+            uint256[2] memory c,
+            uint256[4] memory publicInputs
+        ) = parseZkProof(zkProof);
+        
+        // Verify the proof matches the commitment
+        if (bytes32(publicInputs[0]) != commitment) {
+            return (false, 0);
+        }
+        
+        // Verify the proof
+        bool proofValid = zkVerifier.verifyProof(a, b, c, publicInputs);
+        if (!proofValid) {
+            return (false, 0);
+        }
+        
+        // Extract and validate entropy metrics
+        uint256 shannonEntropy = publicInputs[1];
+        uint256 minEntropy = publicInputs[2];
+        
+        if (shannonEntropy < params.minShannonEntropy || minEntropy < params.minMinEntropy) {
+            return (false, 0);
+        }
+        
+        // Calculate score
+        score = calculateEntropyScore(shannonEntropy, minEntropy, commitment);
+        
+        if (score < minRequiredScore) {
+            return (false, score);
+        }
+        
+        // Check tier if required
+        uint8 tier = determineEntropyTier(score);
+        if (params.requireHighTierEntropy && tier < 2) {
+            return (false, score);
+        }
+        
+        return (true, score);
+    }
+
     /**
      * @notice Check if an entropy commitment has been verified
      * @param commitment The entropy commitment to check
@@ -361,17 +636,172 @@ contract ZKEntropyVerifier is
         return (total, successful, failed, successRate);
     }
 
+    /**
+     * @notice Request manual verification for a commitment when ZK verification fails
+     * @param commitment The entropy commitment to verify manually
+     */
+    function requestManualVerification(bytes32 commitment) external {
+        if (usedCommitments[commitment]) revert CommitmentAlreadyUsed();
+        emit ManualVerificationRequested(msg.sender, commitment);
+    }
+    
+    /**
+     * @notice Approve a manual verification request
+     * @param commitment The entropy commitment to approve
+     */
+    function approveManualVerification(bytes32 commitment) external onlyRole(ADMIN_ROLE) {
+        if (usedCommitments[commitment]) revert CommitmentAlreadyUsed();
+        if (manualApprovals[commitment][msg.sender]) revert AlreadyApproved();
+        
+        // Mark this admin's approval
+        manualApprovals[commitment][msg.sender] = true;
+        manualApprovalsCount[commitment]++;
+        
+        emit ManualVerificationApproved(msg.sender, commitment);
+        
+        // If reached required approvals, mark as manually approved
+        if (manualApprovalsCount[commitment] >= requiredManualApprovals) {
+            manuallyApproved[commitment] = true;
+        }
+    }
+    
+    /**
+     * @notice Update the context ID to prevent replay attacks across different epochs/deployments
+     * @dev This can be called periodically to refresh the context
+     */
+    function updateContext() external onlyRole(ADMIN_ROLE) {
+        uint256 oldContext = contextId;
+        contextId = uint256(keccak256(abi.encodePacked(block.chainid, address(this), block.timestamp)));
+        emit ContextUpdated(oldContext, contextId);
+    }
+
+    // --- Multi-sig verifier update ---
+    
+    /**
+     * @notice Propose a new ZK verifier contract (requires multi-sig)
+     * @param _newVerifier Address of the proposed new verifier
+     */
+    function proposeVerifierChange(address _newVerifier) external onlyRole(MULTI_SIG_ROLE) {
+        if (_newVerifier == address(0)) revert ZeroAddress();
+        
+        // Clear existing approvals for all members with MULTI_SIG_ROLE
+        address[] memory approvers = getRoleMembers(MULTI_SIG_ROLE);
+        for (uint i = 0; i < approvers.length; i++) {
+            verifierChangeProposal.hasApproved[approvers[i]] = false;
+        }
+        
+        // Reset proposal fields
+        delete verifierChangeProposal.proposedVerifier;
+        delete verifierChangeProposal.proposedAt;
+        delete verifierChangeProposal.approvalCount;
+        delete verifierChangeProposal.executed;
+        
+        // Create new proposal
+        verifierChangeProposal.proposedVerifier = _newVerifier;
+        verifierChangeProposal.proposedAt = block.timestamp;
+        verifierChangeProposal.requiredApprovals = requiredApprovals;
+        verifierChangeProposal.timelock = verifierChangeTimelockPeriod;
+        
+        // Auto-approve by proposer
+        verifierChangeProposal.hasApproved[msg.sender] = true;
+        verifierChangeProposal.approvalCount = 1;
+        
+        emit VerifierChangeProposed(msg.sender, _newVerifier);
+    }
+    
+    /**
+     * @notice Approve a verifier change proposal
+     */
+    function approveVerifierChange() external onlyRole(MULTI_SIG_ROLE) {
+        if (verifierChangeProposal.proposedVerifier == address(0)) revert NoActiveProposal();
+        if (verifierChangeProposal.hasApproved[msg.sender]) revert AlreadyApproved();
+        
+        verifierChangeProposal.hasApproved[msg.sender] = true;
+        verifierChangeProposal.approvalCount++;
+        
+        emit VerifierChangeApproved(msg.sender, verifierChangeProposal.proposedVerifier);
+    }
+    
+    /**
+     * @notice Execute a verifier change after timelock and sufficient approvals
+     */
+    function executeVerifierChange() external onlyRole(MULTI_SIG_ROLE) {
+        if (verifierChangeProposal.proposedVerifier == address(0)) revert NoActiveProposal();
+        if (verifierChangeProposal.executed) revert AlreadyApproved();
+        
+        // Check timelock
+        if (block.timestamp < verifierChangeProposal.proposedAt + verifierChangeProposal.timelock) {
+            revert TimelockNotExpired(
+                block.timestamp, 
+                verifierChangeProposal.proposedAt + verifierChangeProposal.timelock
+            );
+        }
+        
+        // Check approvals
+        if (verifierChangeProposal.approvalCount < verifierChangeProposal.requiredApprovals) {
+            revert InsufficientApprovals(
+                verifierChangeProposal.approvalCount,
+                verifierChangeProposal.requiredApprovals
+            );
+        }
+        
+        // Execute the change
+        address oldVerifier = address(zkVerifier);
+        zkVerifier = IGroth16Verifier(verifierChangeProposal.proposedVerifier);
+        verifierChangeProposal.executed = true;
+        
+        emit VerifierChangeExecuted(oldVerifier, verifierChangeProposal.proposedVerifier);
+    }
+
     // --- Admin functions ---
 
     /**
      * @notice Set the ZK verifier contract
      * @param _zkVerifier New verifier contract address
+     * @dev This function is retained for backwards compatibility but uses the multi-sig approach
      */
-    function setZkVerifier(address _zkVerifier) external onlyRole(ADMIN_ROLE) {
-        if (_zkVerifier == address(0)) revert ZeroAddress();
-        address oldVerifier = address(zkVerifier);
-        zkVerifier = IGroth16Verifier(_zkVerifier);
-        emit ZKVerifierUpdated(oldVerifier, _zkVerifier);
+    function setZkVerifier(address _zkVerifier) external pure {
+        // Remove backdoor and force usage of the multi-sig process
+        revert("Use multi-sig proposeVerifierChange instead");
+    }
+    
+    /**
+     * @notice Set multi-sig parameters for verifier change
+     * @param _requiredApprovals Number of approvals required
+     * @param _timelockPeriod Timelock period in seconds
+     */
+    function setMultiSigParameters(
+        uint256 _requiredApprovals, 
+        uint256 _timelockPeriod
+    ) external onlyRole(ADMIN_ROLE) {
+        require(_requiredApprovals > 0, "Approvals must be > 0");
+        requiredApprovals = _requiredApprovals;
+        verifierChangeTimelockPeriod = _timelockPeriod;
+    }
+    
+    /**
+     * @notice Set staking parameters including cooldown
+     * @param _requiredStake Amount required to stake for verification
+     * @param _slashAmount Amount to slash for invalid submissions
+     * @param _cooldownPeriod Time required between verification and withdrawal
+     */
+    function setStakingParameters(
+        uint256 _requiredStake, 
+        uint256 _slashAmount,
+        uint256 _cooldownPeriod
+    ) external onlyRole(ADMIN_ROLE) {
+        requiredStake = _requiredStake;
+        slashAmount = _slashAmount;
+        stakeCooldownPeriod = _cooldownPeriod;
+    }
+    
+    /**
+     * @notice Set manual verification parameters
+     * @param _requiredApprovals Number of approvals required for manual verification
+     */
+    function setManualVerificationParameters(uint256 _requiredApprovals) external onlyRole(ADMIN_ROLE) {
+        require(_requiredApprovals > 0, "Approvals must be > 0");
+        requiredManualApprovals = _requiredApprovals;
     }
     
     /**

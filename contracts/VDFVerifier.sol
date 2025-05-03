@@ -10,6 +10,7 @@ contract VDFVerifier {
     // VDF parameters
     uint256 public difficulty;        // Number of iterations required (must be >= minDifficulty)
     uint256 public minTimeSeconds;    // Minimum wall-clock time expected between challenge and solution
+    uint256 public maxChallengeWindow; // Maximum time window for challenge validity
     
     // Quantum resistance parameters
     uint16 private constant QR_HASH_ITERATIONS = 3;  // Gas-optimized number of iterations
@@ -20,12 +21,15 @@ contract VDFVerifier {
 
     event ChallengeGenerated(bytes32 indexed challenge, uint256 issuedAt);
     event VDFVerified(bytes32 indexed challenge, bool success, uint256 verifiedAt);
+    event ChallengeExpired(bytes32 indexed challenge, uint256 expiryTime);
     
-    constructor(uint256 _difficulty, uint256 _minTimeSeconds) {
+    constructor(uint256 _difficulty, uint256 _minTimeSeconds, uint256 _maxChallengeWindow) {
         require(_difficulty > 0, "VDFVerifier: difficulty must be > 0");
         require(_minTimeSeconds > 0, "VDFVerifier: minTime must be > 0");
+        require(_maxChallengeWindow > _minTimeSeconds, "VDFVerifier: maxWindow must be > minTime");
         difficulty = _difficulty;
         minTimeSeconds = _minTimeSeconds;
+        maxChallengeWindow = _maxChallengeWindow;
     }
     
     /**
@@ -63,6 +67,9 @@ contract VDFVerifier {
 
         // Ensure minimum time has passed
         require(block.timestamp >= issuedAt + minTimeSeconds, "VDFVerifier: too early");
+        
+        // Ensure challenge hasn't expired
+        require(block.timestamp <= issuedAt + maxChallengeWindow, "VDFVerifier: challenge expired");
 
         // Recompute hash chain: starting from challenge, hash N times
         bytes32 current = challenge;
@@ -71,6 +78,9 @@ contract VDFVerifier {
         }
 
         valid = (current == solution);
+
+        // Prevent challenge replay by deleting the timestamp
+        delete challengeTimestamp[challenge];
 
         emit VDFVerified(challenge, valid, block.timestamp);
 
@@ -93,5 +103,40 @@ contract VDFVerifier {
         }
         
         return h;
+    }
+    
+    /**
+     * @notice Check if a challenge has expired and can be cleaned up
+     * @param challenge The challenge to check
+     * @return expired Whether the challenge has expired
+     */
+    function isChallengeExpired(bytes32 challenge) external view returns (bool expired) {
+        uint256 issuedAt = challengeTimestamp[challenge];
+        if (issuedAt == 0) return false; // Challenge doesn't exist or was already used
+        
+        return block.timestamp > issuedAt + maxChallengeWindow;
+    }
+    
+    /**
+     * @notice Clean up expired challenges to free storage
+     * @param challenges Array of challenges to check and clean up
+     * @return cleaned Number of challenges cleaned up
+     */
+    function cleanupExpiredChallenges(bytes32[] calldata challenges) external returns (uint256 cleaned) {
+        cleaned = 0;
+        
+        for (uint256 i = 0; i < challenges.length; i++) {
+            bytes32 challenge = challenges[i];
+            uint256 issuedAt = challengeTimestamp[challenge];
+            
+            if (issuedAt > 0 && block.timestamp > issuedAt + maxChallengeWindow) {
+                delete challengeTimestamp[challenge];
+                cleaned++;
+                
+                emit ChallengeExpired(challenge, issuedAt + maxChallengeWindow);
+            }
+        }
+        
+        return cleaned;
     }
 }

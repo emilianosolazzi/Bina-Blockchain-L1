@@ -37,3 +37,19 @@ export function generateMerkleProof(
     proof,
   };
 }
+
+/**
+ * Validates a Merkle proof against a root and leaf
+ * @param root The Merkle root (hex string)
+ * @param leaf The leaf to verify (hex string)
+ * @param proof Array of proof elements (hex strings)
+ * @returns Boolean indicating whether the proof is valid
+ */
+export function validateMerkleProof(
+  root: string,
+  leaf: string,
+  proof: string[]
+): boolean {
+  const tree = new MerkleTree([], keccak256, { sortPairs: true });
+  return tree.verify(proof, leaf, root);
+}

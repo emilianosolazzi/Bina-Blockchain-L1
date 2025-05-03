@@ -18,6 +18,7 @@ import { StorageLib } from "./StorageLib.sol";
 import { RandomnessLib } from "./RandomnessLib.sol"; // <<< Added import
 import { GovernanceLib } from "./GovernanceLib.sol"; // <<< Added import (Needed for setting fee params)
 import { IERC20Upgradeable } from "@openzeppelin/contracts-upgradeable/token/ERC20/IERC20Upgradeable.sol"; // <<< Added import
+import { RateTypes } from "./RateTypes.sol"; // <<< Added import for rate limiting
 
 /**
  * @title TemporalGradientL2Beacon
@@ -111,6 +112,21 @@ contract TemporalGradientL2Beacon is
     bytes32 public latestL1Output;
     bytes32 public l2EntropyAccumulator;
 
+    // Rate limiting state variables
+    mapping(address => RateTypes.TokenBucket) private userRateBuckets;
+    RateTypes.TokenBucket private globalRateBucket;
+    RateTypes.SlidingWindow private globalWindow;
+    RateTypes.RateThresholds private rateThresholds;
+    RateTypes.RateStats private rateStats;
+    
+    // Rate limiting constants
+    uint16 private constant GLOBAL_WINDOW_SIZE = 1000;
+    uint256 private constant DEFAULT_WINDOW_DURATION = 3600; // 1 hour
+    uint256 private constant DEFAULT_SUBMISSION_COST = 1;
+    uint256 private constant DEFAULT_REVEAL_COST = 2;
+    uint256 private constant DEFAULT_COMMIT_RATE = 10; // Commits per user per minute
+    uint256 private constant DEFAULT_GLOBAL_RATE = 600; // Global commits per minute
+
     // Events
     event BeaconBlockMined(address indexed miner, bytes32 hmacOutput, uint256 reward, uint64 nonce, uint64 timestamp, uint8 poolId);
     event CommitmentSubmitted(address indexed miner, bytes32 commitHash, uint8 poolId);
@@ -132,6 +148,8 @@ contract TemporalGradientL2Beacon is
     event AutoSlashed(address indexed account, uint8 violationType, uint8 severity, uint256 amount);
     event AutoBurned(address indexed account, uint8 burnType, uint256 parameter, uint256 amount);
     event BeaconUpdated(bytes32 newEntropy);
+    event RateLimitExceeded(address indexed user, uint8 reason, uint256 currentRate, uint256 threshold);
+    event RateLimitThresholdsUpdated(uint256 warningThreshold, uint256 criticalThreshold);
 
     // Errors
     error ZeroToken();
@@ -167,6 +185,9 @@ contract TemporalGradientL2Beacon is
     error MinContributionsTooLow(); // <<< Added missing error from GovernanceLib usage
     error MaxLessThanMin(); // <<< Added missing error from GovernanceLib usage
     error MaxContributionsTooHigh(); // <<< Added missing error from GovernanceLib usage
+    error RateLimitExceededGlobal();
+    error RateLimitExceededUser(uint256 currentRate, uint256 limit);
+    error RateLimitThrottled(uint8 reason);
 
     /**
      * @notice Initializes the contract
@@ -283,6 +304,106 @@ contract TemporalGradientL2Beacon is
             _tgbtToken,
             _tstakeToken
         ));
+
+        // Initialize rate limiting structures
+        _initializeRateLimiting();
+    }
+
+    /**
+     * @notice Initialize rate limiting structures with default values
+     * @dev Called during contract initialization
+     */
+    function _initializeRateLimiting() internal {
+        // Initialize global token bucket
+        // 600 operations per minute, up to 1200 burst capacity
+        RateTypes.initTokenBucket(
+            globalRateBucket,
+            1200, // capacity
+            10,   // refill rate (10 tokens per second = 600 per minute)
+            1200  // initial tokens (start full)
+        );
+        
+        // Initialize global sliding window
+        RateTypes.initSlidingWindow(
+            globalWindow,
+            GLOBAL_WINDOW_SIZE,
+            DEFAULT_WINDOW_DURATION
+        );
+        
+        // Initialize rate thresholds
+        RateTypes.initRateThresholds(
+            rateThresholds,
+            500,   // warning threshold - operations per window
+            900    // critical threshold - operations per window
+        );
+        
+        // Complete the thresholds initialization with custom values
+        rateThresholds.banThreshold = 1000;          // Ban at 1000 ops per window
+        rateThresholds.throttleThreshold = 400;      // Start throttling at 400 ops
+        rateThresholds.individualUserLimit = 60;     // 60 ops per user per window
+        rateThresholds.globalLimit = 1200;           // 1200 ops global limit
+    }
+
+    /**
+     * @notice Update rate limiting thresholds (governance function)
+     * @param warningThreshold New warning threshold
+     * @param criticalThreshold New critical threshold
+     */
+    function updateRateLimitThresholds(
+        uint256 warningThreshold,
+        uint256 criticalThreshold
+    ) external onlyRole(GOVERNANCE_ROLE) {
+        require(warningThreshold < criticalThreshold, "Invalid thresholds");
+        
+        rateThresholds.warningThreshold = warningThreshold;
+        rateThresholds.criticalThreshold = criticalThreshold;
+        rateThresholds.banThreshold = criticalThreshold * 110 / 100;  // 110% of critical
+        rateThresholds.throttleThreshold = warningThreshold * 80 / 100; // 80% of warning
+        rateThresholds.individualUserLimit = warningThreshold / 10;   // 10% of warning per user
+        rateThresholds.globalLimit = criticalThreshold;              // Critical = global limit
+        
+        emit RateLimitThresholdsUpdated(warningThreshold, criticalThreshold);
+    }
+
+    /**
+     * @notice Check if a mining operation should be rate limited
+     * @param user The address of the user performing the operation
+     * @param operationCost The cost of the operation in rate limiting tokens
+     * @return shouldLimit Whether the operation should be limited 
+     * @return reason The reason code if limited (0=not limited)
+     */
+    function _checkRateLimit(address user, uint256 operationCost) internal returns (bool shouldLimit, uint8 reason) {
+        // Check global rate bucket
+        (bool globalAllowed, ) = RateTypes.consumeTokens(globalRateBucket, operationCost);
+        if (!globalAllowed) {
+            return (true, 4); // Global token bucket exhausted
+        }
+        
+        // Check user's rate bucket
+        RateTypes.TokenBucket storage userBucket = userRateBuckets[user];
+        
+        // Initialize user bucket if needed
+        if (userBucket.capacity == 0) {
+            RateTypes.initTokenBucket(
+                userBucket,
+                rateThresholds.individualUserLimit,  // capacity based on individual limit
+                1,                                  // refill 1 token per second
+                rateThresholds.individualUserLimit   // start full
+            );
+        }
+        
+        // Check user bucket
+        (bool userAllowed, ) = RateTypes.consumeTokens(userBucket, operationCost);
+        if (!userAllowed) {
+            return (true, 5); // User token bucket exhausted
+        }
+        
+        // Update global sliding window and stats
+        uint256 currentRate = RateTypes.recordOperation(globalWindow);
+        RateTypes.updateRateStats(rateStats, currentRate, rateThresholds);
+        
+        // Check for throttling based on current rate
+        return RateTypes.shouldThrottleOperation(rateStats, rateThresholds);
     }
 
     /* ========== MINING FUNCTIONS ========== */
@@ -302,6 +423,13 @@ contract TemporalGradientL2Beacon is
         uint256 deadline,
         bytes calldata signature
     ) external nonReentrant whenNotPaused {
+        // Apply rate limiting
+        (bool shouldThrottle, uint8 reason) = _checkRateLimit(msg.sender, DEFAULT_SUBMISSION_COST);
+        if (shouldThrottle) {
+            emit RateLimitExceeded(msg.sender, reason, rateStats.currentRate, rateThresholds.throttleThreshold);
+            revert RateLimitThrottled(reason);
+        }
+
         require(tstakeToken.balanceOf(msg.sender) >= REQUIRED_TSTAKE_AMOUNT, "InsufficientStake");
         require(poolId < poolCount && miningPools[poolId].active, "InvalidPoolId");
         require(block.timestamp <= deadline, "DeadlineExpired");
@@ -368,6 +496,13 @@ contract TemporalGradientL2Beacon is
         bytes32 secretValue,
         uint8 poolId
     ) external nonReentrant whenNotPaused {
+        // Apply rate limiting with higher cost for reveal operations
+        (bool shouldThrottle, uint8 reason) = _checkRateLimit(msg.sender, DEFAULT_REVEAL_COST);
+        if (shouldThrottle) {
+            emit RateLimitExceeded(msg.sender, reason, rateStats.currentRate, rateThresholds.throttleThreshold);
+            revert RateLimitThrottled(reason);
+        }
+
         _updateActivity(msg.sender);
         
         MiningLib.RevealParams memory params = MiningLib.RevealParams({
@@ -594,6 +729,13 @@ contract TemporalGradientL2Beacon is
         if (commitHashes.length != poolIds.length || 
             commitHashes.length != deadlines.length ||
             commitHashes.length != signatures.length) revert ArrayLengthMismatch();
+            
+        // Apply rate limiting with cost scaled by batch size
+        (bool shouldThrottle, uint8 reason) = _checkRateLimit(msg.sender, DEFAULT_SUBMISSION_COST * commitHashes.length);
+        if (shouldThrottle) {
+            emit RateLimitExceeded(msg.sender, reason, rateStats.currentRate, rateThresholds.throttleThreshold);
+            revert RateLimitThrottled(reason);
+        }
 
         for (uint256 i = 0; i < commitHashes.length; i++) {
             submitMiningCommitment(
@@ -1137,5 +1279,71 @@ contract TemporalGradientL2Beacon is
     function setL1BeaconAddress(address newL1) external onlyRole(GOVERNANCE_ROLE) {
         require(newL1 != address(0), "ZeroAddress");
         l1BeaconAddress = newL1;
+    }
+
+    /**
+     * @notice Get current rate statistics
+     * @return currentRate Current operations per window
+     * @return averageRate Average operations per window
+     * @return peakRate Peak operations ever recorded
+     * @return rateBps Current rate as basis points of capacity
+     * @return isWarning Whether the system is in warning state
+     * @return isCritical Whether the system is in critical state
+     */
+    function getRateStatistics() external view returns (
+        uint256 currentRate,
+        uint256 averageRate,
+        uint256 peakRate,
+        uint16 rateBps,
+        bool isWarning,
+        bool isCritical
+    ) {
+        return (
+            rateStats.currentRate,
+            rateStats.averageRate,
+            rateStats.peakRate,
+            rateStats.rateBps,
+            rateStats.rateExceedsWarning,
+            rateStats.rateExceedsCritical
+        );
+    }
+    
+    /**
+     * @notice Get user rate limit status
+     * @param user Address to check
+     * @return tokens Current token count
+     * @return capacity Maximum token capacity
+     * @return refillRate Tokens refilled per second
+     * @return isLimited Whether the user is currently rate limited
+     */
+    function getUserRateLimitStatus(address user) external view returns (
+        uint256 tokens,
+        uint256 capacity,
+        uint256 refillRate,
+        bool isLimited
+    ) {
+        RateTypes.TokenBucket storage bucket = userRateBuckets[user];
+        
+        // If bucket not initialized, return defaults
+        if (bucket.capacity == 0) {
+            return (
+                rateThresholds.individualUserLimit,
+                rateThresholds.individualUserLimit,
+                1,
+                false
+            );
+        }
+        
+        // Calculate current tokens with time refill
+        uint256 timePassed = block.timestamp - bucket.lastUpdate;
+        uint256 newTokens = timePassed * bucket.refillRate;
+        uint256 currentTokens = Math.min(bucket.capacity, bucket.tokens + newTokens);
+        
+        return (
+            currentTokens,
+            bucket.capacity,
+            bucket.refillRate,
+            currentTokens < DEFAULT_SUBMISSION_COST
+        );
     }
 }

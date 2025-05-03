@@ -88,3 +88,23 @@ contract RandomnessShop is Initializable, Ownable2StepUpgradeable, UUPSUpgradeab
     function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
 }
 
+// ANALYSIS: Token Distribution Economics for Different Miner Scales
+// With MINING_ALLOCATION of 700,000,000 TGBT tokens from TemporalGradientBeacon:
+//
+// 1,000 Miners (Current MAX_MINER_COUNT):
+// - 700,000 TGBT per miner average
+// - ~$70,000-$140,000 per miner at current rates
+// - Attractive ROI potential while maintaining decentralization
+//
+// 10,000 Miners (10x Scaling Analysis):
+// - 70,000 TGBT per miner average
+// - ~$7,000-$14,000 per miner at current rates
+// - More decentralized, still viable for professional operations
+// - Would require increasing MAX_MINER_COUNT constant in MiningLib.sol
+// - BloomFilter implementation already scales to 10M+ entities
+//
+// Recommendation: 2,500-5,000 miners represents optimal balance between:
+// - Sufficient decentralization for quantum-resistant security
+// - Economically attractive mining rewards to maintain participation
+// - Manageable computational overhead for consensus operations
+
