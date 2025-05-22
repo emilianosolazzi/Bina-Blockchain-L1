@@ -276,7 +276,7 @@ contract TemporalGradientBeacon is
      * @notice Submits a mining commitment using an EIP-712 signature
      * @param commitHash Hash of the commitment parameters (previousOutput, temporalSeed, nonce, signature, secretValue, miner)
      * @param poolId ID of the mining pool
-     * @param nonce Unique nonce for this commitment signature, obtained from the contract's `nonces` mapping for the miner
+     * @param nonce Unique nonce for this commitment signature, obtained from the contract's nonces mapping for the miner
      * @param deadline Unix timestamp after which the signature is invalid
      * @param signature EIP-712 signature of the MiningCommitment struct
      */
@@ -497,7 +497,7 @@ contract TemporalGradientBeacon is
         bytes32 anonymousId,
         bytes calldata proof
     ) external nonReentrant whenNotPaused {
-        // Use the existing mapping `usedAnonymousIds`
+        // Use the existing mapping usedAnonymousIds
         if (usedAnonymousIds[anonymousId]) revert DuplicateAnonymousId();
         usedAnonymousIds[anonymousId] = true;
 
