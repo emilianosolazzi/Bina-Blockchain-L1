@@ -291,7 +291,6 @@ library MiningLib {
     }
 
     function quantumResistantHash(bytes memory input) internal view returns (bytes32) {
-        if (input.length == 0) revert MalformedInput(SEVERITY_HIGH);
         bytes32 h = keccak256(input);
         for (uint256 i = 0; i < QR_HASH_ITERATIONS; i++) {
             h = keccak256(abi.encodePacked(h ^ bytes32(i + 1), block.timestamp));
@@ -745,3 +744,17 @@ library MiningLib {
      *    - Consider automatic scaling based on network load
      */
 }
+// Unique hybrid: Combines temporal (block-based) with spatial (HMAC-based) verification
+bytes32 hmacOutput = MiningLib.processMiningReveal(
+    params.previousOutput,    // Temporal chain
+    params.temporalSeed,      // Time-based entropy
+    params.nonce,            
+    params.signature,         // Spatial proof
+    params.secretValue,       // Miner's entropy
+    miningPools[params.poolId].targetDifficulty,
+    params.miner,
+    bloomFilter,             // Spatial uniqueness check
+    usedOutputs,            // Temporal uniqueness check
+    MiningLib.quantumResistantHash,
+    difficultyWeightFn
+);

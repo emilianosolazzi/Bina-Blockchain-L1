@@ -7,23 +7,11 @@ import { MerkleProofUpgradeable } from "@openzeppelin/contracts-upgradeable/util
 
 /**
  * @title RandomnessLib
- * @notice Library for secure randomness generation in Arbitrum L2 environment
- * @dev Optimized for Arbitrum's gas model and block execution environment
+ * @notice Core implementation of randomness generation and request handling
+ * @dev Provides a secure multi-source entropy based randomness system with request management
  */
 library RandomnessLib {
-    using EntropyUtils for bytes32;
-
-    // Constants tuned for Arbitrum's transaction throughput and confirmation times
-    uint256 internal constant MAX_BATCH_SIZE = 50; // Default batch size limit on Arbitrum (gas-optimized)
-    uint256 internal constant DEFAULT_MIN_CONTRIBUTIONS = 3; // Default minimum contributions
-    uint256 internal constant DEFAULT_MAX_CONTRIBUTIONS = 10; // Default maximum
-    uint256 internal constant DEFAULT_EXPIRY_BLOCKS = 50000; // ~1 week on Arbitrum (15s block time)
-    
-    // Arbitrum-specific gas optimizations
-    uint256 internal constant CACHE_LINE_SIZE = 32; // Optimize for 32-byte reads/writes
-    uint256 internal constant ARBITRUM_CALLDATA_COMPRESSION_THRESHOLD = 112; // Bytes before Arbitrum's brotli compression helps
-
-    // Errors optimized for Arbitrum's custom error encoding
+    // Custom errors for gas-efficient reverts
     error InvalidTGBTAddress();
     error TGBTTransferFailed();
     error InvalidRequestID();
@@ -37,185 +25,290 @@ library RandomnessLib {
     error BatchTooLarge();
     error ArrayLengthMismatch();
     error InvalidSigner();
-    error InvalidBatchSize();
-    error InvalidParameters();
-    error ContributionLimitExceeded();
+    error InsufficientFee();
+    error FeeNotSet();
 
-    // Structs for storage optimization on Arbitrum (packing for 32-byte slots)
-    struct RandomnessRequest {
-        address requester;
+    // Events
+    event RandomnessRequested(uint256 indexed requestId, address requester, bytes32 userSeed);
+    event EntropyContributed(uint256 indexed requestId, address contributor, bytes32 entropyHash);
+    event RandomnessFulfilled(uint256 indexed requestId, bytes32 result);
+    event EmergencyFulfilled(uint256 indexed requestId, address indexed caller, uint256 fee);
+    event ContributionParamsUpdated(uint256 minContributions, uint256 maxContributions);
+    event FeeParamsUpdated(uint256 baseEmergencyFee, uint256 feePerContributor);
+
+    /**
+     * @notice Contribution structure to track entropy providers
+     * @param contributor Address of the entropy provider
+     * @param entropyValue The entropy value submitted
+     * @param timestamp When the contribution was made
+     */
+    struct Contribution {
+        address contributor;
+        bytes32 entropyValue;
         uint64 timestamp;
+    }
+
+    /**
+     * @notice Structure for randomness requests
+     * @param requester Address that initiated the request
+     * @param userSeed Seed provided by the user
+     * @param requestBlock Block number when the request was made
+     * @param requestTimestamp Timestamp when the request was created
+     * @param contributions Array of entropy contributions
+     * @param fulfilled Whether the request has been fulfilled
+     * @param result The final random value (once fulfilled)
+     */
+    struct Request {
+        address requester;
+        bytes32 userSeed;
+        uint64 requestBlock;
+        uint64 requestTimestamp;
+        Contribution[] contributions;
         bool fulfilled;
         bytes32 result;
-        bytes32 userSeed;
-        // Maps are separate to optimize gas on Arbitrum
     }
 
-    // Context tracking map of contributor to bool to optimize gas costs
-    struct ContributionContext {
-        mapping(address => bool) hasContributed;
-        address[] contributors;
-        bytes32[] contributions;
-    }
-
-    // State struct with fee parameters designed for Arbitrum's fee model
+    /**
+     * @notice State structure for managing randomness generation
+     * @dev Used with the "using X for X.Y" pattern
+     * @param tgbtTokenAddress Address of the TGBT token contract
+     * @param baseEmergencyFee Base fee for emergency fulfillment
+     * @param feePerContributor Additional fee per missing contributor
+     * @param entropyAccumulator Running hash of combined entropy sources
+     * @param expiryBlocks Number of blocks before a request expires
+     * @param nextRequestId Counter for request IDs
+     * @param requests Mapping of request IDs to request data
+     * @param contributorToRequests Tracks which requests an address has contributed to
+     * @param minContributions Minimum required entropy contributions
+     * @param maxContributions Maximum allowed entropy contributions 
+     * @param maxBatchSize Maximum size for batch operations
+     */
     struct State {
         address tgbtTokenAddress;
         uint256 baseEmergencyFee;
         uint256 feePerContributor;
-        uint256 expiryBlocks;
+        bytes32 entropyAccumulator;
+        uint64 expiryBlocks;
+        uint256 nextRequestId;
+        mapping(uint256 => Request) requests;
+        mapping(address => mapping(uint256 => bool)) contributorToRequests;
         uint256 minContributions;
         uint256 maxContributions;
         uint256 maxBatchSize;
-        uint256 nextRequestId;
-        mapping(uint256 => RandomnessRequest) requests;
-        mapping(uint256 => ContributionContext) contributions;
     }
 
-    /* === Core Functions === */
-    
     /**
      * @notice Creates a new randomness request
-     * @dev Optimized for Arbitrum's sequencer and aggregator model
-     * @param state Library state
-     * @param requester User requesting randomness
-     * @param userSeed Seed provided by the requester
-     * @return requestId Unique identifier for the request
+     * @param state State struct storage reference
+     * @param requester Address requesting randomness
+     * @param userSeed Arbitrary seed provided by requester for additional entropy
+     * @return requestId The ID of the newly created request
      */
     function createRequest(
         State storage state,
         address requester,
         bytes32 userSeed
-    ) internal returns (uint256 requestId) {
-        if (requester == address(0)) revert InvalidRequest();
-
-        requestId = state.nextRequestId++;
+    ) internal returns (uint256) {
+        uint256 requestId = state.nextRequestId++;
         
-        state.requests[requestId] = RandomnessRequest({
-            requester: requester,
-            timestamp: uint64(block.timestamp), // Use uint64 for gas optimization on Arbitrum
-            fulfilled: false,
-            result: bytes32(0),
-            userSeed: userSeed
-        });
+        Request storage request = state.requests[requestId];
+        request.requester = requester;
+        request.userSeed = userSeed;
+        request.requestBlock = uint64(block.number);
+        request.requestTimestamp = uint64(block.timestamp);
+        request.fulfilled = false;
+        
+        // Update entropy accumulator with request data
+        state.entropyAccumulator = keccak256(
+            abi.encodePacked(
+                state.entropyAccumulator,
+                requester,
+                userSeed,
+                block.timestamp,
+                block.prevrandao
+            )
+        );
         
         return requestId;
     }
 
     /**
-     * @notice Adds entropy contribution to a pending request
-     * @param state Library state
-     * @param requestId Request to contribute to
+     * @notice Adds an entropy contribution to a pending request
+     * @param state State struct storage reference
+     * @param requestId ID of the request to contribute to
      * @param contributor Address providing entropy
-     * @param entropyContribution Contributor's entropy value
-     * @return shouldFulfill Whether the request has enough contributions to fulfill
+     * @param entropyValue Entropy contribution value
+     * @return shouldFulfill Whether the request should be fulfilled after this contribution
      */
     function addContribution(
         State storage state,
         uint256 requestId,
         address contributor,
-        bytes32 entropyContribution
+        bytes32 entropyValue
     ) internal returns (bool shouldFulfill) {
-        RandomnessRequest storage request = state.requests[requestId];
+        Request storage request = state.requests[requestId];
         
+        // Validate request
         if (request.requester == address(0)) revert RequestDoesNotExist();
         if (request.fulfilled) revert RequestFulfilled();
-        if (block.number > request.timestamp + state.expiryBlocks) revert RequestExpired();
+        if (block.number > request.requestBlock + state.expiryBlocks) revert RequestExpired();
         
-        ContributionContext storage context = state.contributions[requestId];
+        // Check if contributor already contributed
+        if (state.contributorToRequests[contributor][requestId]) revert AlreadyContributed();
         
-        if (context.hasContributed[contributor]) revert AlreadyContributed();
-        if (context.contributors.length >= state.maxContributions) revert MaxContributionsReached();
+        // Ensure we haven't reached max contributions
+        if (request.contributions.length >= state.maxContributions) revert MaxContributionsReached();
         
-        context.hasContributed[contributor] = true;
-        context.contributors.push(contributor);
-        context.contributions.push(entropyContribution);
+        // Record contribution
+        state.contributorToRequests[contributor][requestId] = true;
+        request.contributions.push(Contribution({
+            contributor: contributor,
+            entropyValue: entropyValue,
+            timestamp: uint64(block.timestamp)
+        }));
         
-        return context.contributors.length >= state.minContributions;
+        // Update entropy accumulator
+        state.entropyAccumulator = keccak256(
+            abi.encodePacked(
+                state.entropyAccumulator,
+                contributor,
+                entropyValue,
+                block.timestamp,
+                block.prevrandao
+            )
+        );
+        
+        // Check if we've reached the minimum contributions threshold
+        return (request.contributions.length >= state.minContributions);
     }
 
     /**
      * @notice Fulfills a randomness request once enough contributions are received
-     * @param state Library state
-     * @param requestId Request to fulfill
-     * @param historicalHash Additional entropy from beacon history
-     * @param entropyAccumulator Optional pre-accumulated entropy
-     * @return result The generated randomness
+     * @param state State struct storage reference  
+     * @param requestId ID of the request to fulfill
+     * @param historicalOutputsHash Hash of the beacon's historical outputs
+     * @param additionalEntropy Additional entropy source (if any)
+     * @return result The generated random value
      */
     function fulfillRequest(
         State storage state,
         uint256 requestId,
-        bytes32 historicalHash,
-        bytes32 entropyAccumulator
+        bytes32 historicalOutputsHash,
+        bytes32 additionalEntropy
     ) internal returns (bytes32 result) {
-        RandomnessRequest storage request = state.requests[requestId];
+        Request storage request = state.requests[requestId];
         
+        // Validate request
         if (request.requester == address(0)) revert RequestDoesNotExist();
         if (request.fulfilled) revert RequestFulfilled();
+        if (block.number > request.requestBlock + state.expiryBlocks) revert RequestExpired();
+        if (request.contributions.length < state.minContributions) revert InvalidRequest();
         
-        ContributionContext storage context = state.contributions[requestId];
-        if (context.contributors.length < state.minContributions) revert InvalidRequest();
-        
-        // Combine entropy sources with optimized gas operations for Arbitrum
-        bytes32 finalEntropy = combineEntropy(
-            request.userSeed,
-            historicalHash,
-            entropyAccumulator,
-            context.contributions,
-            block.prevrandao, // Use prevrandao on Arbitrum
-            block.number,
-            block.timestamp
+        // Generate the random value from multiple entropy sources
+        result = generateRandomValue(
+            state,
+            request,
+            historicalOutputsHash,
+            additionalEntropy
         );
         
-        // Set as fulfilled
+        // Mark as fulfilled and store result
         request.fulfilled = true;
-        request.result = finalEntropy;
+        request.result = result;
         
-        return finalEntropy;
+        return result;
     }
 
     /**
-     * @notice Emergency fulfillment for randomness with fee payment
-     * @dev Specially optimized for Arbitrum's fee structure
+     * @notice Retrieves the result of a fulfilled randomness request
+     * @param state State struct storage reference
+     * @param requestId ID of the request
+     * @return The generated random value
+     */
+    function getRandomness(State storage state, uint256 requestId) internal view returns (bytes32) {
+        Request storage request = state.requests[requestId];
+        
+        if (request.requester == address(0)) revert RequestDoesNotExist();
+        if (!request.fulfilled) revert RequestNotFulfilled();
+        
+        return request.result;
+    }
+
+    /**
+     * @notice Performs emergency fulfillment of a request for a fee
+     * @param state State struct storage reference
+     * @param requestId ID of the request to fulfill
+     * @param historicalOutputsHash Hash of beacon historical outputs
+     * @param additionalEntropy Additional entropy source
+     * @param entropyMerkleRoot Merkle root of entropy sources (if applicable)
+     * @param beaconAddress Address of the beacon contract
+     * @param tgbtToken TGBT token interface
+     * @param feePayer Address that will pay the emergency fee
+     * @return result The generated random value
      */
     function emergencyFulfill(
         State storage state,
         uint256 requestId,
-        bytes32 historicalHash,
-        bytes32 entropyAccumulator,
+        bytes32 historicalOutputsHash,
+        bytes32 additionalEntropy,
         bytes32 entropyMerkleRoot,
-        address receiver,
-        IERC20 tgbtToken,
-        address feePayingAccount
+        address beaconAddress,
+        IERC20Upgradeable tgbtToken,
+        address feePayer
     ) internal returns (bytes32 result) {
-        // Logic to calculate and collect fees based on Arbitrum's fee model
-        uint256 contributorCount = state.contributions[requestId].contributors.length;
-        uint256 feeAmount = state.baseEmergencyFee + (state.feePerContributor * contributorCount);
+        Request storage request = state.requests[requestId];
         
-        // Verify TGBT token address
-        if (address(tgbtToken) != state.tgbtTokenAddress) revert InvalidTGBTAddress();
+        // Validate request
+        if (request.requester == address(0)) revert RequestDoesNotExist();
+        if (request.fulfilled) revert RequestFulfilled();
         
-        // Transfer fee (optimized for Arbitrum's ERC20 handling)
-        bool feeTransferSuccess = tgbtToken.transferFrom(
-            feePayingAccount, 
-            receiver,
-            feeAmount
-        );
-        if (!feeTransferSuccess) revert TGBTTransferFailed();
+        // Calculate fee based on number of missing contributions
+        uint256 missingContributions = state.minContributions;
+        if (request.contributions.length < state.minContributions) {
+            missingContributions = state.minContributions - request.contributions.length;
+        } else {
+            missingContributions = 0;
+        }
         
-        // Generate and return result
-        return fulfillRequest(
+        uint256 fee = state.baseEmergencyFee + (missingContributions * state.feePerContributor);
+        
+        // Check if fee parameters are set
+        if (fee == 0) revert FeeNotSet();
+        
+        // Validate TGBT address
+        if (state.tgbtTokenAddress == address(0)) revert InvalidTGBTAddress();
+        
+        // Transfer fee from caller
+        bool success = tgbtToken.transferFrom(feePayer, beaconAddress, fee);
+        if (!success) revert TGBTTransferFailed();
+        
+        // Generate randomness using available entropy + additional sources
+        result = generateEmergencyRandomValue(
             state,
-            requestId,
-            historicalHash,
-            entropyMerkleRoot
+            request,
+            historicalOutputsHash,
+            additionalEntropy,
+            entropyMerkleRoot,
+            feePayer
         );
+        
+        // Mark request as fulfilled and store result
+        request.fulfilled = true;
+        request.result = result;
+        
+        emit EmergencyFulfilled(requestId, feePayer, fee);
+        
+        return result;
     }
 
-    /* === View Functions === */
-
     /**
-     * @notice Gets the state of a randomness request
+     * @notice Gets information about a randomness request
+     * @param state State struct storage reference
+     * @param requestId ID of the request
+     * @return requester Address that created the request
+     * @return timestamp Block timestamp when request was created
+     * @return fulfilled Whether the request has been fulfilled
+     * @return contributionsCount Number of entropy contributions
      */
     function getRequestState(
         State storage state,
@@ -226,94 +319,224 @@ library RandomnessLib {
         bool fulfilled,
         uint256 contributionsCount
     ) {
-        RandomnessRequest storage request = state.requests[requestId];
-        ContributionContext storage context = state.contributions[requestId];
+        Request storage request = state.requests[requestId];
+        
+        if (request.requester == address(0)) revert RequestDoesNotExist();
         
         return (
             request.requester,
-            request.timestamp,
+            request.requestTimestamp,
             request.fulfilled,
-            context.contributors.length
+            request.contributions.length
         );
     }
 
     /**
-     * @notice Gets the result of a fulfilled randomness request
+     * @notice Internal function to generate the final random value from all entropy sources
+     * @param state State struct storage reference
+     * @param request Request data  
+     * @param historicalOutputsHash Hash of beacon historical outputs
+     * @param additionalEntropy Additional entropy source
+     * @return result The generated random value
      */
-    function getRandomness(
+    function generateRandomValue(
         State storage state,
-        uint256 requestId
-    ) internal view returns (bytes32) {
-        RandomnessRequest storage request = state.requests[requestId];
+        Request storage request,
+        bytes32 historicalOutputsHash,
+        bytes32 additionalEntropy
+    ) private view returns (bytes32 result) {
+        // Combine all entropy sources
+        bytes memory combinedEntropy = abi.encodePacked(
+            // User-provided seed
+            request.userSeed,
+            
+            // Request metadata
+            request.requester,
+            request.requestBlock,
+            request.requestTimestamp,
+            
+            // External entropy sources
+            historicalOutputsHash,
+            state.entropyAccumulator,
+            additionalEntropy,
+            
+            // Block values for unpredictability
+            block.timestamp,
+            block.prevrandao,
+            blockhash(block.number - 1)
+        );
         
-        if (request.requester == address(0)) revert RequestDoesNotExist();
-        if (!request.fulfilled) revert RequestNotFulfilled();
-        
-        return request.result;
-    }
-
-    /* === Utility Functions === */
-
-    /**
-     * @notice Combines entropy from multiple sources using Arbitrum-optimized hashing
-     * @dev Special implementation optimized for Arbitrum's gas metering
-     */
-    function combineEntropy(
-        bytes32 userSeed,
-        bytes32 historicalHash,
-        bytes32 accumulator,
-        bytes32[] storage contributions,
-        bytes32 prevrandao,
-        uint256 blockNumber,
-        uint256 timestamp
-    ) private view returns (bytes32) {
-        // Arbitrum optimization: Use assembly for efficient hashing
-        assembly {
-            let dataLen := add(224, mul(contributions.length, 32))
-            let data := mload(0x40) // Get free memory pointer
-            
-            // Store parameters to memory (optimized for Arbitrum's memory pricing)
-            mstore(data, userSeed)
-            mstore(add(data, 32), historicalHash)
-            mstore(add(data, 64), accumulator)
-            mstore(add(data, 96), prevrandao)
-            mstore(add(data, 128), blockNumber)
-            mstore(add(data, 160), timestamp)
-            
-            // Store contribution count
-            mstore(add(data, 192), contributions.length)
-            
-            // Copy contributions (optimized for Arbitrum's memory access patterns)
-            let contribPtr := add(data, 224)
-            {
-                let i := 0
-                let storageSlot := contributions.slot
-                
-                for { } lt(i, contributions.length) { i := add(i, 1) } {
-                    let storageIndex := add(storageSlot, i)
-                    mstore(contribPtr, sload(storageIndex))
-                    contribPtr := add(contribPtr, 32)
-                }
-            }
-            
-            // Update free memory pointer
-            mstore(0x40, add(data, dataLen))
-            
-            // Compute hash - direct call to keccak256 precompile for gas optimization
-            let result := keccak256(data, dataLen)
-            
-            // Return result
-            mstore(0, result)
-            return(0, 32)
+        // Add all contributions
+        for (uint256 i = 0; i < request.contributions.length; i++) {
+            Contribution storage contribution = request.contributions[i];
+            combinedEntropy = abi.encodePacked(
+                combinedEntropy,
+                contribution.contributor,
+                contribution.entropyValue,
+                contribution.timestamp
+            );
         }
+        
+        // Apply multiple hashing rounds for improved security
+        bytes32 hash = keccak256(combinedEntropy);
+        
+        // Add quantum resistance with multiple rounds
+        for (uint256 i = 0; i < 3; i++) {
+            hash = keccak256(abi.encodePacked(hash, i));
+        }
+        
+        return hash;
     }
 
     /**
-     * @dev Returns the maximum historical block range that can be used in Arbitrum
-     * for secure randomness generation, accounting for Arbitrum's sequencer domain.
+     * @notice Internal function for emergency randomness generation with limited entropy
+     * @param state State struct storage reference
+     * @param request Request data
+     * @param historicalOutputsHash Hash of beacon historical outputs
+     * @param additionalEntropy Additional entropy source
+     * @param entropyMerkleRoot Merkle root of entropy sources (if applicable)
+     * @param emergencyCaller Address initiating emergency fulfillment
+     * @return result The generated random value
      */
-    function getArbitrumSafeHistoricalBlocks() internal view returns (uint256) {
-        return 6500; // ~1 day of Arbitrum blocks with 15s average block time
+    function generateEmergencyRandomValue(
+        State storage state,
+        Request storage request,
+        bytes32 historicalOutputsHash,
+        bytes32 additionalEntropy,
+        bytes32 entropyMerkleRoot,
+        address emergencyCaller
+    ) private view returns (bytes32 result) {
+        // Create entropy from available sources to ensure randomness
+        // Even in emergency mode with potentially fewer contributors
+        bytes memory combinedEntropy = abi.encodePacked(
+            // User-provided seed
+            request.userSeed,
+            
+            // Request metadata
+            request.requester,
+            request.requestBlock,
+            request.requestTimestamp,
+            
+            // External entropy sources
+            historicalOutputsHash,
+            state.entropyAccumulator,
+            additionalEntropy,
+            entropyMerkleRoot,
+            
+            // Block values for unpredictability
+            block.timestamp,
+            block.prevrandao,
+            blockhash(block.number - 1),
+            
+            // Emergency caller info
+            emergencyCaller
+        );
+        
+        // Add any existing contributions
+        for (uint256 i = 0; i < request.contributions.length; i++) {
+            Contribution storage contribution = request.contributions[i];
+            combinedEntropy = abi.encodePacked(
+                combinedEntropy,
+                contribution.contributor,
+                contribution.entropyValue,
+                contribution.timestamp
+            );
+        }
+        
+        // Apply multiple hashing rounds for improved security
+        bytes32 hash = keccak256(combinedEntropy);
+        
+        // Extra security rounds for emergency fulfillment
+        for (uint256 i = 0; i < 5; i++) {
+            hash = keccak256(abi.encodePacked(hash, i, block.prevrandao));
+        }
+        
+        return hash;
+    }
+
+    /**
+     * @notice Creates multiple randomness requests in a batch
+     * @param state State struct storage reference
+     * @param requester Address requesting randomness
+     * @param userSeeds Array of seeds for each request
+     * @return requestIds Array of request IDs
+     */
+    function batchCreateRequests(
+        State storage state,
+        address requester,
+        bytes32[] calldata userSeeds
+    ) internal returns (uint256[] memory requestIds) {
+        // Validate batch size
+        if (userSeeds.length == 0) revert InvalidRequest();
+        if (userSeeds.length > state.maxBatchSize) revert BatchTooLarge();
+        
+        requestIds = new uint256[](userSeeds.length);
+        
+        for (uint256 i = 0; i < userSeeds.length; i++) {
+            requestIds[i] = createRequest(state, requester, userSeeds[i]);
+        }
+        
+        return requestIds;
+    }
+
+    /**
+     * @notice Batch contribute entropy to multiple requests
+     * @param state State struct storage reference
+     * @param requestIds Array of request IDs
+     * @param entropyValues Array of entropy values
+     * @return fulfilledRequests Array indicating which requests are ready for fulfillment
+     */
+    function batchContribute(
+        State storage state,
+        uint256[] calldata requestIds,
+        bytes32[] calldata entropyValues
+    ) internal returns (bool[] memory fulfilledRequests) {
+        // Validate batch size and array lengths
+        if (requestIds.length == 0) revert InvalidRequest();
+        if (requestIds.length > state.maxBatchSize) revert BatchTooLarge();
+        if (requestIds.length != entropyValues.length) revert ArrayLengthMismatch();
+        
+        fulfilledRequests = new bool[](requestIds.length);
+        
+        for (uint256 i = 0; i < requestIds.length; i++) {
+            try this.addContribution(state, requestIds[i], msg.sender, entropyValues[i]) returns (bool shouldFulfill) {
+                fulfilledRequests[i] = shouldFulfill;
+            } catch {
+                // Skip this request if it fails (already contributed, expired, etc.)
+                fulfilledRequests[i] = false;
+            }
+        }
+        
+        return fulfilledRequests;
+    }
+
+    /**
+     * @notice Updates the entropy accumulator with a new value
+     * @param state State struct storage reference
+     * @param newEntropy New entropy to incorporate
+     */
+    function updateEntropyAccumulator(State storage state, bytes32 newEntropy) internal {
+        state.entropyAccumulator = keccak256(
+            abi.encodePacked(
+                state.entropyAccumulator,
+                newEntropy,
+                block.timestamp,
+                block.number,
+                block.prevrandao
+            )
+        );
+    }
+
+    /**
+     * @notice Gets the minimum and maximum contribution parameters
+     * @param state State struct storage reference
+     * @return minContributions Minimum required entropy contributions
+     * @return maxContributions Maximum allowed entropy contributions
+     */
+    function getContributionParams(
+        State storage state
+    ) internal view returns (uint256 minContributions, uint256 maxContributions) {
+        return (state.minContributions, state.maxContributions);
     }
 }
 
