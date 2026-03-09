@@ -1,0 +1,25 @@
+[package]
+name = "temporal-gradient-miner-installer"
+version = "0.1.0"
+edition = "2021"
+default-run = "tg-miner-installer"
+authors = ["Entropy Team"]
+description = "Bootstrap installer and config tool for the Temporal Gradient L2 miner"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "signal"] }
+temporal_gradient_core = { path = "../temporal_gradient_core" }
+tracing = "0.1"
+
+[[bin]]
+name = "tg-miner-installer"
+path = "src/main.rs"
+
+[[bin]]
+name = "temporal-gradient-miner"
+path = "src/bin/temporal-gradient-miner.rs"

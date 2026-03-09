@@ -3,5 +3,8 @@
         {
             "path": "."
         }
-    ]
+    ],
+    "settings": {
+        "wake.compiler.solc.remappings": []
+    }
 }
