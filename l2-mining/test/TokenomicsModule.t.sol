@@ -16,6 +16,7 @@ contract TokenomicsModuleTest is Test {
     MockProtocolToken internal token;
 
     address internal miner = vm.addr(0xBEEF);
+    address internal outsider = vm.addr(0xCAFE);
 
     function setUp() public {
         TemporalGradientCore coreImplementation = new TemporalGradientCore();
@@ -162,7 +163,9 @@ contract TokenomicsModuleTest is Test {
     }
 
     function testInactivityBurnAppliesAfterThirtyDays() public {
-        token.mint(miner, 100 ether);
+        bytes32 output = bytes32(type(uint256).max - 1_500);
+        tokenomics.onBlockMined(miner, output, 0, 1_000, 0, tokenomics.MINING_ALLOCATION());
+        token.mint(miner, 90 ether);
 
         vm.roll(block.number + 180_000);
         tokenomics.checkInactivity(miner);
@@ -171,5 +174,24 @@ contract TokenomicsModuleTest is Test {
 
         (uint256 lastActivity, ) = tokenomics.getAccountPenaltyState(miner);
         assertEq(lastActivity, block.number);
+    }
+
+    function testCheckInactivityRequiresBurnerRole() public {
+        core.revokeRole(tokenomics.BURNER_ROLE(), address(this));
+
+        vm.expectRevert(abi.encodeWithSelector(TokenomicsModule.UnauthorizedRole.selector, tokenomics.BURNER_ROLE(), address(this)));
+        tokenomics.checkInactivity(miner);
+    }
+
+    function testCheckInactivitySkipsUntrackedAccounts() public {
+        token.mint(miner, 100 ether);
+
+        vm.roll(block.number + 180_000);
+        tokenomics.checkInactivity(miner);
+
+        assertEq(token.balanceOf(miner), 100 ether);
+
+        (uint256 lastActivity, ) = tokenomics.getAccountPenaltyState(miner);
+        assertEq(lastActivity, 0);
     }
 }

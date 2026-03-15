@@ -1,20 +1,23 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import { ITemporalGradientCore } from "../interfaces/ITemporalGradientCore.sol";
 
-abstract contract ModuleBase is Initializable {
+abstract contract ModuleBase {
     bytes32 internal constant GOVERNANCE_ROLE = keccak256("GOVERNANCE_ROLE");
 
     ITemporalGradientCore public core;
+    bool private _moduleInitialized;
 
     error OnlyCore();
     error OnlyCoreOrModule();
     error OnlyGovernance();
     error SystemPaused();
+    error AlreadyInitialized();
 
-    function __ModuleBase_init(address coreAddress) internal onlyInitializing {
+    function __ModuleBase_init(address coreAddress) internal {
+        if (_moduleInitialized) revert AlreadyInitialized();
+        _moduleInitialized = true;
         core = ITemporalGradientCore(coreAddress);
     }
 

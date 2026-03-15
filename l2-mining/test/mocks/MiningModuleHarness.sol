@@ -15,6 +15,7 @@ contract MiningModuleHarness is MiningModule {
         uint8 poolId
     ) external whenSystemActive {
         _rateLimit().consumeOrRevert(msg.sender, 2, keccak256("MINING_REVEAL"));
+        if (stakeToken.balanceOf(msg.sender) < REQUIRED_TSTAKE_AMOUNT) revert InsufficientStake();
         if (poolId >= poolCount || !miningPools[poolId].active) revert InvalidPoolId();
 
         MiningLib.Commitment storage commitment = minerCommitments[msg.sender];
@@ -24,21 +25,32 @@ contract MiningModuleHarness is MiningModule {
         require(block.number <= commitment.timestamp + maxCommitmentAge, "CommitmentExpired");
         require(commitment.poolId == poolId, "InvalidPoolId");
 
-        bytes32 computedHash = keccak256(
-            abi.encodePacked(previousOutput, temporalSeed, nonce, signature, secretValue, msg.sender)
+        MiningLib.checkCommitmentValidity(
+            MiningLib.RevealParams({
+                miner: msg.sender,
+                previousOutput: previousOutput,
+                temporalSeed: temporalSeed,
+                nonce: nonce,
+                signature: signature,
+                secretValue: secretValue,
+                poolId: poolId
+            }),
+            commitment
         );
-        require(computedHash == commitment.commitHash, "InvalidCommitment");
 
         if (!_historyContains(previousOutput)) revert InvalidPreviousOutput();
 
         bytes32 hmacOutput = MiningLib.processMiningReveal(
-            previousOutput,
-            temporalSeed,
-            nonce,
-            signature,
-            secretValue,
+            MiningLib.RevealParams({
+                miner: msg.sender,
+                previousOutput: previousOutput,
+                temporalSeed: temporalSeed,
+                nonce: nonce,
+                signature: signature,
+                secretValue: secretValue,
+                poolId: poolId
+            }),
             miningPools[poolId].targetDifficulty,
-            msg.sender,
             bloomFilter,
             usedOutputs,
             _deterministicHash,

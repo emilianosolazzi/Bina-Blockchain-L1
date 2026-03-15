@@ -61,7 +61,6 @@ pub fn create_entropy_hash(material: &MiningMaterial) -> [u8; 32] {
             material.temporal_seed.as_slice(),
             &material.nonce.to_be_bytes(),
             material.miner_address.as_slice(),
-            material.time_based_entropy.as_slice(),
             material.secret_value.as_slice(),
         ]
         .concat(),
@@ -72,17 +71,25 @@ fn quantum_resistant_hash_inner(input: &[u8]) -> [u8; 32] {
     let mut h: [u8; 32] = contract_hash_message(input);
     for i in 0..QR_HASH_ITERATIONS {
         let mut xor_h = h;
-        xor_h[0] ^= i + 1;
+        // Solidity: h ^ bytes32(uint256(i+1))  — value lands at byte[31] (LSB)
+        xor_h[31] ^= i + 1;
         h = contract_hash_message(&xor_h);
-        let mut rotated = [0u8; 32];
-        for (idx, byte) in h.iter().enumerate() {
-            let left = (*byte as u32) << QR_HASH_ROTATION;
-            let right = (*byte as u32) >> (8 - QR_HASH_ROTATION);
-            rotated[idx] = ((left | right) & 0xFF) as u8;
-        }
-        h = rotated;
+        // 256-bit left rotation by QR_HASH_ROTATION bits to match Solidity:
+        //   h = bytes32((uint256(h) << 7) | (uint256(h) >> (256 - 7)));
+        h = rotate_256_left(h, QR_HASH_ROTATION as u32);
     }
     h
+}
+
+/// Left-rotate a 256-bit big-endian value by `bits` (must be < 8).
+/// Matches Solidity: `bytes32((uint256(h) << bits) | (uint256(h) >> (256 - bits)))`.
+fn rotate_256_left(input: [u8; 32], bits: u32) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    for i in 0..32 {
+        let next = (i + 1) % 32;
+        out[i] = (input[i] << bits) | (input[next] >> (8 - bits));
+    }
+    out
 }
 
 pub fn quantum_resistant_hash(

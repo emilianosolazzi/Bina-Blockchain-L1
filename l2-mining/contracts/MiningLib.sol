@@ -179,32 +179,17 @@ library MiningLib {
             p.nonce,
             p.signature,
             p.secretValue,
-            p.miner,
-            block.chainid,  // Add chainId for replay protection
-            address(this)   // Add contract address for domain separation
+            p.miner
         ));
         if (expected != c.commitHash) revert InvalidCommitment(SEVERITY_HIGH, ERROR_CATEGORY_INPUT);
     }
 
-    function processMiningReveal(
-        bytes32 previousOutput,   // Temporal: Links to previous output in chain
-        bytes memory temporalSeed, // Temporal: Time-based seed
-        uint64 nonce,
-        bytes memory signature,   // Spatial: Cryptographic proof of identity
-        bytes32 secretValue,      // Spatial: Miner's entropy contribution
-        uint256 baseDifficulty,
-        address sender,
-        BloomFilterLib.Filter storage bloomFilter,
-        mapping(bytes32 => uint256) storage usedOutputs,
-        function(bytes memory) view returns (bytes32) hashFunction,
-        function(address) view returns (uint256) difficultyWeightFn
-    ) internal view returns (bytes32 hmacOutput) {
-        if (sender == address(0)) revert ZeroAddress(SEVERITY_HIGH, ERROR_CATEGORY_ACCESS);
-        
-        // Stricter temporal seed validation
+    /**
+     * @notice Validates the 8-byte BOM-prefixed temporal seed and its timestamp bounds.
+     * @dev Extracted to its own stack frame to avoid stack-too-deep in processMiningReveal.
+     */
+    function _validateTemporalSeed(bytes memory temporalSeed) internal view {
         if (temporalSeed.length != 8) revert InvalidTemporalSeedFormat(SEVERITY_MEDIUM, ERROR_CATEGORY_INPUT);
-        
-        // Check BOM marker in first byte
         if (temporalSeed[0] != 0x00) revert InvalidBOMMarker(SEVERITY_MEDIUM, ERROR_CATEGORY_INPUT);
 
         // Extract timestamp from the canonical 8-byte format:
@@ -216,62 +201,79 @@ library MiningLib {
             }
         }
 
-        // Cache block values
         uint256 currentTime = block.timestamp;
-        bytes32 currentPrevrandao = bytes32(block.prevrandao);
 
-        // Enhanced timestamp validation
         if (seedTimestamp == 0) revert MalformedInput(SEVERITY_HIGH, ERROR_CATEGORY_INPUT, "Zero seed timestamp");
-        
-        // Minimum timestamp bound (1 week after contract deployment)
         if (seedTimestamp < 1704067200) revert TimestampTooOld(SEVERITY_HIGH, ERROR_CATEGORY_TIMING, seedTimestamp, 1704067200); // Jan 1, 2024
         if (seedTimestamp < currentTime - 30 days) revert TimestampTooOld(SEVERITY_HIGH, ERROR_CATEGORY_TIMING, seedTimestamp, currentTime - 30 days);
         if (seedTimestamp > currentTime + 15 minutes) revert TimestampInFuture(SEVERITY_HIGH, ERROR_CATEGORY_TIMING, seedTimestamp, currentTime + 15 minutes);
 
         unchecked {
-            if (currentTime > seedTimestamp && currentTime - seedTimestamp > MAX_TIMESTAMP_DRIFT) 
-            revert TimestampDriftTooLarge(SEVERITY_HIGH, ERROR_CATEGORY_TIMING, currentTime - seedTimestamp);
+            if (currentTime > seedTimestamp && currentTime - seedTimestamp > MAX_TIMESTAMP_DRIFT)
+                revert TimestampDriftTooLarge(SEVERITY_HIGH, ERROR_CATEGORY_TIMING, currentTime - seedTimestamp);
         }
+    }
 
-        // Enhanced entropy mixing with cached values
-        bytes32 timeBasedEntropy = keccak256(abi.encodePacked(
-            currentTime,
-            currentPrevrandao,
-            seedTimestamp,
-            address(this) // Add contract address for domain separation
-        ));
-
-        bytes memory entropy = abi.encodePacked(
-            previousOutput,
-            temporalSeed,
-            nonce,
-            sender,
-            timeBasedEntropy, // Add enhanced entropy
-            secretValue
-        );
-        bytes32 entropyHash = keccak256(entropy);
-
-        address recovered = entropyHash.recover(signature);
-    if (recovered == address(0)) revert InvalidSignature(SEVERITY_HIGH, ERROR_CATEGORY_INPUT);
-    if (recovered != sender)    revert InvalidSigner(SEVERITY_HIGH, ERROR_CATEGORY_ACCESS);
-
-        hmacOutput = hashFunction(abi.encodePacked(signature, entropyHash, secretValue));
-
-        uint256 rawWeight = difficultyWeightFn(sender);
-        uint256 weight    = rawWeight.max(BASE_WEIGHT / 2).min(MAX_WEIGHT);
-        uint256 effective = baseDifficulty * weight / BASE_WEIGHT;
+    /**
+     * @notice Validates that hmacOutput meets the weighted difficulty and is unique.
+     * @dev Extracted to its own stack frame to avoid stack-too-deep in processMiningReveal.
+     */
+    function _validateDifficultyAndUniqueness(
+        bytes32 hmacOutput,
+        uint256 baseDifficulty,
+        address sender,
+        BloomFilterLib.Filter storage bloomFilter,
+        mapping(bytes32 => uint256) storage usedOutputs,
+        function(address) view returns (uint256) difficultyWeightFn
+    ) internal view {
+        uint256 weight = difficultyWeightFn(sender).max(BASE_WEIGHT / 2).min(MAX_WEIGHT);
+        uint256 effective = Math.mulDiv(baseDifficulty, weight, BASE_WEIGHT);
 
         if (uint256(hmacOutput) >= effective) revert SolutionTooEasy(SEVERITY_MEDIUM, ERROR_CATEGORY_STATE);
         if (usedOutputs[hmacOutput] != 0 || bloomFilter.mightContain(hmacOutput))
             revert OutputAlreadyUsed(SEVERITY_MEDIUM, ERROR_CATEGORY_STATE);
+    }
+
+    /**
+     * @notice Core mining reveal: validates temporal seed, signature, difficulty, and uniqueness.
+     * @dev Accepts RevealParams struct instead of individual params to stay within the
+     *      EVM's 16-slot stack limit under legacy codegen.
+     */
+    function processMiningReveal(
+        RevealParams memory params,
+        uint256 baseDifficulty,
+        BloomFilterLib.Filter storage bloomFilter,
+        mapping(bytes32 => uint256) storage usedOutputs,
+        function(bytes memory) view returns (bytes32) hashFunction,
+        function(address) view returns (uint256) difficultyWeightFn
+    ) internal view returns (bytes32) {
+        if (params.miner == address(0)) revert ZeroAddress(SEVERITY_HIGH, ERROR_CATEGORY_ACCESS);
+
+        _validateTemporalSeed(params.temporalSeed);
+
+        bytes32 entropyHash = keccak256(abi.encodePacked(
+            params.previousOutput,
+            params.temporalSeed,
+            params.nonce,
+            params.miner,
+            params.secretValue
+        ));
+
+        address recovered = entropyHash.recover(params.signature);
+        if (recovered == address(0)) revert InvalidSignature(SEVERITY_HIGH, ERROR_CATEGORY_INPUT);
+        if (recovered != params.miner) revert InvalidSigner(SEVERITY_HIGH, ERROR_CATEGORY_ACCESS);
+
+        bytes32 hmacOutput = hashFunction(abi.encodePacked(params.signature, entropyHash, params.secretValue));
+
+        _validateDifficultyAndUniqueness(hmacOutput, baseDifficulty, params.miner, bloomFilter, usedOutputs, difficultyWeightFn);
 
         return hmacOutput;
     }
 
-    function quantumResistantHash(bytes memory input) internal view returns (bytes32) {
+    function quantumResistantHash(bytes memory input) internal pure returns (bytes32) {
         bytes32 h = keccak256(input);
         for (uint256 i = 0; i < QR_HASH_ITERATIONS; i++) {
-            h = keccak256(abi.encodePacked(h ^ bytes32(i + 1), block.timestamp));
+            h = keccak256(abi.encodePacked(h ^ bytes32(i + 1)));
             h = bytes32((uint256(h) << QR_HASH_ROTATION) | (uint256(h) >> (256 - QR_HASH_ROTATION)));
         }
         return h;
@@ -387,7 +389,7 @@ library MiningLib {
             block.number,
             block.prevrandao,
             block.coinbase,
-            block.difficulty,
+                block.prevrandao,
             gasleft()
         ));
         
@@ -571,7 +573,7 @@ library MiningLib {
     // New: Bloom filter maintenance function
     function pruneBloomFilter(
         BloomFilterLib.Filter storage filter,
-        uint256 maxEntries,
+        uint256 /* maxEntries */,
         uint256 targetFillRatioBps
     ) internal {
         // This implementation depends on BloomFilterLib capabilities
@@ -579,7 +581,7 @@ library MiningLib {
         // Rather than actually remove items (which isn't possible in bloom filters)
         
         // Check if filter needs scaling down
-        (uint256 size, uint256 bitCount, uint256 insertCount, uint256 fillRatioBps, ) = 
+        (uint256 size, , uint256 insertCount, uint256 fillRatioBps, ) = 
             BloomFilterLib.getFilterMetrics(filter);
             
         if (fillRatioBps > targetFillRatioBps) {

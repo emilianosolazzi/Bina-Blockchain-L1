@@ -1,0 +1,18 @@
+{
+  "config_version": 1,
+  "miner_name": "remix-live-miner",
+  "contract_address": "0x9a06eb7106D92829F8d1a375FE87c3C168AAa8bf",
+  "rpc_url": "https://YOUR_RPC_URL_HERE",
+  "private_key_path": "c:/Users/comar/OneDrive/Documents/Entropy_Randomness/Randomness_Entropy/l2-mining/rust/keys/miner.key",
+  "pool_id": 0,
+  "threads": 4,
+  "batch_size": 32,
+  "gas_price_multiplier": 1.1,
+  "log_level": "INFO",
+  "stats_interval_seconds": 5,
+  "max_retries": 5,
+  "exit_after_solutions": 1,
+  "telemetry_file": "c:/Users/comar/OneDrive/Documents/Entropy_Randomness/Randomness_Entropy/l2-mining/rust/miner-telemetry.jsonl",
+  "difficulty_zero_bits": 11,
+  "pqc_mode": "enhanced"
+}

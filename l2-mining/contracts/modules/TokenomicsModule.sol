@@ -1,16 +1,18 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import { ModuleBase } from "./ModuleBase.sol";
 import { ITGBT } from "../interfaces/ITGBT.sol";
 import { ITokenomicsModule } from "../interfaces/ITokenomicsModule.sol";
 import { TokenomicsLib } from "../TokenomicsLib.sol";
+import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 
-contract TokenomicsModule is Initializable, ModuleBase, ITokenomicsModule {
+contract TokenomicsModule is ModuleBase, ITokenomicsModule {
     using TokenomicsLib for TokenomicsLib.EpochState;
+    using Math for uint256;
 
     bytes32 public constant MODULE_MINING = keccak256("MINING_MODULE");
+    bytes32 public constant MODULE_BATCH_MINING = keccak256("BATCH_MINING_MODULE");
     bytes32 public constant SLASHER_ROLE = keccak256("SLASHER_ROLE");
     bytes32 public constant BURNER_ROLE = keccak256("BURNER_ROLE");
 
@@ -60,7 +62,7 @@ contract TokenomicsModule is Initializable, ModuleBase, ITokenomicsModule {
         uint256 halvingInterval,
         uint256 initialBonusThreshold,
         uint16 initialBonusMultiplier
-    ) external initializer {
+    ) external {
         __ModuleBase_init(coreAddress);
 
         if (tokenAddress == address(0)) revert ZeroToken();
@@ -84,7 +86,7 @@ contract TokenomicsModule is Initializable, ModuleBase, ITokenomicsModule {
         uint256 poolTargetDifficulty,
         uint256 poolTotalMined,
         uint256 poolEmissionBucket
-    ) external onlyMiningModule whenSystemActive returns (uint256 reward) {
+    ) external onlyAuthorizedMiningModule whenSystemActive returns (uint256 reward) {
         epochState.rewardAmount = TokenomicsLib.checkEpochTransition(epochState);
         reward = _calculateReward(output, epochState.rewardAmount, poolTargetDifficulty, poolTotalMined, poolEmissionBucket);
 
@@ -160,6 +162,12 @@ contract TokenomicsModule is Initializable, ModuleBase, ITokenomicsModule {
     }
 
     function checkInactivity(address account) external whenSystemActive {
+        _requireRole(BURNER_ROLE);
+
+        if (lastActivityBlock[account] == 0) {
+            return;
+        }
+
         uint256 inactiveBlocks = block.number - lastActivityBlock[account];
         uint256 inactiveDays = (inactiveBlocks * 15) / 86400;
 
@@ -260,6 +268,10 @@ contract TokenomicsModule is Initializable, ModuleBase, ITokenomicsModule {
         return _module(MODULE_MINING);
     }
 
+    function onlyBatchMiningModuleAddress() external view returns (address) {
+        return _module(MODULE_BATCH_MINING);
+    }
+
     function _calculateReward(
         bytes32 output,
         uint256 baseReward,
@@ -270,9 +282,9 @@ contract TokenomicsModule is Initializable, ModuleBase, ITokenomicsModule {
         uint256 difficulty = type(uint256).max - uint256(output);
         reward = baseReward;
 
-        uint256 bonusTarget = poolTargetDifficulty * bonusThreshold;
+        uint256 bonusTarget = Math.mulDiv(poolTargetDifficulty, bonusThreshold, 1);
         if (difficulty > bonusTarget) {
-            reward = (baseReward * bonusMultiplier) / 100;
+            reward = Math.mulDiv(baseReward, bonusMultiplier, 100);
             emit ExceptionalSolution(msg.sender, difficulty, bonusTarget, bonusMultiplier);
         }
 
@@ -293,12 +305,10 @@ contract TokenomicsModule is Initializable, ModuleBase, ITokenomicsModule {
         if (!core.hasRole(role, msg.sender)) revert UnauthorizedRole(role, msg.sender);
     }
 
-    modifier onlyMiningModule() {
-        if (msg.sender != _module(MODULE_MINING)) revert OnlyMiningModule();
+    modifier onlyAuthorizedMiningModule() {
+        address miningModule = _module(MODULE_MINING);
+        address batchMiningModule = _module(MODULE_BATCH_MINING);
+        if (msg.sender != miningModule && msg.sender != batchMiningModule) revert OnlyMiningModule();
         _;
-    }
-
-    constructor() {
-        _disableInitializers();
     }
 }

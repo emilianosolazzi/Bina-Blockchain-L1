@@ -19,4 +19,40 @@ contract RandomnessModuleHarness is RandomnessModule {
             randomnessState.minContributions
         );
     }
+
+    function previewEmergencyFulfillResult(uint256 requestId) external view returns (bytes32) {
+        (
+            address requester,
+            uint256 requestedAt,
+            bool fulfilled,
+            bytes32 userSeed,
+            ,
+            uint256 contributionsCount,
+            ,
+            ,
+            
+        ) = RandomnessLib.getRequestReceipt(randomnessState, requestId);
+
+        require(requester != address(0), "missing request");
+        require(!fulfilled, "already fulfilled");
+
+        (, bytes32[] memory contributions) = RandomnessLib.getContributionDetails(randomnessState, requestId);
+
+        bytes memory packed = abi.encodePacked(
+            userSeed,
+            _historicalHash(),
+            bytes32(0),
+            bytes32(block.prevrandao),
+            block.number,
+            block.timestamp,
+            contributionsCount
+        );
+
+        for (uint256 i = 0; i < contributions.length; i++) {
+            packed = abi.encodePacked(packed, contributions[i]);
+        }
+
+        requestedAt;
+        return keccak256(packed);
+    }
 }

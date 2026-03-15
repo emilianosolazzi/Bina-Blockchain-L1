@@ -24,7 +24,6 @@ This folder isolates the files needed for the Temporal Gradient L2 mining path.
   - interfaces/ITGBT.sol
   - interfaces/IRandomnessModule.sol
 - rust/
-  - Mining.rs
   - temporal_gradient_core/
   - memory.rs
   - cpu.rs
@@ -64,7 +63,9 @@ Excluded for now:
 2. The original project files were left in place for safety.
 3. The Rust miner and Solidity beacon are now aligned on the 8-byte temporal seed format.
 4. Difficulty weighting in the beacon is still placeholder logic and should be finalized.
-5. The packaged Rust runtime now lives in `rust/temporal_gradient_core` + `rust/package`, and the live-chain runtime path now mirrors the legacy challenge/commit/reveal mining flow while `rust/Mining.rs` remains the reference source.
+5. The packaged Rust runtime now lives in `rust/temporal_gradient_core` + `rust/package`.
+6. The old `rust/Mining.rs` file is no longer used and has been removed.
+7. For the active production/runtime file map, see [PRODUCTION_FILES.md](PRODUCTION_FILES.md).
 
 ## Integration tests
 
@@ -136,5 +137,7 @@ The isolated module suites now cover:
 - `TokenomicsModule`: base rewards, bonus rewards, halving transitions, manual slashing, inactivity burns, and missed-contribution penalties
 
 Start with docs/L2_MINING_ARCHITECTURE.md.
+
+If you want the short list of active production files, read [PRODUCTION_FILES.md](PRODUCTION_FILES.md).
 
 For the planned split of the large beacon into core + modules, see [docs/MODULAR_BEACON_REFACTOR.md](docs/MODULAR_BEACON_REFACTOR.md).

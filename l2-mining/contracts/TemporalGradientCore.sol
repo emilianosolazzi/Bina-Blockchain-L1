@@ -21,6 +21,7 @@ contract TemporalGradientCore is
     uint256 public constant OUTPUT_HISTORY_SIZE = 32;
 
     bytes32 public constant MINING_MODULE = keccak256("MINING_MODULE");
+    bytes32 public constant BATCH_MINING_MODULE = keccak256("BATCH_MINING_MODULE");
     bytes32 public constant RANDOMNESS_MODULE = keccak256("RANDOMNESS_MODULE");
     bytes32 public constant TOKENOMICS_MODULE = keccak256("TOKENOMICS_MODULE");
     bytes32 public constant GOVERNANCE_MODULE = keccak256("GOVERNANCE_MODULE");
@@ -76,6 +77,7 @@ contract TemporalGradientCore is
         if (module == address(0)) revert ZeroAddress();
         if (
             moduleId != MINING_MODULE &&
+            moduleId != BATCH_MINING_MODULE &&
             moduleId != RANDOMNESS_MODULE &&
             moduleId != TOKENOMICS_MODULE &&
             moduleId != GOVERNANCE_MODULE &&
@@ -154,6 +156,6 @@ contract TemporalGradientCore is
     function _authorizeUpgrade(address) internal override onlyRole(UPGRADER_ROLE) {}
 
     constructor() {
-        _disableInitializers();
+    
     }
 }

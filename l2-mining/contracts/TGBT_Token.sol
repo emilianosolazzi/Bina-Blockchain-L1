@@ -1,28 +1,21 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import { ERC20Upgradeable } from "@openzeppelin/contracts-upgradeable/token/ERC20/ERC20Upgradeable.sol";
-import { ERC20BurnableUpgradeable } from "@openzeppelin/contracts-upgradeable/token/ERC20/extensions/ERC20BurnableUpgradeable.sol";
-import { AccessControlUpgradeable } from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
-import { PausableUpgradeable } from "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
-import { Ownable2StepUpgradeable } from "@openzeppelin/contracts-upgradeable/access/Ownable2StepUpgradeable.sol";
-import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import { ITGBT } from "./interfaces/ITGBT.sol";
+import { ERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import { ERC20Burnable } from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Burnable.sol";
+import { AccessControl } from "@openzeppelin/contracts/access/AccessControl.sol";
+import { Pausable } from "@openzeppelin/contracts/security/Pausable.sol";
+
 
 /**
  * @title TGBT - Temporal Gradient Beacon Token
- * @notice Upgradeable ERC20 token with capped supply, halving emission, burnability, role-based minting, slashing, and controlled burning.
+ * @notice ERC20 token with capped supply, halving emission, burnability, role-based minting, slashing, and controlled burning.
  */
 contract TGBT is
-    Initializable,
-    ERC20Upgradeable,
-    ERC20BurnableUpgradeable,
-    AccessControlUpgradeable,
-    PausableUpgradeable,
-    Ownable2StepUpgradeable,
-    UUPSUpgradeable,
-    ITGBT // ✅ Add this to guarantee interface conformance
+    ERC20,
+    ERC20Burnable,
+    AccessControl,
+    Pausable
 {
     // --- Constants ---
     // Consider reviewing MAX_SUPPLY for healthy tokenomics based on distribution and utility.
@@ -48,36 +41,24 @@ contract TGBT is
     event BurnerAdded(address indexed burner); 
     event BurnerRemoved(address indexed burner); 
 
-    /// @custom:oz-upgrades-unsafe-allow constructor
-    constructor() {
-        _disableInitializers();
-    }
-
     /**
-     * @notice Initializes the token.
+     * @notice Constructs the TGBT token.
      * @param _initialEmissionRate Starting reward emission rate
      * @param _halvingInterval Seconds between each emission halving
      * @param _initialController Address granted MINTER, SLASHER, and BURNER roles (e.g., TemporalGradientBeacon)
      */
-    function initialize(
+    constructor(
         uint256 _initialEmissionRate,
         uint256 _halvingInterval,
-        address _initialController // Renamed parameter for clarity
-    ) public initializer {
-        __ERC20_init("Temporal Gradient Beacon Token", "TGBT");
-        __ERC20Burnable_init();
-        __AccessControl_init();
-        __Pausable_init();
-        __Ownable2Step_init(); // Keep Ownable for upgrade authorization
-        __UUPSUpgradeable_init();
-
+        address _initialController
+    ) ERC20("Temporal Gradient Beacon Token", "TGBT") {
         require(_initialController != address(0), "Zero controller address");
-        require(_halvingInterval >= 365 days, "Halving too frequent"); // Example minimum interval
+        require(_halvingInterval >= 365 days, "Halving too frequent");
 
         // Grant admin role to deployer for role management
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
 
-        // Grant operational roles to the controller contract (e.g., Beacon)
+        // Grant operational roles to the controller contract
         _grantRole(MINTER_ROLE, _initialController);
         _grantRole(SLASHER_ROLE, _initialController);
         _grantRole(BURNER_ROLE, _initialController);
@@ -306,7 +287,4 @@ contract TGBT is
         return MAX_SUPPLY - totalSupply();
     }
 
-    // --- UUPS Auth ---
-
-    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
 }

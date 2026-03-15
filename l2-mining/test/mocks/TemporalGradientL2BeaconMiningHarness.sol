@@ -17,18 +17,9 @@ contract TemporalGradientL2BeaconMiningHarness is TemporalGradientL2Beacon {
         uint64 nonce,
         address miner,
         bytes32 secretValue
-    ) external view returns (bytes32) {
-        uint64 seedTimestamp = 0;
-        for (uint256 i = 1; i < temporalSeed.length; i++) {
-            seedTimestamp = (seedTimestamp << 8) | uint64(uint8(temporalSeed[i]));
-        }
-
-        bytes32 timeBasedEntropy = keccak256(
-            abi.encodePacked(block.timestamp, bytes32(block.prevrandao), seedTimestamp, address(this))
-        );
-
+    ) external pure returns (bytes32) {
         return keccak256(
-            abi.encodePacked(previousOutput, temporalSeed, nonce, miner, timeBasedEntropy, secretValue)
+            abi.encodePacked(previousOutput, temporalSeed, nonce, miner, secretValue)
         );
     }
 
@@ -83,13 +74,8 @@ contract TemporalGradientL2BeaconMiningHarness is TemporalGradientL2Beacon {
         function(address) view returns (uint256) difficultyWeightFn = _getHarnessDifficultyWeight;
 
         bytes32 hmacOutput = MiningLib.processMiningReveal(
-            params.previousOutput,
-            params.temporalSeed,
-            params.nonce,
-            params.signature,
-            params.secretValue,
+            params,
             miningPools[params.poolId].targetDifficulty,
-            params.miner,
             bloomFilter,
             usedOutputs,
             _testHash,

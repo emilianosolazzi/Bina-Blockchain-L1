@@ -1,0 +1,338 @@
+/**
+ * Randomness API Server
+ * 
+ * Serves mined randomness outputs from the epoch batch-mining system.
+ * Consumers can request the latest randomness, verify proofs against
+ * on-chain Merkle roots, and browse epoch metadata.
+ *
+ * Endpoints:
+ *   GET  /api/randomness/latest           → latest random output + signature
+ *   GET  /api/randomness/:outputHash/proof → Merkle proof for a specific output
+ *   GET  /api/epochs                       → list of epochs (paginated)
+ *   GET  /api/epochs/:epochId              → single epoch detail
+ *   GET  /api/health                       → service health
+ *
+ * Storage: epoch data & leaves are kept in a local JSON store (epoch-store/).
+ * The miner writes leaves after each mining cycle; the finaliser script
+ * anchors the root on-chain periodically.
+ */
+
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const { ethers } = require('ethers');
+
+// ── Config ──────────────────────────────────────────────
+const HOST = process.env.RANDOMNESS_HOST || '127.0.0.1';
+const PORT = Number(process.env.RANDOMNESS_PORT || 4271);
+const EPOCH_STORE_DIR = process.env.EPOCH_STORE || path.resolve(__dirname, 'epoch-store');
+const MINER_PRIVATE_KEY = process.env.MINER_PRIVATE_KEY || null;
+
+// ── Ensure store directory ──────────────────────────────
+if (!fs.existsSync(EPOCH_STORE_DIR)) {
+	fs.mkdirSync(EPOCH_STORE_DIR, { recursive: true });
+}
+
+// ── In-memory epoch index (loaded from disk on boot) ────
+const epochIndex = [];      // [ { epochId, merkleRoot, leafCount, finalized, createdAt } ]
+const epochLeaves = {};     // epochId → [ { index, outputHash, proof: bytes32[] } ]
+let latestOutput = null;    // { outputHash, epochId, leafIndex, timestamp, signature }
+
+/**
+ * Load all epoch JSON files from disk into memory.
+ */
+function loadEpochStore() {
+	const files = fs.readdirSync(EPOCH_STORE_DIR).filter(f => f.startsWith('epoch-') && f.endsWith('.json'));
+	for (const file of files) {
+		try {
+			const data = JSON.parse(fs.readFileSync(path.join(EPOCH_STORE_DIR, file), 'utf8'));
+			epochIndex.push({
+				epochId:    data.epochId,
+				merkleRoot: data.merkleRoot,
+				leafCount:  data.leafCount,
+				finalized:  data.finalized || false,
+				createdAt:  data.createdAt || new Date().toISOString(),
+				poolId:     data.poolId || 0,
+				operator:   data.operator || null,
+				totalReward: data.totalReward || 0,
+			});
+			epochLeaves[data.epochId] = data.leaves || [];
+
+			// Track latest output
+			if (data.leaves && data.leaves.length > 0) {
+				const lastLeaf = data.leaves[data.leaves.length - 1];
+				if (!latestOutput || data.epochId > latestOutput.epochId ||
+					(data.epochId === latestOutput.epochId && lastLeaf.index > latestOutput.leafIndex)) {
+					latestOutput = {
+						outputHash: lastLeaf.outputHash,
+						epochId:    data.epochId,
+						leafIndex:  lastLeaf.index,
+						timestamp:  data.createdAt || new Date().toISOString(),
+						signature:  lastLeaf.signature || null,
+					};
+				}
+			}
+		} catch (err) {
+			console.error(`[EpochStore] Error loading ${file}:`, err.message);
+		}
+	}
+	epochIndex.sort((a, b) => a.epochId - b.epochId);
+	console.log(`[EpochStore] Loaded ${epochIndex.length} epochs, ${Object.values(epochLeaves).reduce((s, l) => s + l.length, 0)} total leaves`);
+}
+
+/**
+ * Save a new epoch (called by epoch-builder when miner accumulates enough leaves).
+ */
+function saveEpoch(epochData) {
+	const file = path.join(EPOCH_STORE_DIR, `epoch-${epochData.epochId}.json`);
+	fs.writeFileSync(file, JSON.stringify(epochData, null, 2));
+
+	// Update in-memory index
+	const existing = epochIndex.find(e => e.epochId === epochData.epochId);
+	if (existing) {
+		Object.assign(existing, epochData);
+	} else {
+		epochIndex.push({
+			epochId:    epochData.epochId,
+			merkleRoot: epochData.merkleRoot,
+			leafCount:  epochData.leafCount,
+			finalized:  epochData.finalized || false,
+			createdAt:  epochData.createdAt,
+			poolId:     epochData.poolId || 0,
+			operator:   epochData.operator || null,
+			totalReward: epochData.totalReward || 0,
+		});
+	}
+	epochLeaves[epochData.epochId] = epochData.leaves || [];
+
+	// Update latest
+	if (epochData.leaves && epochData.leaves.length > 0) {
+		const last = epochData.leaves[epochData.leaves.length - 1];
+		latestOutput = {
+			outputHash: last.outputHash,
+			epochId:    epochData.epochId,
+			leafIndex:  last.index,
+			timestamp:  epochData.createdAt,
+			signature:  last.signature || null,
+		};
+	}
+}
+
+// ── HTTP Helpers ────────────────────────────────────────
+function sendJson(res, status, payload) {
+	const body = JSON.stringify(payload, null, 2);
+	res.writeHead(status, {
+		'Content-Type': 'application/json; charset=utf-8',
+		'Access-Control-Allow-Origin': '*',
+		'Cache-Control': 'no-cache',
+	});
+	res.end(body);
+}
+
+function parseUrl(req) {
+	return new URL(req.url, `http://${HOST}:${PORT}`);
+}
+
+function readBody(req) {
+	return new Promise((resolve, reject) => {
+		let body = '';
+		req.on('data', c => body += c);
+		req.on('end', () => {
+			try { resolve(JSON.parse(body)); }
+			catch (e) { reject(e); }
+		});
+		req.on('error', reject);
+	});
+}
+
+// ── Signature helper ────────────────────────────────────
+function signOutput(outputHash) {
+	if (!MINER_PRIVATE_KEY) return null;
+	try {
+		const wallet = new ethers.Wallet(MINER_PRIVATE_KEY);
+		const message = ethers.getBytes(outputHash);
+		return wallet.signMessageSync(message);
+	} catch {
+		return null;
+	}
+}
+
+// ── Route handlers ──────────────────────────────────────
+
+function handleLatestRandomness(_req, res) {
+	if (!latestOutput) {
+		return sendJson(res, 404, {
+			error: 'No randomness available yet',
+			hint: 'The miner has not produced any epoch outputs yet.',
+		});
+	}
+	sendJson(res, 200, {
+		outputHash:  latestOutput.outputHash,
+		epochId:     latestOutput.epochId,
+		leafIndex:   latestOutput.leafIndex,
+		timestamp:   latestOutput.timestamp,
+		signature:   latestOutput.signature,
+		totalEpochs: epochIndex.length,
+	});
+}
+
+function handleOutputProof(req, res, outputHash) {
+	// Search all epochs for this output
+	for (const [epId, leaves] of Object.entries(epochLeaves)) {
+		const leaf = leaves.find(l => l.outputHash === outputHash);
+		if (leaf) {
+			const epMeta = epochIndex.find(e => e.epochId === Number(epId));
+			return sendJson(res, 200, {
+				epochId:    Number(epId),
+				leafIndex:  leaf.index,
+				outputHash: leaf.outputHash,
+				proof:      leaf.proof || [],
+				merkleRoot: epMeta ? epMeta.merkleRoot : null,
+				finalized:  epMeta ? epMeta.finalized : false,
+				verifyOnChain: {
+					contract: 'BatchMiningModule',
+					method: 'verifyRandomnessLeaf(uint256 epochId, uint256 leafIndex, bytes32 outputHash, bytes32[] proof)',
+					args: [Number(epId), leaf.index, leaf.outputHash, leaf.proof || []],
+				},
+			});
+		}
+	}
+	sendJson(res, 404, { error: 'Output not found in any epoch' });
+}
+
+function handleEpochList(_req, res, url) {
+	const page = Number(url.searchParams.get('page') || 1);
+	const limit = Math.min(Number(url.searchParams.get('limit') || 20), 100);
+	const start = (page - 1) * limit;
+
+	const sorted = [...epochIndex].sort((a, b) => b.epochId - a.epochId);
+	const slice = sorted.slice(start, start + limit);
+
+	sendJson(res, 200, {
+		epochs: slice,
+		total: epochIndex.length,
+		page,
+		limit,
+		hasMore: start + limit < epochIndex.length,
+	});
+}
+
+function handleEpochDetail(_req, res, epochId) {
+	const ep = epochIndex.find(e => e.epochId === epochId);
+	if (!ep) return sendJson(res, 404, { error: 'Epoch not found' });
+
+	const leaves = (epochLeaves[epochId] || []).map(l => ({
+		index:      l.index,
+		outputHash: l.outputHash,
+		proofSize:  (l.proof || []).length,
+	}));
+
+	sendJson(res, 200, {
+		...ep,
+		leaves,
+	});
+}
+
+function handleHealth(_req, res) {
+	sendJson(res, 200, {
+		status: 'ok',
+		epochs: epochIndex.length,
+		totalLeaves: Object.values(epochLeaves).reduce((s, l) => s + l.length, 0),
+		latestOutput: latestOutput ? latestOutput.outputHash : null,
+		uptime: process.uptime(),
+	});
+}
+
+// POST /api/epochs — accept a new epoch from the epoch-builder script
+async function handleCreateEpoch(req, res) {
+	try {
+		const body = await readBody(req);
+		if (!body.epochId && body.epochId !== 0) return sendJson(res, 400, { error: 'Missing epochId' });
+		if (!body.merkleRoot)  return sendJson(res, 400, { error: 'Missing merkleRoot' });
+		if (!body.leaves || !Array.isArray(body.leaves)) return sendJson(res, 400, { error: 'Missing leaves array' });
+
+		body.createdAt = body.createdAt || new Date().toISOString();
+		body.leafCount = body.leaves.length;
+
+		// Sign each leaf if we have a key
+		if (MINER_PRIVATE_KEY) {
+			for (const leaf of body.leaves) {
+				if (!leaf.signature) {
+					leaf.signature = signOutput(leaf.outputHash);
+				}
+			}
+		}
+
+		saveEpoch(body);
+		console.log(`[EpochStore] Saved epoch ${body.epochId} with ${body.leafCount} leaves`);
+		sendJson(res, 201, { ok: true, epochId: body.epochId, leafCount: body.leafCount });
+	} catch (err) {
+		sendJson(res, 400, { error: err.message });
+	}
+}
+
+// ── Router ──────────────────────────────────────────────
+const server = http.createServer((req, res) => {
+	const url = parseUrl(req);
+	const p = url.pathname;
+
+	// CORS preflight
+	if (req.method === 'OPTIONS') {
+		res.writeHead(204, {
+			'Access-Control-Allow-Origin': '*',
+			'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+			'Access-Control-Allow-Headers': 'Content-Type',
+		});
+		return res.end();
+	}
+
+	try {
+		// GET /api/randomness/latest
+		if (req.method === 'GET' && p === '/api/randomness/latest') {
+			return handleLatestRandomness(req, res);
+		}
+		// GET /api/randomness/:outputHash/proof
+		const proofMatch = p.match(/^\/api\/randomness\/([0-9a-fA-Fx]+)\/proof$/);
+		if (req.method === 'GET' && proofMatch) {
+			return handleOutputProof(req, res, proofMatch[1]);
+		}
+		// GET /api/epochs
+		if (req.method === 'GET' && p === '/api/epochs') {
+			return handleEpochList(req, res, url);
+		}
+		// GET /api/epochs/:epochId
+		const epochMatch = p.match(/^\/api\/epochs\/(\d+)$/);
+		if (req.method === 'GET' && epochMatch) {
+			return handleEpochDetail(req, res, Number(epochMatch[1]));
+		}
+		// POST /api/epochs — epoch-builder pushes a new epoch
+		if (req.method === 'POST' && p === '/api/epochs') {
+			return handleCreateEpoch(req, res);
+		}
+		// GET /api/health
+		if (req.method === 'GET' && p === '/api/health') {
+			return handleHealth(req, res);
+		}
+
+		sendJson(res, 404, { error: 'Not found' });
+	} catch (err) {
+		console.error('[API] Error:', err);
+		sendJson(res, 500, { error: 'Internal server error' });
+	}
+});
+
+// ── Boot ────────────────────────────────────────────────
+loadEpochStore();
+
+server.listen(PORT, HOST, () => {
+	console.log(`\n🎲 Randomness API listening on http://${HOST}:${PORT}`);
+	console.log(`    GET  /api/randomness/latest`);
+	console.log(`    GET  /api/randomness/:outputHash/proof`);
+	console.log(`    GET  /api/epochs`);
+	console.log(`    GET  /api/epochs/:epochId`);
+	console.log(`    POST /api/epochs`);
+	console.log(`    GET  /api/health\n`);
+});
+
+module.exports = { saveEpoch, epochIndex, epochLeaves };

@@ -18,4 +18,10 @@ interface IMiningModule {
         bytes32 secretValue,
         uint8 poolId
     ) external;
+
+    function getMiningChallenge(uint8 poolId) external view returns (bytes32[] memory outputs, uint256 difficulty);
+
+    function nonces(address miner) external view returns (uint256);
+
+    function minCommitmentAge() external view returns (uint8);
 }

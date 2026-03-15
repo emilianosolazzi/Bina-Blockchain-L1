@@ -1,0 +1,736 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Temporal Gradient Miner — TGBT Dashboard</title>
+  <style>
+    :root {
+      --bg: #07111f;
+      --panel: rgba(15, 23, 42, 0.82);
+      --panel-2: rgba(30, 41, 59, 0.8);
+      --text: #e5eefc;
+      --muted: #8ba3c7;
+      --accent: #38bdf8;
+      --accent-2: #22c55e;
+      --gold: #fbbf24;
+      --warn: #f59e0b;
+      --danger: #ef4444;
+      --border: rgba(148, 163, 184, 0.2);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Inter, Segoe UI, Arial, sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at top right, rgba(56,189,248,.15), transparent 30%),
+        radial-gradient(circle at top left, rgba(34,197,94,.12), transparent 25%),
+        linear-gradient(180deg, #020617 0%, #07111f 100%);
+      min-height: 100vh;
+    }
+    .wrap { max-width: 1360px; margin: 0 auto; padding: 24px; }
+    .hero, .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      backdrop-filter: blur(14px);
+      border-radius: 20px;
+      box-shadow: 0 20px 50px rgba(0,0,0,.25);
+    }
+    .hero { padding: 24px; margin-bottom: 20px; }
+    .hero-top { display:flex; justify-content:space-between; gap:16px; align-items:flex-start; flex-wrap:wrap; }
+    h1 { margin: 0 0 4px; font-size: 30px; }
+    h1 span.tgbt-badge {
+      background: linear-gradient(135deg, #fbbf24, #f59e0b);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+      font-size: 16px; font-weight: 700; vertical-align: middle; margin-left: 10px;
+    }
+    .sub { color: var(--muted); margin: 0; }
+    .status-row { display:flex; gap:12px; flex-wrap:wrap; margin-top:16px; }
+    .pill {
+      padding: 10px 14px; border-radius: 999px;
+      background: rgba(15,23,42,.75); border: 1px solid var(--border);
+      color: var(--muted); font-size: 14px;
+    }
+    .pill strong { color: var(--text); }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(12, minmax(0,1fr));
+      gap: 16px;
+    }
+    .card {
+      grid-column: span 3; padding: 18px;
+      background: var(--panel-2); border: 1px solid var(--border); border-radius: 18px;
+    }
+    .card h3 { margin: 0 0 10px; color: var(--muted); font-weight: 600; font-size: 13px; text-transform: uppercase; letter-spacing: .08em; }
+    .metric { font-size: 32px; font-weight: 700; margin: 0; }
+    .small { color: var(--muted); font-size: 13px; }
+    .panel { padding: 18px; }
+    .phase-panel { grid-column: span 12; }
+
+    /* ── TGBT hero reward card ── */
+    .reward-hero {
+      grid-column: span 12;
+      background: linear-gradient(135deg, rgba(251,191,36,.12), rgba(245,158,11,.06), rgba(15,23,42,.85));
+      border: 1px solid rgba(251,191,36,.25);
+      border-radius: 20px; padding: 24px;
+      display: flex; gap: 32px; align-items: center; flex-wrap: wrap;
+    }
+    .reward-hero .big-tgbt {
+      font-size: 48px; font-weight: 800; margin: 0;
+      background: linear-gradient(135deg, #fbbf24, #f59e0b, #d97706);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    }
+    .reward-hero .big-tgbt .unit { font-size: 22px; font-weight: 600; }
+    .reward-stat { text-align: center; }
+    .reward-stat .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; margin-bottom: 4px; }
+    .reward-stat .val { font-size: 22px; font-weight: 700; }
+    .reward-sep { width: 1px; height: 48px; background: rgba(251,191,36,.2); }
+
+    .left { grid-column: span 8; }
+    .right { grid-column: span 4; }
+    .progress {
+      height: 16px; background: rgba(15,23,42,.95); border-radius: 999px; overflow: hidden; border:1px solid var(--border); margin: 12px 0 10px;
+    }
+    .progress > div {
+      height: 100%; width: 0%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width .35s ease;
+    }
+    .phase-title { font-size: 26px; font-weight: 700; margin: 0; }
+    .phase-desc { color: var(--muted); margin: 8px 0 0; }
+    .label { color: var(--muted); }
+    canvas { width: 100%; height: 280px; display:block; }
+    .kv { display:grid; grid-template-columns: 140px 1fr; gap:8px 12px; font-size:14px; }
+    .hash {
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      word-break: break-all; color: #cfe6ff;
+      background: rgba(2,6,23,.65); padding: 10px 12px;
+      border-radius: 12px; border: 1px solid var(--border);
+    }
+    .ok { color: var(--accent-2); }
+    .warn { color: var(--warn); }
+    .danger { color: var(--danger); }
+    .gold { color: var(--gold); }
+
+    /* ── Chart tabs ── */
+    .chart-tabs { display:flex; gap:8px; margin-bottom:12px; }
+    .chart-tab {
+      padding: 6px 14px; border-radius: 999px; font-size: 13px; font-weight: 600;
+      background: rgba(15,23,42,.7); border: 1px solid var(--border);
+      color: var(--muted); cursor: pointer; transition: all .2s;
+    }
+    .chart-tab.active { background: rgba(56,189,248,.15); border-color: var(--accent); color: var(--accent); }
+    .chart-tab[data-chart="rewards"].active { background: rgba(251,191,36,.15); border-color: var(--gold); color: var(--gold); }
+
+    /* ── Reward log ── */
+    .reward-log { max-height: 200px; overflow-y: auto; font-size: 13px; }
+    .reward-log-item {
+      display: flex; justify-content: space-between; padding: 8px 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .reward-log-item:last-child { border-bottom: none; }
+    .reward-log-item .tgbt-amt { color: var(--gold); font-weight: 600; }
+
+    /* ── Solutions table ── */
+    .solutions-panel { grid-column: span 12; margin-top: 8px; }
+    .solutions-header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 14px; }
+    .solutions-header h3 { margin: 0; color: var(--text); font-size: 18px; }
+    .solutions-filters { display: flex; gap: 8px; }
+    .sol-filter {
+      padding: 5px 12px; border-radius: 999px; font-size: 12px; font-weight: 600;
+      background: rgba(15,23,42,.7); border: 1px solid var(--border);
+      color: var(--muted); cursor: pointer; transition: all .2s;
+    }
+    .sol-filter.active { background: rgba(56,189,248,.15); border-color: var(--accent); color: var(--accent); }
+    .sol-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .sol-table th {
+      text-align: left; padding: 10px 12px; color: var(--muted); font-weight: 600; font-size: 11px;
+      text-transform: uppercase; letter-spacing: .08em;
+      border-bottom: 1px solid var(--border); background: rgba(2,6,23,.5);
+    }
+    .sol-table td {
+      padding: 10px 12px; border-bottom: 1px solid rgba(148,163,184,.1);
+    }
+    .sol-table tr:hover td { background: rgba(56,189,248,.04); }
+    .sol-badge {
+      padding: 3px 10px; border-radius: 999px; font-size: 11px; font-weight: 600;
+    }
+    .sol-badge.ok { background: rgba(34,197,94,.15); color: var(--accent-2); }
+    .sol-badge.fail { background: rgba(239,68,68,.15); color: var(--danger); }
+    .sol-nonce { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; color: #cfe6ff; }
+    .sol-hash-cell { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; color: #8ba3c7; font-size: 11px; }
+    .sol-empty { text-align: center; padding: 32px; color: var(--muted); }
+    .sol-storage-badge {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 4px 12px; border-radius: 999px; font-size: 11px;
+      background: rgba(34,197,94,.1); border: 1px solid rgba(34,197,94,.2);
+      color: var(--accent-2);
+    }
+    .sol-storage-badge .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent-2); }
+
+    /* ── Pulse animation for live mining ── */
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .5; } }
+    .live-dot {
+      display: inline-block; width: 8px; height: 8px;
+      border-radius: 50%; background: var(--accent-2);
+      margin-right: 6px; animation: pulse 1.5s infinite;
+    }
+    .live-dot.gold { background: var(--gold); }
+
+    @media (max-width: 980px) {
+      .card { grid-column: span 6; }
+      .left, .right { grid-column: span 12; }
+      .reward-hero { gap: 20px; }
+    }
+    @media (max-width: 640px) {
+      .card { grid-column: span 12; }
+      .wrap { padding: 14px; }
+      h1 { font-size: 24px; }
+      .metric { font-size: 26px; }
+      .reward-hero .big-tgbt { font-size: 36px; }
+      .reward-sep { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="hero">
+      <div class="hero-top">
+        <div>
+          <h1>Temporal Gradient Miner <span class="tgbt-badge">TGBT</span></h1>
+          <p class="sub">Real-time local dashboard — continuous mining mode</p>
+        </div>
+        <div class="status-row">
+          <div class="pill"><span class="live-dot" id="liveDot"></span>Connection: <strong id="conn">Connecting…</strong></div>
+          <div class="pill">Mode: <strong id="modeLabel">Continuous</strong></div>
+          <div class="pill">Updated: <strong id="updatedAt">—</strong></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="grid">
+
+      <!-- ── TGBT Rewards Hero ── -->
+      <div class="reward-hero">
+        <div>
+          <div class="small" style="color:var(--gold);margin-bottom:4px;">TOTAL TGBT EARNED</div>
+          <p class="big-tgbt" id="tgbtTotal">0.00 <span class="unit">TGBT</span></p>
+        </div>
+        <div class="reward-sep"></div>
+        <div class="reward-stat">
+          <div class="label">Per solution</div>
+          <div class="val gold" id="tgbtPerSolution">—</div>
+        </div>
+        <div class="reward-sep"></div>
+        <div class="reward-stat">
+          <div class="label">Accepted</div>
+          <div class="val ok" id="accepted">0</div>
+        </div>
+        <div class="reward-sep"></div>
+        <div class="reward-stat">
+          <div class="label">Failed submits</div>
+          <div class="val danger" id="rejected">0</div>
+        </div>
+        <div class="reward-sep"></div>
+        <div class="reward-stat">
+          <div class="label">Acceptance rate</div>
+          <div class="val" id="successRate">—</div>
+        </div>
+        <div class="reward-sep"></div>
+        <div class="reward-stat">
+          <div class="label">TGBT / hour</div>
+          <div class="val gold" id="tgbtPerHour">—</div>
+        </div>
+      </div>
+
+      <!-- ── Metric cards ── -->
+      <div class="card"><h3>Phase</h3><p class="metric" id="phaseMetric">—</p><div class="small" id="phaseEta">—</div></div>
+      <div class="card"><h3>Hashrate</h3><p class="metric" id="hashrate">—</p><div class="small" id="hashes">—</div></div>
+      <div class="card"><h3>Solutions</h3><p class="metric" id="solutions">—</p><div class="small" id="lastNonce">—</div></div>
+      <div class="card"><h3>Uptime</h3><p class="metric" id="uptime">—</p><div class="small" id="workers">—</div></div>
+
+      <!-- ── Phase panel ── -->
+      <div class="panel phase-panel">
+        <div style="display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;align-items:end;">
+          <div>
+            <div class="label">Live cycle</div>
+            <p class="phase-title" id="phaseTitle">Waiting for data…</p>
+            <p class="phase-desc" id="phaseDesc">The dashboard will update every time the miner writes telemetry.</p>
+          </div>
+          <div class="small" id="phaseMeta"></div>
+        </div>
+        <div class="progress"><div id="progressBar"></div></div>
+      </div>
+
+      <!-- ── Chart panel ── -->
+      <div class="panel left">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
+          <h3 style="margin:0;color:var(--text);font-size:18px;">History</h3>
+          <div class="chart-tabs">
+            <div class="chart-tab active" data-chart="hashrate">Hashrate</div>
+            <div class="chart-tab" data-chart="rewards">TGBT Rewards</div>
+          </div>
+        </div>
+        <canvas id="chart" width="900" height="280"></canvas>
+      </div>
+
+      <!-- ── Snapshot details ── -->
+      <div class="panel right">
+        <h3 style="margin-top:0;color:var(--text);font-size:18px;">Current snapshot</h3>
+        <div class="kv">
+          <div class="label">State</div><div id="state">—</div>
+          <div class="label">Workers</div><div id="workerCount">—</div>
+          <div class="label">Temperature</div><div id="temp">—</div>
+          <div class="label">Blocks left</div><div id="blocksLeft">—</div>
+          <div class="label">ETA</div><div id="eta">—</div>
+          <div class="label">TGBT earned</div><div class="gold" id="rewardDetail">—</div>
+        </div>
+          <h3 style="color:var(--text);font-size:16px;margin:20px 0 10px;">Hash details</h3>
+          <div class="kv" style="grid-template-columns:100px 1fr;row-gap:10px;">
+            <div class="label">Candidate</div><div class="hash" id="lastHash">—</div>
+            <div class="label">Commit</div><div class="hash" id="lastCommitHash">—</div>
+            <div class="label">Output</div><div class="hash" id="lastOutputHash">—</div>
+          </div>
+
+        <h3 style="color:var(--gold);font-size:16px;margin:20px 0 10px;">Reward log</h3>
+        <div class="reward-log" id="rewardLog">
+          <div style="color:var(--muted);padding:12px 0;">No rewards yet — mining…</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Persistent Solutions Table ── -->
+    <section class="grid" style="margin-top:16px;">
+      <div class="panel solutions-panel">
+        <div class="solutions-header">
+          <div style="display:flex;align-items:center;gap:14px;">
+            <h3>Solution Storage</h3>
+            <div class="sol-storage-badge" id="storageBadge"><span class="dot"></span><span id="storageLabel">File</span></div>
+          </div>
+          <div class="solutions-filters">
+            <div class="sol-filter active" data-filter="all">All</div>
+            <div class="sol-filter" data-filter="accepted">Accepted</div>
+            <div class="sol-filter" data-filter="rejected">Failed</div>
+          </div>
+        </div>
+        <div style="overflow-x:auto;">
+          <table class="sol-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Time</th>
+                <th>Status</th>
+                <th>Nonce</th>
+                <th>TGBT Reward</th>
+                <th>Hashrate</th>
+                <th>Phase</th>
+                <th>Hash</th>
+              </tr>
+            </thead>
+            <tbody id="solBody">
+              <tr><td class="sol-empty" colspan="8">Loading solutions…</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px;font-size:12px;color:var(--muted);">
+          <span id="solStatus">—</span>
+          <div style="display:flex;gap:8px;">
+            <button id="solPrev" style="padding:4px 14px;border-radius:8px;background:var(--panel-2);border:1px solid var(--border);color:var(--muted);cursor:pointer;" disabled>← Prev</button>
+            <button id="solNext" style="padding:4px 14px;border-radius:8px;background:var(--panel-2);border:1px solid var(--border);color:var(--muted);cursor:pointer;">Next →</button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    // Difficulty-based reward estimate: max(difficulty_zero_bits / 8, 1) TGBT per solution
+    const DIFFICULTY_BITS = 11;
+    const EST_TGBT_PER_SOLUTION = Math.max(DIFFICULTY_BITS / 8, 1); // 1.375 TGBT
+
+    function effectiveRewards(snap) {
+      const onChain = snap.total_rewards_estimate || 0;
+      const acc = snap.accepted_submissions || 0;
+      if (onChain > 0) return { total: onChain, perSolution: acc > 0 ? onChain / acc : 0, estimated: false };
+      if (acc > 0) return { total: acc * EST_TGBT_PER_SOLUTION, perSolution: EST_TGBT_PER_SOLUTION, estimated: true };
+      return { total: 0, perSolution: 0, estimated: false };
+    }
+
+    const state = { history: [], latest: null, source: null, chartMode: 'hashrate', rewardEvents: [] };
+
+    const els = Object.fromEntries([...document.querySelectorAll('[id]')].map(el => [el.id, el]));
+
+    /* ── Chart tab switching ── */
+    document.querySelectorAll('.chart-tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        document.querySelectorAll('.chart-tab').forEach(t => t.classList.remove('active'));
+        tab.classList.add('active');
+        state.chartMode = tab.dataset.chart;
+        drawChart();
+      });
+    });
+
+    const PHASE_COPY = {
+      searching: ['Searching', 'Miner is scanning for a valid solution below the target difficulty.'],
+      solution_found: ['Solution found!', 'A valid solution was found — preparing to commit on-chain.'],
+      waiting_for_clearance: ['Waiting for clearance', 'A previous unrevealed commitment must expire before a new commit.'],
+      committing: ['Committing', 'The solution commitment is being submitted on-chain.'],
+      commitment_locked: ['Commitment locked', 'Waiting for the reveal window to open.'],
+      revealing: ['Revealing', 'Submitting the reveal transaction and claiming the TGBT reward.'],
+      reward_received: ['Reward received!', 'The reveal completed successfully — TGBT has been minted to your address!']
+    };
+
+    function fmtNum(v) {
+      if (v == null) return '—';
+      return Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(v);
+    }
+    function fmtTGBT(v) {
+      if (v == null || v === 0) return '0.00';
+      return Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 }).format(v);
+    }
+    function fmtHashrate(v) { return v == null ? '—' : `${fmtNum(v)} H/s`; }
+    function fmtDuration(sec) {
+      if (sec == null) return '—';
+      const s = Math.max(0, Math.floor(sec));
+      const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
+      if (h) return `${h}h ${m}m ${ss}s`;
+      if (m) return `${m}m ${ss}s`;
+      return `${ss}s`;
+    }
+
+    function phaseText(name, snap) {
+      if (snap?.state === 'stopped') {
+        if ((snap.accepted_submissions || 0) > 0) {
+          return ['Completed', 'The miner stopped after reaching its configured solution limit.'];
+        }
+        return ['Stopped', 'The miner process is not currently running.'];
+      }
+      return PHASE_COPY[name] || ['Initializing', 'Waiting for the miner to emit phase data.'];
+    }
+
+    function progressPercent(snap) {
+      if (!snap?.mining_phase) return 0;
+      if (snap.mining_phase === 'waiting_for_clearance') {
+        const rem = snap.phase_blocks_remaining ?? 0;
+        return (1 - Math.min(rem, 500) / 500) * 100;
+      }
+      if (snap.mining_phase === 'commitment_locked') {
+        const rem = snap.phase_blocks_remaining ?? 0;
+        const total = Math.max(2, rem);
+        return ((total - rem) / total) * 100;
+      }
+      if (snap.mining_phase === 'reward_received') return 100;
+      if (snap.mining_phase === 'revealing') return 92;
+      if (snap.mining_phase === 'committing') return 75;
+      if (snap.mining_phase === 'solution_found') return 55;
+      if (snap.mining_phase === 'searching') return 20;
+      return 5;
+    }
+
+    function detectRewardEvent(prev, curr) {
+      if (!prev || !curr) return;
+      const prevAcc = prev.accepted_submissions || 0;
+      const currAcc = curr.accepted_submissions || 0;
+      if (currAcc > prevAcc) {
+        const onChainDelta = (curr.total_rewards_estimate || 0) - (prev.total_rewards_estimate || 0);
+        const amount = onChainDelta > 0 ? onChainDelta : EST_TGBT_PER_SOLUTION;
+        const rewards = effectiveRewards(curr);
+        state.rewardEvents.push({
+          time: new Date(Number(curr.timestamp_unix_ms)),
+          amount,
+          total: rewards.total,
+          estimated: rewards.estimated,
+          nonce: curr.last_solution_nonce,
+          accepted: currAcc
+        });
+        updateRewardLog();
+      }
+    }
+
+    function updateRewardLog() {
+      if (state.rewardEvents.length === 0) {
+        els.rewardLog.innerHTML = '<div style="color:var(--muted);padding:12px 0;">No rewards yet — mining…</div>';
+        return;
+      }
+      els.rewardLog.innerHTML = state.rewardEvents.slice().reverse().map(ev => {
+        const timeStr = ev.time.toLocaleTimeString();
+        const estTag = ev.estimated ? ' (est)' : '';
+        const amtStr = `+${fmtTGBT(ev.amount)} TGBT${estTag}`;
+        return `<div class="reward-log-item">
+          <span>${timeStr} — Solution #${ev.accepted}</span>
+          <span class="tgbt-amt">${amtStr}</span>
+        </div>`;
+      }).join('');
+    }
+
+    function render(snap) {
+      const prev = state.latest;
+      state.latest = snap;
+      detectRewardEvent(prev, snap);
+
+      const [title, desc] = phaseText(snap.mining_phase, snap);
+      els.phaseMetric.textContent = title;
+      els.phaseTitle.textContent = title;
+      els.phaseDesc.textContent = desc;
+      els.phaseMeta.textContent = snap.mining_phase ? `Phase: ${snap.mining_phase}` : (snap.state === 'stopped' ? 'Run finished' : '');
+      els.phaseEta.textContent = snap.phase_eta_seconds != null ? `ETA ${fmtDuration(snap.phase_eta_seconds)}` : '';
+      els.progressBar.style.width = `${progressPercent(snap)}%`;
+
+      if (snap.mining_phase === 'reward_received') {
+        els.progressBar.style.background = 'linear-gradient(90deg, #fbbf24, #22c55e)';
+      } else {
+        els.progressBar.style.background = 'linear-gradient(90deg, var(--accent), var(--accent-2))';
+      }
+
+      els.hashrate.textContent = fmtHashrate(snap.hashrate_hs);
+      els.hashes.textContent = `${fmtNum(snap.hashes)} hashes total`;
+      els.solutions.textContent = fmtNum(snap.solutions);
+      els.lastNonce.textContent = snap.last_solution_nonce != null ? `Last nonce ${fmtNum(snap.last_solution_nonce)}` : 'No solution yet';
+      els.uptime.textContent = fmtDuration(snap.uptime_seconds);
+      els.workers.textContent = `${fmtNum(snap.worker_count)} workers`;
+
+      // ── TGBT rewards ──
+      const rewards = effectiveRewards(snap);
+      const estLabel = rewards.estimated ? ' (est)' : '';
+      els.tgbtTotal.innerHTML = `${fmtTGBT(rewards.total)} <span class="unit">TGBT${estLabel}</span>`;
+      els.rewardDetail.textContent = `${fmtTGBT(rewards.total)} TGBT${estLabel}`;
+
+      const acc = snap.accepted_submissions || 0;
+      const rej = snap.rejected_submissions || 0;
+      els.accepted.textContent = fmtNum(acc);
+      els.rejected.textContent = fmtNum(rej);
+
+      if (acc > 0) {
+        els.tgbtPerSolution.textContent = `${fmtTGBT(rewards.perSolution)} TGBT`;
+      } else {
+        els.tgbtPerSolution.textContent = '—';
+      }
+
+      const total = acc + rej;
+      if (total > 0) {
+        const rate = (acc / total) * 100;
+        els.successRate.textContent = `${rate.toFixed(1)}%`;
+        els.successRate.className = rate >= 50 ? 'val ok' : 'val danger';
+      } else {
+        els.successRate.textContent = '—';
+        els.successRate.className = 'val';
+      }
+
+      const uptimeH = (snap.uptime_seconds || 0) / 3600;
+      if (uptimeH > 0.001 && rewards.total > 0) {
+        els.tgbtPerHour.textContent = `${fmtTGBT(rewards.total / uptimeH)} TGBT`;
+      } else {
+        els.tgbtPerHour.textContent = '—';
+      }
+
+      // Snapshot details
+      els.state.textContent = snap.state || '—';
+      els.state.className = snap.state === 'running' ? 'ok' : (snap.state === 'stopped' ? 'danger' : '');
+      els.workerCount.textContent = fmtNum(snap.worker_count);
+      els.temp.textContent = snap.temperature_c != null ? `${snap.temperature_c.toFixed(1)} °C` : '—';
+      els.blocksLeft.textContent = snap.phase_blocks_remaining != null ? fmtNum(snap.phase_blocks_remaining) : '—';
+      els.eta.textContent = fmtDuration(snap.phase_eta_seconds);
+      els.lastHash.textContent = snap.last_solution_hash_hex || '—';
+      els.lastCommitHash.textContent = snap.last_commit_hash_hex || '—';
+      els.lastOutputHash.textContent = snap.last_output_hash_hex || '—';
+      els.updatedAt.textContent = new Date(Number(snap.timestamp_unix_ms)).toLocaleTimeString();
+
+      // Live dot color
+      if (snap.state === 'running') {
+        els.liveDot.className = snap.mining_phase === 'reward_received' ? 'live-dot gold' : 'live-dot';
+      } else {
+        els.liveDot.style.animation = 'none';
+        els.liveDot.style.background = '#ef4444';
+      }
+
+      drawChart();
+    }
+
+    function drawChart() {
+      const canvas = els.chart;
+      const ctx = canvas.getContext('2d');
+      const w = canvas.width, h = canvas.height;
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = 'rgba(2,6,23,0.65)';
+      ctx.fillRect(0, 0, w, h);
+
+      const padding = 40;
+      const isRewardChart = state.chartMode === 'rewards';
+      const values = state.history.map(x => isRewardChart ? effectiveRewards(x).total : (x.hashrate_hs || 0));
+      const max = Math.max(0.001, ...values);
+
+      // Grid lines + labels
+      ctx.strokeStyle = 'rgba(148,163,184,.22)';
+      ctx.lineWidth = 1;
+      ctx.fillStyle = '#8ba3c7';
+      ctx.font = '11px Segoe UI';
+      for (let i = 0; i < 4; i++) {
+        const y = padding + ((h - padding * 2) * i / 3);
+        ctx.beginPath(); ctx.moveTo(padding, y); ctx.lineTo(w - padding, y); ctx.stroke();
+        const label = isRewardChart
+          ? `${fmtTGBT(max * (1 - i / 3))} TGBT`
+          : `${fmtNum(max * (1 - i / 3))} H/s`;
+        ctx.fillText(label, 4, y - 4);
+      }
+
+      // Data line
+      const lineColor = isRewardChart ? '#fbbf24' : '#38bdf8';
+      const fillGrad = ctx.createLinearGradient(0, padding, 0, h - padding);
+      if (isRewardChart) {
+        fillGrad.addColorStop(0, 'rgba(251,191,36,.25)');
+        fillGrad.addColorStop(1, 'rgba(251,191,36,.02)');
+      } else {
+        fillGrad.addColorStop(0, 'rgba(56,189,248,.2)');
+        fillGrad.addColorStop(1, 'rgba(56,189,248,.01)');
+      }
+
+      ctx.strokeStyle = lineColor;
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      const pts = [];
+      values.forEach((v, i) => {
+        const x = padding + (i / Math.max(1, values.length - 1)) * (w - padding * 2);
+        const y = h - padding - ((v) / Math.max(1e-9, max)) * (h - padding * 2);
+        pts.push([x, y]);
+        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+
+      // Fill area under curve
+      if (pts.length > 1) {
+        ctx.fillStyle = fillGrad;
+        ctx.beginPath();
+        ctx.moveTo(pts[0][0], pts[0][1]);
+        pts.forEach(([x, y]) => ctx.lineTo(x, y));
+        ctx.lineTo(pts[pts.length - 1][0], h - padding);
+        ctx.lineTo(pts[0][0], h - padding);
+        ctx.closePath();
+        ctx.fill();
+      }
+
+      // Mark reward events on chart with gold dots
+      if (isRewardChart && state.rewardEvents.length > 0) {
+        ctx.fillStyle = '#fbbf24';
+        state.rewardEvents.forEach(ev => {
+          const idx = state.history.findIndex(s =>
+            Math.abs(Number(s.timestamp_unix_ms) - ev.time.getTime()) < 2000
+          );
+          if (idx >= 0 && idx < pts.length) {
+            ctx.beginPath();
+            ctx.arc(pts[idx][0], pts[idx][1], 5, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        });
+      }
+    }
+
+    async function loadHistory() {
+      const res = await fetch('/api/history?limit=120');
+      const data = await res.json();
+      state.history = data.history || [];
+
+      // Detect reward events from history
+      for (let i = 1; i < state.history.length; i++) {
+        detectRewardEvent(state.history[i - 1], state.history[i]);
+      }
+
+      if (data.latest) render(data.latest);
+    }
+
+    function connect() {
+      if (state.source) state.source.close();
+      const source = new EventSource('/events');
+      state.source = source;
+      source.onopen = () => { els.conn.textContent = 'Live'; els.conn.className = 'ok'; };
+      source.onerror = () => { els.conn.textContent = 'Reconnecting…'; els.conn.className = 'warn'; };
+      source.addEventListener('snapshot', (event) => {
+        const snap = JSON.parse(event.data);
+        state.history.push(snap);
+        if (state.history.length > 120) state.history.shift();
+        render(snap);
+      });
+      source.addEventListener('meta', () => {});
+    }
+
+    loadHistory().then(connect).catch(err => {
+      els.conn.textContent = 'Error';
+      els.phaseTitle.textContent = 'Failed to load telemetry';
+      els.phaseDesc.textContent = err.message;
+      console.error(err);
+    });
+
+    // ── Persistent Solutions Table ──────────────────────────
+    const solState = { filter: 'all', page: 0, pageSize: 20, total: 0 };
+
+    document.querySelectorAll('.sol-filter').forEach(f => {
+      f.addEventListener('click', () => {
+        document.querySelectorAll('.sol-filter').forEach(x => x.classList.remove('active'));
+        f.classList.add('active');
+        solState.filter = f.dataset.filter;
+        solState.page = 0;
+        loadSolutions();
+      });
+    });
+
+    els.solPrev.addEventListener('click', () => { if (solState.page > 0) { solState.page--; loadSolutions(); } });
+    els.solNext.addEventListener('click', () => { solState.page++; loadSolutions(); });
+
+    async function loadSolutions() {
+      try {
+        const skip = solState.page * solState.pageSize;
+        const filterParam = solState.filter !== 'all' ? `&filter=${solState.filter}` : '';
+        const res = await fetch(`/api/solutions?limit=${solState.pageSize}&skip=${skip}${filterParam}`);
+        const data = await res.json();
+        const solutions = data.solutions || [];
+        const stats = data.stats || {};
+
+        solState.total = stats.total || 0;
+
+        els.solStatus.textContent = `${stats.accepted || 0} accepted, ${stats.rejected || 0} failed submits — ${stats.total || 0} total stored`;
+
+        els.solPrev.disabled = solState.page === 0;
+        els.solNext.disabled = solutions.length < solState.pageSize;
+
+        if (solutions.length === 0) {
+          els.solBody.innerHTML = '<tr><td class="sol-empty" colspan="8">No solutions stored yet — mines will appear here as they\'re found.</td></tr>';
+          return;
+        }
+
+        els.solBody.innerHTML = solutions.map((s, i) => {
+          const num = s.solutionNumber || s.id || (skip + i + 1);
+          const time = new Date(s.timestamp || s.createdAt).toLocaleString();
+          const badge = s.accepted
+            ? '<span class="sol-badge ok">Accepted</span>'
+            : '<span class="sol-badge fail">Failed submit</span>';
+          const nonce = s.nonce != null ? s.nonce.toLocaleString() : '—';
+          const reward = s.accepted ? `<span style="color:var(--gold);">${fmtTGBT(s.reward)} TGBT${s.estimated ? ' (est)' : ''}</span>` : '—';
+          const hr = s.hashrate != null ? `${fmtNum(s.hashrate)} H/s` : '—';
+          const phase = s.phase || '—';
+          const hash = s.accepted
+            ? [
+                s.commitHash ? `<div title="${s.commitHash}"><span style="color:var(--muted);">commit:</span> ${s.commitHash.slice(0, 16)}…</div>` : '',
+                s.outputHash ? `<div title="${s.outputHash}"><span style="color:var(--muted);">output:</span> ${s.outputHash.slice(0, 16)}…</div>` : '',
+                (!s.commitHash && s.hash) ? `<div title="${s.hash}">${s.hash.slice(0, 16)}…</div>` : ''
+              ].filter(Boolean).join('')
+            : (s.hash ? s.hash.slice(0, 16) + '…' : '—');
+          return `<tr>
+            <td>${num}</td>
+            <td>${time}</td>
+            <td>${badge}</td>
+            <td class="sol-nonce">${nonce}</td>
+            <td>${reward}</td>
+            <td>${hr}</td>
+            <td>${phase}</td>
+            <td class="sol-hash-cell" title="${s.outputHash || s.commitHash || s.hash || ''}">${hash}</td>
+          </tr>`;
+        }).join('');
+      } catch (err) {
+        els.solBody.innerHTML = `<tr><td class="sol-empty" colspan="8" style="color:var(--danger);">Error loading solutions: ${err.message}</td></tr>`;
+      }
+    }
+
+    // Poll solutions every 10s (live updates)
+    loadSolutions();
+    setInterval(loadSolutions, 10000);
+  </script>
+</body>
+</html>

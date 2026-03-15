@@ -173,14 +173,12 @@ library TokenomicsLib {
         uint256 remaining,
         uint256 nextHalvingBlock
     ) {
-        return (
-            totalSupplyCap,
-            miningAllocation,
-            state.rewardAmount,
-            state.currentEpoch,
-            totalMined,
-            miningAllocation - totalMined,
-            state.lastHalvingBlock + state.halvingInterval
-        );
+        cap = totalSupplyCap;
+        miningAlloc = miningAllocation;
+        currentBlockReward = state.rewardAmount;
+        epoch = state.currentEpoch;
+        totalMinedToDate = totalMined;
+        remaining = miningAllocation > totalMined ? miningAllocation - totalMined : 0;
+        nextHalvingBlock = state.lastHalvingBlock + state.halvingInterval;
     }
 }

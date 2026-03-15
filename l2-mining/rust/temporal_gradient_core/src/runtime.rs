@@ -6,8 +6,9 @@ use crate::crypto::{
 };
 use crate::pqc::PqcMode;
 use crate::seed::{decode_temporal_seed_timestamp, generate_temporal_seed};
-use crate::telemetry::{MinerState, TelemetrySnapshot};
+use crate::telemetry::{MinerState, MiningPhase, PhaseTracker, TelemetrySnapshot};
 use anyhow::{anyhow, Result};
+use ethers::signers::LocalWallet;
 use ethers::types::U256;
 use k256::ecdsa::SigningKey;
 use rand::rngs::OsRng;
@@ -20,6 +21,23 @@ use tokio::time;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+#[derive(Debug, Clone)]
+struct LiveWorkerCandidate {
+    worker_id: usize,
+    nonce: u64,
+    temporal_seed: [u8; 8],
+    reveal_signature: Vec<u8>,
+    secret_value: [u8; 32],
+    commit_hash: [u8; 32],
+    solution_hash: [u8; 32],
+}
+
+#[derive(Debug)]
+struct LiveWorkerSearchResult {
+    hashes_checked: u64,
+    candidate: Option<LiveWorkerCandidate>,
+}
+
 #[derive(Debug)]
 struct RuntimeStats {
     state: MinerState,
@@ -30,6 +48,8 @@ struct RuntimeStats {
     total_rewards_estimate: f64,
     last_solution_nonce: Option<u64>,
     last_solution_hash_hex: Option<String>,
+    last_commit_hash_hex: Option<String>,
+    last_output_hash_hex: Option<String>,
     temperature_c: Option<f32>,
 }
 
@@ -44,6 +64,8 @@ impl Default for RuntimeStats {
             total_rewards_estimate: 0.0,
             last_solution_nonce: None,
             last_solution_hash_hex: None,
+            last_commit_hash_hex: None,
+            last_output_hash_hex: None,
             temperature_c: Some(50.0),
         }
     }
@@ -193,11 +215,84 @@ async fn run_live_runtime(
         guard.state = MinerState::Running;
     }
 
+    let phase_tracker = PhaseTracker::new();
+
+    // Background telemetry ticker — emits snapshots every second so the
+    // display stays updated even while submit_solution is blocking.
+    {
+        let bg_stats = Arc::clone(&stats);
+        let bg_tx = telemetry_tx.clone();
+        let bg_shutdown = shutdown.clone();
+        let bg_config = config.clone();
+        let bg_phase = phase_tracker.clone();
+        tokio::spawn(async move {
+            let mut interval = time::interval(Duration::from_secs(1));
+            loop {
+                tokio::select! {
+                    _ = bg_shutdown.cancelled() => break,
+                    _ = interval.tick() => {
+                        let snapshot = snapshot_with_phase(
+                            &bg_config, started_at, &bg_stats, &bg_phase,
+                        ).await;
+                        let _ = bg_tx.send(snapshot);
+                    }
+                }
+            }
+        });
+    }
+
     let pqc_mode = crate::pqc::PqcMode::parse(&config.pqc_mode);
     let mut retry_count = 0usize;
     let mut nonce_cursor = 0u64;
 
+    // ── Resume a saved commitment from a previous run ──────────────
+    if let Some(pending) = crate::pending::load(&config.private_key_path)? {
+        info!(
+            "Found saved commitment from block {} — attempting reveal",
+            pending.commit_block
+        );
+        match live_client
+            .reveal_pending(&pending, &phase_tracker, &config.private_key_path)
+            .await
+        {
+            Ok(Some(receipt)) => {
+                let on_chain = LiveMiningClient::extract_reward_from_receipt(&receipt).unwrap_or(0.0);
+                let reward = if on_chain > 0.0 { on_chain } else { estimate_reward(config.difficulty_zero_bits) };
+                phase_tracker.set(MiningPhase::RewardReceived, None);
+                {
+                    let mut guard = stats.lock().await;
+                    guard.solutions = guard.solutions.saturating_add(1);
+                    guard.accepted_submissions = guard.accepted_submissions.saturating_add(1);
+                    guard.total_rewards_estimate += reward;
+                    guard.last_solution_nonce = Some(pending.nonce);
+                    guard.last_solution_hash_hex =
+                        Some(hex_string(&pending.commit_hash));
+                }
+                info!(
+                    "Resumed and revealed saved commitment nonce={} reward={reward}",
+                    pending.nonce
+                );
+                if let Some(limit) = config.exit_after_solutions {
+                    let solutions = stats.lock().await.solutions;
+                    if solutions >= limit {
+                        shutdown.cancel();
+                    }
+                }
+            }
+            Ok(None) => {
+                info!("Saved commitment expired or already revealed, starting fresh");
+            }
+            Err(err) => {
+                warn!("Failed to reveal saved commitment: {err:#}");
+                // The pending file is still on disk; wait_for_commitment_clearance
+                // will handle the expiry before the next commit.
+            }
+        }
+    }
+
     while !shutdown.is_cancelled() {
+        phase_tracker.set(MiningPhase::Searching, None);
+
         let challenge = match live_client.current_challenge().await {
             Ok(challenge) => {
                 retry_count = 0;
@@ -225,9 +320,14 @@ async fn run_live_runtime(
             &mut nonce_cursor,
             started_at,
         ).await? {
-            match live_client.submit_solution(&submission).await {
+            phase_tracker.set(MiningPhase::SolutionFound, None);
+
+            match live_client.submit_solution(&submission, &phase_tracker, &config.private_key_path).await {
                 Ok(receipt) => {
-                    let reward = LiveMiningClient::extract_reward_from_receipt(&receipt).unwrap_or(0.0);
+                    let on_chain = LiveMiningClient::extract_reward_from_receipt(&receipt).unwrap_or(0.0);
+                    let reward = if on_chain > 0.0 { on_chain } else { estimate_reward(config.difficulty_zero_bits) };
+                    let output_hash = LiveMiningClient::extract_output_hash_from_receipt(&receipt);
+                    phase_tracker.set(MiningPhase::RewardReceived, None);
                     {
                         let mut guard = stats.lock().await;
                         guard.solutions = guard.solutions.saturating_add(1);
@@ -235,10 +335,10 @@ async fn run_live_runtime(
                         guard.total_rewards_estimate += reward;
                         guard.last_solution_nonce = Some(submission.nonce);
                         guard.last_solution_hash_hex = Some(hex_string(&submission.commitment.commit_hash));
+                        guard.last_commit_hash_hex = Some(hex_string(&submission.commitment.commit_hash));
+                        guard.last_output_hash_hex = output_hash;
                     }
 
-                    let snapshot = snapshot_from_state(&config, started_at, &stats).await;
-                    let _ = telemetry_tx.send(snapshot);
                     info!("Submitted live mining solution nonce={} reward={reward}", submission.nonce);
 
                     if let Some(limit) = config.exit_after_solutions {
@@ -251,13 +351,11 @@ async fn run_live_runtime(
                 Err(err) => {
                     let mut guard = stats.lock().await;
                     guard.rejected_submissions = guard.rejected_submissions.saturating_add(1);
-                    warn!("Live submission failed: {err}");
+                    warn!("Live submission failed: {err:#}");
                 }
             }
         }
 
-        let snapshot = snapshot_from_state(&config, started_at, &stats).await;
-        let _ = telemetry_tx.send(snapshot);
         time::sleep(Duration::from_millis(250)).await;
     }
 
@@ -286,103 +384,168 @@ async fn attempt_live_solution(
     let miner_address = live_client.miner_address();
     let miner_address_bytes: [u8; 20] = miner_address.0;
     let step = config.threads.max(1) as u64;
-    let solution_found = AtomicBool::new(false);
+    let solution_found = Arc::new(AtomicBool::new(false));
+    let base_nonce = *nonce_cursor;
+    let batch_size = config.batch_size.max(1);
+    let worker_count = config.threads.max(1);
+    let signer = live_client.signer_clone();
 
-    for worker_id in 0..config.threads.max(1) {
-        let temporal_seed = generate_temporal_seed()?;
-        let seed_timestamp = decode_temporal_seed_timestamp(&temporal_seed)?;
-        let time_based_entropy = keccak256_bytes(&[
-            &challenge.block_timestamp.to_be_bytes(),
-            challenge.prevrandao.as_slice(),
-            &seed_timestamp.to_be_bytes(),
-            live_client.contract_address.as_bytes(),
-        ].concat());
-        let pre_input = [
-            challenge.previous_output.as_slice(),
-            temporal_seed.as_slice(),
-            miner_address.as_bytes(),
-            time_based_entropy.as_slice(),
-        ].concat();
+    let mut tasks = Vec::with_capacity(worker_count);
+    for worker_id in 0..worker_count {
+        let challenge = challenge.clone();
+        let miner_address = miner_address;
+        let contract_address = live_client.contract_address;
+        let signer = signer.clone();
+        let solution_found = Arc::clone(&solution_found);
+        let shutdown = shutdown.clone();
 
-        for batch_index in 0..config.batch_size {
-            if shutdown.is_cancelled() || solution_found.load(Ordering::SeqCst) {
-                return Ok(None);
-            }
+        tasks.push(tokio::task::spawn_blocking(move || {
+            search_live_worker_batch(
+                worker_id,
+                batch_size,
+                base_nonce,
+                step,
+                challenge,
+                miner_address,
+                miner_address_bytes,
+                contract_address,
+                signer,
+                solution_found,
+                shutdown,
+            )
+        }));
+    }
 
-            let current_nonce = (*nonce_cursor)
-                .saturating_add(worker_id as u64)
-                .saturating_add((batch_index as u64) * step);
+    let mut hashes_checked = 0u64;
+    let mut winning_candidate: Option<LiveWorkerCandidate> = None;
 
-            {
-                let mut guard = stats.lock().await;
-                guard.hashes = guard.hashes.saturating_add(1);
-                guard.temperature_c = Some(45.0 + ((worker_id % 10) as f32));
-            }
-
-            if !pre_filter_nonce_live(current_nonce, &pre_input, challenge.difficulty) {
-                continue;
-            }
-
-            let secret_value = random_secret();
-            let material = MiningMaterial {
-                previous_output: challenge.previous_output,
-                temporal_seed,
-                nonce: current_nonce,
-                miner_address: miner_address_bytes,
-                time_based_entropy,
-                secret_value,
-            };
-
-            let entropy_hash = crate::crypto::create_entropy_hash(&material);
-            let reveal_signature = live_client.sign_entropy_hash(entropy_hash)?;
-            let solution_hash = quantum_resistant_hash_live(
-                &reveal_signature,
-                &entropy_hash,
-                &secret_value,
-                challenge.block_timestamp,
-            );
-
-            if meets_difficulty(&solution_hash, challenge.difficulty) {
-                solution_found.store(true, Ordering::SeqCst);
-                let commit_hash = keccak256_bytes(&[
-                    challenge.previous_output.as_slice(),
-                    temporal_seed.as_slice(),
-                    &current_nonce.to_be_bytes(),
-                    reveal_signature.as_slice(),
-                    secret_value.as_slice(),
-                    miner_address.as_bytes(),
-                ].concat());
-                let commit_nonce = live_client.next_commit_nonce().await?;
-                let commitment = crate::crypto::DynamicMiningCommitment {
-                    commit_hash,
-                    pool_id: config.pool_id,
-                    nonce: commit_nonce,
-                    deadline: unix_secs().saturating_add(300),
-                };
-
-                let preview = {
-                    let mut guard = stats.lock().await;
-                    guard.last_solution_nonce = Some(current_nonce);
-                    guard.last_solution_hash_hex = Some(hex_string(&solution_hash));
-                    snapshot_from_guard(config, started_at, &guard)
-                };
-                let _ = telemetry_tx.send(preview);
-                *nonce_cursor = current_nonce.saturating_add(step);
-
-                return Ok(Some(LiveSubmission {
-                    commitment,
-                    previous_output: challenge.previous_output,
-                    temporal_seed,
-                    nonce: current_nonce,
-                    reveal_signature,
-                    secret_value,
-                }));
-            }
+    for task in tasks {
+        let result = task.await.map_err(|err| anyhow!("Live worker join error: {err}"))??;
+        hashes_checked = hashes_checked.saturating_add(result.hashes_checked);
+        if winning_candidate.is_none() {
+            winning_candidate = result.candidate;
         }
     }
 
-    *nonce_cursor = nonce_cursor.saturating_add((config.batch_size.max(1) * config.threads.max(1)) as u64);
-    Ok(None)
+    {
+        let mut guard = stats.lock().await;
+        guard.hashes = guard.hashes.saturating_add(hashes_checked);
+        guard.temperature_c = Some(45.0);
+    }
+
+    *nonce_cursor = nonce_cursor.saturating_add((batch_size * worker_count) as u64);
+
+    let Some(candidate) = winning_candidate else {
+        return Ok(None);
+    };
+
+    let commit_nonce = live_client.next_commit_nonce().await?;
+    let commitment = crate::crypto::DynamicMiningCommitment {
+        commit_hash: candidate.commit_hash,
+        pool_id: config.pool_id,
+        nonce: commit_nonce,
+        deadline: unix_secs().saturating_add(300),
+    };
+
+    let preview = {
+        let mut guard = stats.lock().await;
+        guard.last_solution_nonce = Some(candidate.nonce);
+        guard.last_solution_hash_hex = Some(hex_string(&candidate.solution_hash));
+        guard.last_commit_hash_hex = None;
+        guard.last_output_hash_hex = None;
+        guard.temperature_c = Some(45.0 + ((candidate.worker_id % 10) as f32));
+        snapshot_from_guard(config, started_at, &guard)
+    };
+    let _ = telemetry_tx.send(preview);
+
+    Ok(Some(LiveSubmission {
+        commitment,
+        previous_output: challenge.previous_output,
+        temporal_seed: candidate.temporal_seed,
+        nonce: candidate.nonce,
+        reveal_signature: candidate.reveal_signature,
+        secret_value: candidate.secret_value,
+    }))
+}
+
+fn search_live_worker_batch(
+    worker_id: usize,
+    batch_size: usize,
+    base_nonce: u64,
+    step: u64,
+    challenge: LiveChallenge,
+    miner_address: ethers::types::Address,
+    miner_address_bytes: [u8; 20],
+    contract_address: ethers::types::Address,
+    signer: LocalWallet,
+    solution_found: Arc<AtomicBool>,
+    shutdown: CancellationToken,
+) -> Result<LiveWorkerSearchResult> {
+    let temporal_seed = generate_temporal_seed()?;
+    let seed_timestamp = decode_temporal_seed_timestamp(&temporal_seed)?;
+    let time_based_entropy = keccak256_bytes(&[
+        &challenge.block_timestamp.to_be_bytes(),
+        challenge.prevrandao.as_slice(),
+        &seed_timestamp.to_be_bytes(),
+        contract_address.as_bytes(),
+    ].concat());
+
+    let mut hashes_checked = 0u64;
+    for batch_index in 0..batch_size {
+        if shutdown.is_cancelled() || solution_found.load(Ordering::Relaxed) {
+            break;
+        }
+
+        let current_nonce = base_nonce
+            .saturating_add(worker_id as u64)
+            .saturating_add((batch_index as u64) * step);
+        hashes_checked = hashes_checked.saturating_add(1);
+
+        let secret_value = random_secret();
+        let material = MiningMaterial {
+            previous_output: challenge.previous_output,
+            temporal_seed,
+            nonce: current_nonce,
+            miner_address: miner_address_bytes,
+            time_based_entropy,
+            secret_value,
+        };
+
+        let entropy_hash = crate::crypto::create_entropy_hash(&material);
+        let reveal_signature = signer.sign_hash(ethers::types::H256::from(entropy_hash))?.to_vec();
+        let solution_hash = quantum_resistant_hash_live(&reveal_signature, &entropy_hash, &secret_value);
+
+        if meets_difficulty(&solution_hash, challenge.difficulty) {
+            solution_found.store(true, Ordering::SeqCst);
+
+            let commit_hash = keccak256_bytes(&[
+                challenge.previous_output.as_slice(),
+                temporal_seed.as_slice(),
+                &current_nonce.to_be_bytes(),
+                reveal_signature.as_slice(),
+                secret_value.as_slice(),
+                miner_address.as_bytes(),
+            ].concat());
+
+            return Ok(LiveWorkerSearchResult {
+                hashes_checked,
+                candidate: Some(LiveWorkerCandidate {
+                    worker_id,
+                    nonce: current_nonce,
+                    temporal_seed,
+                    reveal_signature,
+                    secret_value,
+                    commit_hash,
+                    solution_hash,
+                }),
+            });
+        }
+    }
+
+    Ok(LiveWorkerSearchResult {
+        hashes_checked,
+        candidate: None,
+    })
 }
 
 async fn run_worker(
@@ -514,8 +677,28 @@ fn snapshot_from_guard(
         total_rewards_estimate: guard.total_rewards_estimate,
         last_solution_nonce: guard.last_solution_nonce,
         last_solution_hash_hex: guard.last_solution_hash_hex.clone(),
+        last_commit_hash_hex: guard.last_commit_hash_hex.clone(),
+        last_output_hash_hex: guard.last_output_hash_hex.clone(),
         temperature_c: guard.temperature_c,
+        mining_phase: None,
+        phase_blocks_remaining: None,
+        phase_eta_seconds: None,
     }
+}
+
+async fn snapshot_with_phase(
+    config: &MinerConfig,
+    started_at: Instant,
+    stats: &Arc<Mutex<RuntimeStats>>,
+    phase_tracker: &PhaseTracker,
+) -> TelemetrySnapshot {
+    let ps = phase_tracker.get();
+    let guard = stats.lock().await;
+    let mut snapshot = snapshot_from_guard(config, started_at, &guard);
+    snapshot.mining_phase = ps.phase;
+    snapshot.phase_blocks_remaining = ps.blocks_remaining;
+    snapshot.phase_eta_seconds = ps.eta_seconds;
+    snapshot
 }
 
 fn estimate_reward(difficulty_zero_bits: u8) -> f64 {
@@ -549,22 +732,13 @@ fn quantum_resistant_hash_live(
     signature: &[u8],
     entropy_hash: &[u8; 32],
     secret_value: &[u8; 32],
-    block_timestamp: u64,
 ) -> [u8; 32] {
     let mut h = keccak256_bytes(&[signature, entropy_hash, secret_value].concat());
     for i in 0..3u8 {
-        h = keccak256_bytes(&[
-            xor_first_byte(h, i + 1).as_slice(),
-            block_timestamp.to_be_bytes().as_slice(),
-        ].concat());
+        h = keccak256_bytes(xor_round_constant(h, i + 1).as_slice());
         h = rotate_hash_left(h, 7);
     }
     h
-}
-
-fn pre_filter_nonce_live(nonce: u64, input: &[u8], difficulty: U256) -> bool {
-    let hash = blake3::hash(&[input, &nonce.to_be_bytes()].concat());
-    U256::from_big_endian(hash.as_bytes()) < difficulty / U256::from(100u64)
 }
 
 fn meets_difficulty(hash: &[u8; 32], difficulty: U256) -> bool {
@@ -588,7 +762,40 @@ fn rotate_hash_left(input: [u8; 32], bits: u32) -> [u8; 32] {
     out
 }
 
-fn xor_first_byte(mut input: [u8; 32], value: u8) -> [u8; 32] {
-    input[0] ^= value;
+/// XOR the last byte of a 32-byte hash to match Solidity's `h ^ bytes32(uint256(value))`
+/// which places the value at byte[31] (least-significant byte in big-endian uint256).
+fn xor_round_constant(mut input: [u8; 32], value: u8) -> [u8; 32] {
+    input[31] ^= value;
     input
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quantum_resistant_hash_live_is_deterministic() {
+        let signature = vec![0x11; 65];
+        let entropy_hash = [0x22; 32];
+        let secret_value = [0x33; 32];
+
+        let first = quantum_resistant_hash_live(&signature, &entropy_hash, &secret_value);
+        let second = quantum_resistant_hash_live(&signature, &entropy_hash, &secret_value);
+
+        assert_eq!(first, second);
+        assert_ne!(first, [0u8; 32]);
+    }
+
+    #[test]
+    fn hex_string_formats_with_prefix() {
+        assert_eq!(hex_string(&[0x12, 0xAB, 0x00]), "0x12ab00");
+    }
+
+    #[test]
+    fn meets_difficulty_accepts_small_hash_under_large_target() {
+        let hash = [0u8; 32];
+        let difficulty = U256::from(1u64) << 255;
+
+        assert!(meets_difficulty(&hash, difficulty));
+    }
 }

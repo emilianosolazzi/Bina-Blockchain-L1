@@ -27,6 +27,7 @@ library RandomnessLib {
     error InvalidRequestID();
     error RequestFulfilled();
     error RequestExpired();
+    error RequestNotExpired();
     error AlreadyContributed();
     error MaxContributionsReached();
     error RequestDoesNotExist();
@@ -118,7 +119,7 @@ library RandomnessLib {
         
         if (request.requester == address(0)) revert RequestDoesNotExist();
         if (request.fulfilled) revert RequestFulfilled();
-        if (block.number > request.timestamp + state.expiryBlocks) revert RequestExpired();
+        if (block.timestamp > request.timestamp + state.expiryBlocks) revert RequestExpired();
         
         ContributionContext storage context = state.contributions[requestId];
         
@@ -181,11 +182,16 @@ library RandomnessLib {
         uint256 requestId,
         bytes32 historicalHash,
         bytes32 entropyAccumulator,
-        bytes32 entropyMerkleRoot,
+        bytes32,
         address receiver,
         IERC20 tgbtToken,
         address feePayingAccount
     ) internal returns (bytes32 result) {
+        RandomnessRequest storage request = state.requests[requestId];
+        if (request.requester == address(0)) revert RequestDoesNotExist();
+        if (request.fulfilled) revert RequestFulfilled();
+        if (block.timestamp <= request.timestamp + state.expiryBlocks) revert RequestNotExpired();
+
         // Logic to calculate and collect fees based on Arbitrum's fee model
         uint256 contributorCount = state.contributions[requestId].contributors.length;
         uint256 feeAmount = state.baseEmergencyFee + (state.feePerContributor * contributorCount);
@@ -206,7 +212,7 @@ library RandomnessLib {
             state,
             requestId,
             historicalHash,
-            entropyMerkleRoot
+            entropyAccumulator
         );
     }
 
@@ -348,7 +354,7 @@ library RandomnessLib {
      * @dev Returns the maximum historical block range that can be used in Arbitrum
      * for secure randomness generation, accounting for Arbitrum's sequencer domain.
      */
-    function getArbitrumSafeHistoricalBlocks() internal view returns (uint256) {
+        function getArbitrumSafeHistoricalBlocks() internal pure returns (uint256) {
         return 6500; // ~1 day of Arbitrum blocks with 15s average block time
     }
 }

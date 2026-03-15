@@ -33,7 +33,7 @@ contract RateLimitModule is ModuleBase, IRateLimitModule {
     error RateLimitExceededUser(uint256 currentRate, uint256 limit);
     error RateLimitThrottled(uint8 reason);
 
-    function initialize(address coreAddress) external initializer {
+    function initialize(address coreAddress) external {
         __ModuleBase_init(coreAddress);
 
         RateTypes.initTokenBucket(globalRateBucket, 1200, 10, 1200);

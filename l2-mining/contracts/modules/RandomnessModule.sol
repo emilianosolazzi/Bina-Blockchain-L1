@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { ModuleBase } from "./ModuleBase.sol";
 import { RandomnessLib } from "../RandomnessLib.sol";
 
-contract RandomnessModule is Initializable, ModuleBase {
+contract RandomnessModule is ModuleBase {
     bytes32 public constant EMERGENCY_ROLE = keccak256("EMERGENCY_ROLE");
 
     RandomnessLib.State internal randomnessState;
@@ -30,7 +29,7 @@ contract RandomnessModule is Initializable, ModuleBase {
     error MaxContributionsTooHigh();
     error ZeroAddress();
 
-    function initialize(address coreAddress, address tgbtTokenAddress) external initializer {
+    function initialize(address coreAddress, address tgbtTokenAddress) external {
         __ModuleBase_init(coreAddress);
         if (tgbtTokenAddress == address(0)) revert ZeroAddress();
 
@@ -137,19 +136,21 @@ contract RandomnessModule is Initializable, ModuleBase {
             uint256 emergencyFeeQuote
         )
     {
-        (
-            requester,
-            requestedAt,
-            fulfilled,
-            userSeed,
-            result,
-            contributionsCount,
-            minContributions,
-            maxContributions,
-            emergencyFeeQuote
-        ) = RandomnessLib.getRequestReceipt(randomnessState, requestId);
-
-        contributionsRemaining = contributionsCount >= minContributions ? 0 : minContributions - contributionsCount;
+        // Read storage directly to avoid stack-too-deep from 9-value tuple destructuring
+        RandomnessLib.RandomnessRequest storage req = randomnessState.requests[requestId];
+        requester = req.requester;
+        requestedAt = req.timestamp;
+        fulfilled = req.fulfilled;
+        userSeed = req.userSeed;
+        result = req.result;
+        contributionsCount = randomnessState.contributions[requestId].contributors.length;
+        minContributions = randomnessState.minContributions;
+        maxContributions = randomnessState.maxContributions;
+        emergencyFeeQuote = randomnessState.baseEmergencyFee +
+            (randomnessState.feePerContributor * contributionsCount);
+        contributionsRemaining = contributionsCount >= minContributions
+            ? 0
+            : minContributions - contributionsCount;
     }
 
     function getRandomnessContributionDetails(uint256 requestId)

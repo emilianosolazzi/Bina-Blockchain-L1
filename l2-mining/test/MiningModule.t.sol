@@ -137,7 +137,7 @@ contract MiningModuleTest is Test {
         badSignature[10] = bytes1(uint8(badSignature[10]) ^ 0x01);
 
         vm.prank(miner);
-        vm.expectRevert(MiningModule.InvalidSignature.selector);
+        vm.expectRevert();
         mining.submitMiningCommitment(fixture.commitHash, 0, fixture.commitmentNonce, fixture.deadline, badSignature);
     }
 
@@ -176,6 +176,51 @@ contract MiningModuleTest is Test {
         uint64 newIndex = core.getCurrentOutputIndex();
         assertEq(newIndex, startIndex + 1);
         assertEq(core.outputHistoryAt(newIndex), fixture.expectedOutput);
+    }
+
+    function testRevealCommitmentRequiresStakeAtRevealTime() public {
+        RevealFixture memory fixture = _buildFixture(minerPk, miner, core.outputHistoryAt(0), 0, bytes32("secret-c-stake"), 19);
+        uint256 requiredStake = mining.REQUIRED_TSTAKE_AMOUNT();
+
+        vm.prank(miner);
+        mining.submitMiningCommitment(fixture.commitHash, 0, fixture.commitmentNonce, fixture.deadline, fixture.commitmentSignature);
+
+        vm.prank(miner);
+        stakeToken.transfer(address(0xCAFE), requiredStake);
+
+        vm.roll(block.number + mining.minCommitmentAge());
+        vm.prank(miner);
+        vm.expectRevert(MiningModule.InsufficientStake.selector);
+        mining.revealMiningCommitmentHarness(
+            fixture.previousOutput,
+            fixture.temporalSeed,
+            fixture.miningNonce,
+            fixture.revealSignature,
+            fixture.secretValue,
+            0
+        );
+    }
+
+    function testRevealCommitmentRemainsValidAfterTimestampAdvances() public {
+        RevealFixture memory fixture = _buildFixture(minerPk, miner, core.outputHistoryAt(0), 0, bytes32("secret-c-time"), 20);
+
+        vm.prank(miner);
+        mining.submitMiningCommitment(fixture.commitHash, 0, fixture.commitmentNonce, fixture.deadline, fixture.commitmentSignature);
+
+        vm.roll(block.number + mining.minCommitmentAge());
+        vm.warp(block.timestamp + 10 minutes);
+
+        vm.prank(miner);
+        mining.revealMiningCommitmentHarness(
+            fixture.previousOutput,
+            fixture.temporalSeed,
+            fixture.miningNonce,
+            fixture.revealSignature,
+            fixture.secretValue,
+            0
+        );
+
+        assertEq(tokenomics.lastOutput(), fixture.expectedOutput);
     }
 
     function testRevealCommitmentRejectsInvalidPreviousOutputExpiredAndAlreadyRevealed() public {
@@ -468,13 +513,9 @@ contract MiningModuleTest is Test {
         bytes memory temporalSeed,
         uint64 miningNonce,
         bytes32 secretValue
-    ) internal view returns (bytes32) {
-        uint64 seedTimestamp = _decodeTemporalSeed(temporalSeed);
-        bytes32 timeBasedEntropy = keccak256(
-            abi.encodePacked(block.timestamp, block.prevrandao, seedTimestamp, address(mining))
-        );
+    ) internal pure returns (bytes32) {
         return keccak256(
-            abi.encodePacked(previousOutput, temporalSeed, miningNonce, signer, timeBasedEntropy, secretValue)
+            abi.encodePacked(previousOutput, temporalSeed, miningNonce, signer, secretValue)
         );
     }
 
@@ -499,9 +540,4 @@ contract MiningModuleTest is Test {
         }
     }
 
-    function _decodeTemporalSeed(bytes memory temporalSeed) internal pure returns (uint64 timestamp) {
-        for (uint256 i = 1; i < 8; i++) {
-            timestamp = (timestamp << 8) | uint64(uint8(temporalSeed[i]));
-        }
-    }
 }

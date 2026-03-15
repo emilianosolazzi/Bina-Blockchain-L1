@@ -41,6 +41,15 @@ Important fields:
 
 ## 5. Launch the miner
 
+Active runtime:
+
+- `temporal_gradient_core` library crate
+- `package/src/bin/temporal-gradient-miner.rs` executable entrypoint
+
+Legacy note:
+
+- The old root-level `l2-mining/rust/Mining.rs` file is not part of the Cargo workspace and must not be used as the miner runtime.
+
 Foreground:
 
 - `tg-miner-installer.exe launch --foreground`

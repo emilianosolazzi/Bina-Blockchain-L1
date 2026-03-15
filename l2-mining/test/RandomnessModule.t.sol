@@ -157,6 +157,10 @@ contract RandomnessModuleTest is Test {
         vm.prank(emergencyOperator);
         token.approve(address(randomness), expectedFee);
 
+        (, uint256 requestedAt, , ) = randomness.getRandomRequestState(requestId);
+        (, , uint256 expiryBlocks, , , ) = randomness.getRandomnessConfig();
+        vm.warp(requestedAt + expiryBlocks + 1);
+
         vm.prank(emergencyOperator);
         randomness.emergencyRandomnessFulfill(requestId, keccak256("emergency-root"));
 
@@ -168,21 +172,90 @@ contract RandomnessModuleTest is Test {
         assertTrue(randomness.getRandomResult(requestId) != bytes32(0));
     }
 
+    function testEmergencyFulfillIgnoresProvidedEntropyRoot() public {
+        uint256 firstRequestId = _requestDefault();
+        uint256 secondRequestId = _requestDefault();
+
+        _contributeEmergencySet(firstRequestId, "same-a", "same-b", "same-c");
+        _contributeEmergencySet(secondRequestId, "same-a", "same-b", "same-c");
+
+        uint256 totalFee = 260 ether;
+        token.mint(emergencyOperator, totalFee);
+        vm.prank(emergencyOperator);
+        token.approve(address(randomness), totalFee);
+
+        (, uint256 requestedAt, , ) = randomness.getRandomRequestState(firstRequestId);
+        (, , uint256 expiryBlocks, , , ) = randomness.getRandomnessConfig();
+        vm.warp(requestedAt + expiryBlocks + 1);
+
+        bytes32 previewFirst = randomness.previewEmergencyFulfillResult(firstRequestId);
+        bytes32 previewSecond = randomness.previewEmergencyFulfillResult(secondRequestId);
+
+        vm.prank(emergencyOperator);
+        randomness.emergencyRandomnessFulfill(firstRequestId, keccak256("root-a"));
+
+        vm.prank(emergencyOperator);
+        randomness.emergencyRandomnessFulfill(secondRequestId, keccak256("root-b"));
+
+        assertEq(randomness.getRandomResult(firstRequestId), previewFirst);
+        assertEq(randomness.getRandomResult(secondRequestId), previewSecond);
+        assertEq(randomness.getRandomResult(firstRequestId), randomness.getRandomResult(secondRequestId));
+    }
+
+    function testEmergencyFulfillRejectsBeforeExpiry() public {
+        uint256 requestId = _requestDefault();
+
+        _contributeEmergencySet(requestId, "early-a", "early-b", "early-c");
+
+        uint256 expectedFee = 130 ether;
+        token.mint(emergencyOperator, expectedFee);
+        vm.prank(emergencyOperator);
+        token.approve(address(randomness), expectedFee);
+
+        vm.prank(emergencyOperator);
+        vm.expectRevert(RandomnessLib.RequestNotExpired.selector);
+        randomness.emergencyRandomnessFulfill(requestId, keccak256("too-early-root"));
+    }
+
     function testExpiryHandlingRejectsLateContribution() public {
         uint256 requestId = _requestDefault();
 
         (, , uint256 expiryBlocks, , , ) = randomness.getRandomnessConfig();
 
         (, uint256 requestedAt, , ) = randomness.getRandomRequestState(requestId);
-        vm.roll(requestedAt + expiryBlocks + 1);
+        vm.warp(requestedAt + expiryBlocks + 1);
 
         vm.prank(contributorA);
         vm.expectRevert(RandomnessLib.RequestExpired.selector);
         randomness.contributeEntropy(requestId, keccak256("too-late"));
     }
 
+    function testContributionBeforeExpiryStillSucceeds() public {
+        uint256 requestId = _requestDefault();
+
+        (, , uint256 expiryBlocks, , , ) = randomness.getRandomnessConfig();
+        (, uint256 requestedAt, , ) = randomness.getRandomRequestState(requestId);
+        vm.warp(requestedAt + expiryBlocks);
+
+        vm.prank(contributorA);
+        randomness.contributeEntropy(requestId, keccak256("on-time"));
+
+        (, , bool fulfilled, uint256 contributionCount) = randomness.getRandomRequestState(requestId);
+        assertFalse(fulfilled);
+        assertEq(contributionCount, 1);
+    }
+
     function _requestDefault() internal returns (uint256 requestId) {
         vm.prank(requester);
         requestId = randomness.requestRandomness(keccak256("default-seed"));
+    }
+
+    function _contributeEmergencySet(uint256 requestId, string memory a, string memory b, string memory c) internal {
+        vm.prank(contributorA);
+        randomness.contributeEntropyNoAutoFulfill(requestId, keccak256(bytes(a)));
+        vm.prank(contributorB);
+        randomness.contributeEntropyNoAutoFulfill(requestId, keccak256(bytes(b)));
+        vm.prank(contributorC);
+        randomness.contributeEntropyNoAutoFulfill(requestId, keccak256(bytes(c)));
     }
 }

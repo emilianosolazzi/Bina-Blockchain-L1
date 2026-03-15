@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import { EIP712Upgradeable } from "@openzeppelin/contracts-upgradeable/utils/cryptography/EIP712Upgradeable.sol";
 import { ECDSA } from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import { EIP712 } from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { ModuleBase } from "./ModuleBase.sol";
 import { BloomFilterLib } from "../BloomFilterLib.sol";
@@ -12,7 +11,7 @@ import { MiningLib } from "../MiningLib.sol";
 import { IRateLimitModule } from "../interfaces/IRateLimitModule.sol";
 import { ITokenomicsModule } from "../interfaces/ITokenomicsModule.sol";
 
-contract MiningModule is Initializable, ModuleBase, EIP712Upgradeable {
+contract MiningModule is ModuleBase, EIP712("TemporalGradientBeacon", "1") {
     using ECDSA for bytes32;
     using BloomFilterLib for BloomFilterLib.Filter;
 
@@ -20,7 +19,7 @@ contract MiningModule is Initializable, ModuleBase, EIP712Upgradeable {
     bytes32 public constant MODULE_TOKENOMICS = keccak256("TOKENOMICS_MODULE");
 
     uint256 public constant MIN_DIFFICULTY = 1000;
-    uint256 public constant MAX_DIFFICULTY = 2**220;
+    uint256 public constant MAX_DIFFICULTY = 2**245;
     uint256 public constant REQUIRED_TSTAKE_AMOUNT = 100 ether;
     uint256 private constant DEFAULT_DIFFICULTY_WEIGHT = 1e18;
     uint256 private constant DEFAULT_SUBMISSION_COST = 1;
@@ -59,9 +58,8 @@ contract MiningModule is Initializable, ModuleBase, EIP712Upgradeable {
     error ArrayLengthMismatch();
     error InvalidPreviousOutput();
 
-    function initialize(address coreAddress, address stakeTokenAddress, uint256 initialDifficulty, uint256 initialEmission) external initializer {
+    function initialize(address coreAddress, address stakeTokenAddress, uint256 initialDifficulty, uint256 initialEmission) external {
         __ModuleBase_init(coreAddress);
-        __EIP712_init("TemporalGradientBeacon", "1");
 
         stakeToken = IERC20(stakeTokenAddress);
         poolCount = 1;
@@ -78,7 +76,7 @@ contract MiningModule is Initializable, ModuleBase, EIP712Upgradeable {
             minerCount: 0
         });
 
-        BloomFilterLib.createFilter(bloomFilter, 65536, 4, block.timestamp);
+        BloomFilterLib.createFilter(bloomFilter, 256, 4, block.timestamp);
         emit MiningPoolCreated(0, initialDifficulty, initialEmission);
     }
 
@@ -135,6 +133,7 @@ contract MiningModule is Initializable, ModuleBase, EIP712Upgradeable {
         uint8 poolId
     ) external whenSystemActive {
         _rateLimit().consumeOrRevert(msg.sender, DEFAULT_REVEAL_COST, keccak256("MINING_REVEAL"));
+        if (stakeToken.balanceOf(msg.sender) < REQUIRED_TSTAKE_AMOUNT) revert InsufficientStake();
         if (poolId >= poolCount || !miningPools[poolId].active) revert InvalidPoolId();
 
         MiningLib.Commitment storage commitment = minerCommitments[msg.sender];
@@ -144,21 +143,32 @@ contract MiningModule is Initializable, ModuleBase, EIP712Upgradeable {
         require(block.number <= commitment.timestamp + maxCommitmentAge, "CommitmentExpired");
         require(commitment.poolId == poolId, "InvalidPoolId");
 
-        bytes32 computedHash = keccak256(
-            abi.encodePacked(previousOutput, temporalSeed, nonce, signature, secretValue, msg.sender)
+        MiningLib.checkCommitmentValidity(
+            MiningLib.RevealParams({
+                miner: msg.sender,
+                previousOutput: previousOutput,
+                temporalSeed: temporalSeed,
+                nonce: nonce,
+                signature: signature,
+                secretValue: secretValue,
+                poolId: poolId
+            }),
+            commitment
         );
-        require(computedHash == commitment.commitHash, "InvalidCommitment");
 
         if (!_historyContains(previousOutput)) revert InvalidPreviousOutput();
 
         bytes32 hmacOutput = MiningLib.processMiningReveal(
-            previousOutput,
-            temporalSeed,
-            nonce,
-            signature,
-            secretValue,
+            MiningLib.RevealParams({
+                miner: msg.sender,
+                previousOutput: previousOutput,
+                temporalSeed: temporalSeed,
+                nonce: nonce,
+                signature: signature,
+                secretValue: secretValue,
+                poolId: poolId
+            }),
             miningPools[poolId].targetDifficulty,
-            msg.sender,
             bloomFilter,
             usedOutputs,
             MiningLib.quantumResistantHash,
@@ -245,6 +255,50 @@ contract MiningModule is Initializable, ModuleBase, EIP712Upgradeable {
             pool.totalMined,
             pool.active
         );
+    }
+
+    function getMiningChallenge(uint8 poolId)
+        external
+        view
+        returns (bytes32[] memory outputs, uint256 difficulty)
+    {
+        if (poolId >= poolCount || !miningPools[poolId].active) revert InvalidPoolId();
+
+        bytes32[32] memory history = _outputHistory();
+        outputs = new bytes32[](history.length);
+        for (uint256 i = 0; i < history.length; i++) {
+            outputs[i] = history[i];
+        }
+
+        return (outputs, miningPools[poolId].targetDifficulty);
+    }
+
+    function getActivePools()
+        external
+        view
+        returns (uint8[] memory activePools, uint256[] memory difficulties, uint256[] memory emissions)
+    {
+        activePools = new uint8[](poolCount);
+        difficulties = new uint256[](poolCount);
+        emissions = new uint256[](poolCount);
+
+        uint8 activeCount = 0;
+        for (uint8 i = 0; i < poolCount; i++) {
+            if (miningPools[i].active) {
+                activePools[activeCount] = i;
+                difficulties[activeCount] = miningPools[i].targetDifficulty;
+                emissions[activeCount] = miningPools[i].emissionBucket > miningPools[i].totalMined
+                    ? miningPools[i].emissionBucket - miningPools[i].totalMined
+                    : 0;
+                activeCount++;
+            }
+        }
+
+        assembly {
+            mstore(activePools, activeCount)
+            mstore(difficulties, activeCount)
+            mstore(emissions, activeCount)
+        }
     }
 
     function _historyContains(bytes32 previousOutput) internal view returns (bool) {

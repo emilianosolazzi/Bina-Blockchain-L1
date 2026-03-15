@@ -918,7 +918,7 @@ library BloomFilterLib {
         uint256 recommendedNewHashes
     ) {
         // Get current metrics
-        (uint256 size, uint256 bitCount, uint256 insertCount, uint256 fillRatioBps, uint256 fprBps) = 
+            (uint256 size, , uint256 insertCount, uint256 fillRatioBps, uint256 fprBps) = 
             getFilterMetrics(filter);
         
         // Calculate pruning parameters

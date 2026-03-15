@@ -6,12 +6,21 @@ This package is the first step toward a user-friendly Windows distribution for t
 
 - builds a small bootstrap binary: `tg-miner-installer.exe`
 - builds the main miner runtime: `temporal-gradient-miner.exe`
+- uses the active miner core from `temporal_gradient_core`
 - creates per-user config/data/log directories
 - writes a default miner config template
 - runs a basic install health check
 - installs both binaries into the expected per-user bin directory
 - launches the miner as a child process
 - produces a portable zip bundle for distribution
+
+## Active miner entrypoint
+
+- Runtime crate: `temporal_gradient_core`
+- Executable: `package/src/bin/temporal-gradient-miner.rs`
+- Typical direct launch: `cargo run --bin temporal-gradient-miner -- --config <path-to-config>`
+
+The previous standalone root-level `l2-mining/rust/Mining.rs` file is legacy code and is not part of the active workspace runtime.
 
 ## Commands
 
