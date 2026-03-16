@@ -650,6 +650,76 @@
     <section class="grid" style="margin-top:16px;">
       <div class="panel" style="grid-column: span 12;">
         <div class="solutions-header">
+          <h3 class="section-title">Personal Threat Dashboard</h3>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <button class="action-btn" id="refreshSecurity">Refresh security</button>
+            <button class="copy-btn" id="copyRelayProfile">Copy relay profile</button>
+          </div>
+        </div>
+        <div class="system-grid">
+          <div class="status-card">
+            <h3>Continuity</h3>
+            <div class="status-list">
+              <div class="status-item"><span>Trusted runtime</span><span id="threatContinuity">—</span></div>
+              <div class="status-item"><span>Current gap</span><span id="threatCurrentGap">—</span></div>
+              <div class="status-item"><span>Longest gap</span><span id="threatLongestGap">—</span></div>
+              <div class="status-item"><span>Gap count</span><span id="threatGapCount">—</span></div>
+            </div>
+          </div>
+          <div class="status-card">
+            <h3>Threat posture</h3>
+            <div class="status-list">
+              <div class="status-item"><span>Security posture</span><span id="threatPostureBadge" class="badge">—</span></div>
+              <div class="status-item"><span>Intrusion score</span><span id="threatIntrusionScore">—</span></div>
+              <div class="status-item"><span>Telemetry freshness</span><span id="threatTelemetryFresh">—</span></div>
+              <div class="status-item"><span>Narrative</span><span id="threatNarrative">—</span></div>
+            </div>
+          </div>
+          <div class="status-card">
+            <h3>Relay readiness</h3>
+            <div class="status-list">
+              <div class="status-item"><span>Relay ready</span><span id="relayReadyBadge" class="badge">—</span></div>
+              <div class="status-item"><span>Operator</span><span id="relayOperator" class="mono">—</span></div>
+              <div class="status-item"><span>Region</span><span id="relayRegion">—</span></div>
+              <div class="status-item"><span>Latest proof signer</span><span id="relaySigner" class="mono">—</span></div>
+            </div>
+          </div>
+          <div class="status-card">
+            <h3>Latest proof-of-presence</h3>
+            <div class="status-list">
+              <div class="status-item"><span>Output hash</span><span id="relayOutputHash" class="mono">—</span></div>
+              <div class="status-item"><span>Epoch / leaf</span><span id="relayEpochLeaf">—</span></div>
+              <div class="status-item"><span>Heartbeat API</span><span id="relayHeartbeatOnline">—</span></div>
+              <div class="status-item"><span>Randomness API</span><span id="relayRandomnessOnline">—</span></div>
+            </div>
+          </div>
+        </div>
+        <div class="proof-box" style="margin-top:16px;">
+          <div class="helper" style="margin-bottom:8px;">Personal threat summary</div>
+          <div id="personalThreatSummary">—</div>
+        </div>
+        <div class="system-grid" style="margin-top:16px;">
+          <div class="panel" style="grid-column: span 7; padding: 0; background: transparent; border: 0; box-shadow: none;">
+            <div class="proof-box">
+              <div class="helper" style="margin-bottom:8px;">Heartbeat history</div>
+              <div id="heartbeatHistory" class="proof-nodes"></div>
+            </div>
+          </div>
+          <div class="panel" style="grid-column: span 5; padding: 0; background: transparent; border: 0; box-shadow: none;">
+            <div class="proof-box" style="margin-bottom:16px;">
+              <div class="helper" style="margin-bottom:8px;">Active alerts</div>
+              <div id="threatActiveAlerts" class="proof-nodes"></div>
+            </div>
+            <div class="proof-box">
+              <div class="helper" style="margin-bottom:8px;">Relay profile preview</div>
+              <div id="relayProfilePreview" class="proof-node mono" style="white-space: pre-wrap;">—</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel" style="grid-column: span 12;">
+        <div class="solutions-header">
           <h3 class="section-title">System & Chain Status</h3>
           <button class="action-btn" id="refreshSystem">Refresh status</button>
         </div>
@@ -659,6 +729,7 @@
             <div class="status-list">
               <div class="status-item"><span>Dashboard</span><span class="badge ok">Online</span></div>
               <div class="status-item"><span>Randomness API</span><span id="randomnessApiBadge" class="badge">Checking…</span></div>
+              <div class="status-item"><span>Heartbeat sidecar</span><span id="heartbeatApiBadge" class="badge">Checking…</span></div>
               <div class="status-item"><span>Telemetry source</span><span id="telemetryPath" class="mono">—</span></div>
               <div class="status-item"><span>Solution backend</span><span id="solutionBackend">—</span></div>
             </div>
@@ -863,6 +934,10 @@
         stalledEpochId: null,
         storageFailedEpochId: null,
       },
+      security: {
+        threatProfile: null,
+        relayProfile: null,
+      },
       wallet: {
         provider: null,
         signer: null,
@@ -915,6 +990,11 @@
       if (h) return `${h}h ${m}m ${ss}s`;
       if (m) return `${m}m ${ss}s`;
       return `${ss}s`;
+    }
+
+    function fmtMsDuration(ms) {
+      if (ms == null) return '—';
+      return fmtDuration(Math.round(Number(ms) / 1000));
     }
 
     function shortHash(value, size = 12) {
@@ -1216,6 +1296,7 @@
       if (!sys) return;
 
       setBadge(els.randomnessApiBadge, sys.randomnessApi?.online ? 'Online' : 'Offline', sys.randomnessApi?.online ? 'ok' : 'fail');
+      setBadge(els.heartbeatApiBadge, sys.heartbeatApi?.online ? 'Online' : 'Offline', sys.heartbeatApi?.online ? 'ok' : 'fail');
       els.telemetryPath.textContent = sys.dashboard?.telemetryFile || '—';
       els.solutionBackend.textContent = sys.dashboard?.solutionsBackend || '—';
       els.storageLabel.textContent = (sys.dashboard?.solutionsBackend || 'file').toUpperCase();
@@ -1255,6 +1336,79 @@
       }
 
       renderAlerts();
+    }
+
+    function renderSecurity() {
+      const threat = state.security?.threatProfile;
+      const relay = state.security?.relayProfile;
+      if (!threat) return;
+
+      const heartbeat = threat.heartbeatStatus || {};
+      const telemetry = threat.telemetry || {};
+      const alerts = threat.heartbeatAlerts?.active || heartbeat.security?.activeAlerts || [];
+      const suspicious = heartbeat.security?.suspicious;
+
+      els.personalThreatSummary.textContent = telemetry.continuousVerifiedLabel || heartbeat.security?.narrative || 'Security summary unavailable.';
+      els.threatContinuity.textContent = telemetry.continuousVerifiedHours != null ? `${fmtNum(telemetry.continuousVerifiedHours)} h` : '—';
+      els.threatCurrentGap.textContent = fmtMsDuration(heartbeat.heartbeat?.solutionGapMs ?? telemetry.currentGapMs);
+      els.threatLongestGap.textContent = fmtMsDuration(telemetry.longestGapMs);
+      els.threatGapCount.textContent = fmtNum(telemetry.gapCount || 0);
+      setBadge(els.threatPostureBadge, suspicious ? 'Suspicious' : 'Trusted', suspicious ? 'fail' : 'ok');
+      els.threatIntrusionScore.textContent = fmtNum(heartbeat.security?.intrusionScore || 0);
+      els.threatIntrusionScore.className = suspicious ? 'danger' : 'ok';
+      els.threatTelemetryFresh.textContent = heartbeat.heartbeat?.telemetryFresh ? 'Fresh' : 'Stale';
+      els.threatTelemetryFresh.className = heartbeat.heartbeat?.telemetryFresh ? 'ok' : 'warn';
+      els.threatNarrative.textContent = heartbeat.security?.narrative || '—';
+      els.threatNarrative.className = suspicious ? 'danger' : '';
+
+      const history = telemetry.history || [];
+      els.heartbeatHistory.innerHTML = history.length
+        ? history.slice().reverse().map(item => `<div class="proof-node">
+            <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start;">
+              <div>
+                <div><strong>${escapeHtml(new Date(item.timestamp).toLocaleString())}</strong></div>
+                <div class="helper">Nonce ${fmtNum(item.nonce)} • Accepted #${fmtNum(item.acceptedSubmissions)}</div>
+              </div>
+              <span class="badge ${item.gapFlag ? 'fail' : 'ok'}">${item.gapFlag ? 'Gap' : 'Healthy'}</span>
+            </div>
+            <div class="helper" style="margin-top:8px;">Gap ${escapeHtml(fmtMsDuration(item.gapMs))} • Hashrate ${escapeHtml(fmtHashrate(item.hashrateHs))} • Temp ${item.temperatureC != null ? escapeHtml(`${item.temperatureC.toFixed(1)} °C`) : '—'}</div>
+            <div class="mono" style="margin-top:8px;">${escapeHtml(shortHash(item.outputHash || '—', 18))}</div>
+          </div>`).join('')
+        : '<div class="helper">No heartbeat history available yet.</div>';
+
+      els.threatActiveAlerts.innerHTML = alerts.length
+        ? alerts.map(alert => `<div class="proof-node">
+            <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;">
+              <strong>${escapeHtml(alert.type || 'alert')}</strong>
+              <span class="badge ${alert.severity === 'critical' || alert.severity === 'high' ? 'fail' : 'warn'}">${escapeHtml(alert.severity || 'info')}</span>
+            </div>
+            <div class="helper" style="margin-top:8px;">${escapeHtml(alert.message || 'No details')}</div>
+          </div>`).join('')
+        : '<div class="helper">No active alerts. Mining heartbeat is clean.</div>';
+
+      if (relay) {
+        setBadge(els.relayReadyBadge, relay.relayReady ? 'Ready' : 'Not ready', relay.relayReady ? 'ok' : 'warn');
+        els.relayOperator.textContent = relay.miner?.operator || '—';
+        els.relayRegion.textContent = relay.miner?.region || '—';
+        els.relaySigner.textContent = relay.proofOfPresence?.recoveredSigner || '—';
+        els.relayOutputHash.textContent = relay.proofOfPresence?.outputHash || '—';
+        els.relayEpochLeaf.textContent = relay.proofOfPresence ? `Epoch ${relay.proofOfPresence.epochId} • Leaf ${relay.proofOfPresence.leafIndex}` : '—';
+        els.relayHeartbeatOnline.textContent = relay.transport?.heartbeatOnline ? 'Online' : 'Offline';
+        els.relayHeartbeatOnline.className = relay.transport?.heartbeatOnline ? 'ok' : 'warn';
+        els.relayRandomnessOnline.textContent = relay.transport?.randomnessApiOnline ? 'Online' : 'Offline';
+        els.relayRandomnessOnline.className = relay.transport?.randomnessApiOnline ? 'ok' : 'warn';
+        els.relayProfilePreview.textContent = JSON.stringify(relay, null, 2);
+      } else {
+        setBadge(els.relayReadyBadge, 'Unknown', 'warn');
+        els.relayOperator.textContent = '—';
+        els.relayRegion.textContent = '—';
+        els.relaySigner.textContent = '—';
+        els.relayOutputHash.textContent = '—';
+        els.relayEpochLeaf.textContent = '—';
+        els.relayHeartbeatOnline.textContent = '—';
+        els.relayRandomnessOnline.textContent = '—';
+        els.relayProfilePreview.textContent = 'Relay profile unavailable.';
+      }
     }
 
     function renderLatestRandomness() {
@@ -1541,6 +1695,17 @@
       renderEpochs();
     }
 
+    async function loadSecurity() {
+      const [threatRes, relayRes] = await Promise.all([
+        fetch('/api/security/threat-profile'),
+        fetch('/api/security/relay-profile'),
+      ]);
+      const [threatData, relayData] = await Promise.all([threatRes.json(), relayRes.json()]);
+      state.security.threatProfile = threatRes.ok ? threatData : { heartbeatStatus: { error: threatData.error || 'Failed to load threat profile' }, telemetry: { history: [] }, heartbeatAlerts: { active: [] } };
+      state.security.relayProfile = relayRes.ok ? relayData : null;
+      renderSecurity();
+    }
+
     async function loadProof(outputHash) {
       const hash = (outputHash || els.proofOutputInput.value || '').trim();
       if (!hash) {
@@ -1694,6 +1859,7 @@
     };
 
     els.refreshSystem.addEventListener('click', () => loadSystemStatus().catch(err => console.error(err)));
+    els.refreshSecurity.addEventListener('click', () => loadSecurity().catch(err => showToast(err.message, true)));
     els.refreshRandomness.addEventListener('click', () => loadNetworkLatest().catch(err => {
       state.randomnessLatest = { error: err.message };
       renderLatestRandomness();
@@ -1706,6 +1872,7 @@
       renderProof();
     }));
     els.copyOutputHash.addEventListener('click', () => copyText(state.proof?.outputHash || state.randomnessLatest?.outputHash, 'Output hash'));
+    els.copyRelayProfile.addEventListener('click', () => copyText(JSON.stringify(state.security?.relayProfile || {}, null, 2), 'Relay profile'));
     els.copyProofArgs.addEventListener('click', () => copyText(getProofArgsJson(state.proof), 'Proof args'));
     els.copyFullCall.addEventListener('click', () => copyText(getFullVerifyCall(state.proof), 'Full call'));
     els.loadLatestProof.addEventListener('click', () => {
@@ -1822,12 +1989,14 @@
     setInterval(loadSolutions, 10000);
 
     Promise.allSettled([
+      loadSecurity(),
       loadSystemStatus(),
       loadNetworkLatest(),
       loadEpochs(),
     ]).catch(() => {});
 
     setInterval(() => {
+      loadSecurity().catch(err => console.error('[security]', err.message));
       loadSystemStatus().catch(err => console.error('[system]', err.message));
       loadNetworkLatest().catch(err => console.error('[randomness]', err.message));
       loadEpochs().catch(err => console.error('[epochs]', err.message));

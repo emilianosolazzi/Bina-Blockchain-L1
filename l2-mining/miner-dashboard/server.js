@@ -12,6 +12,7 @@ const ROOT = __dirname;
 const INDEX = path.join(ROOT, 'index.html');
 const TELEMETRY_FILE = process.env.TELEMETRY_FILE || path.resolve(ROOT, '..', 'rust', 'miner-telemetry.jsonl');
 const RANDOMNESS_API_URL = process.env.RANDOMNESS_API_URL || 'http://127.0.0.1:4271';
+const HEARTBEAT_API_URL = process.env.HEARTBEAT_API_URL || 'http://127.0.0.1:4380';
 const RPC_URL = process.env.RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com';
 const CORE_ADDRESS = process.env.CORE_ADDRESS || '0x843fAc753610163776374Ab0261029BAEA0251b7';
 const TGBT_ADDRESS = process.env.TGBT_ADDRESS || '0x496598fDeab78fb2986e89d396249779595418E9';
@@ -98,8 +99,12 @@ async function getSystemStatus() {
 	const tgbt = new ethers.Contract(TGBT_ADDRESS, TGBT_ABI, provider);
 	const batch = new ethers.Contract(BATCH_ADDRESS, BATCH_ABI, provider);
 
-	const [randomnessApi, ethBalance, tokenBalance, tokenDecimals, tokenSymbol, coreBatchModule, coreTokenomicsModule, nextEpochId, currentBlock, network] = await Promise.all([
+	const [randomnessApi, heartbeatApi, ethBalance, tokenBalance, tokenDecimals, tokenSymbol, coreBatchModule, coreTokenomicsModule, nextEpochId, currentBlock, network] = await Promise.all([
 		requestJson(`${RANDOMNESS_API_URL}/api/health`, { timeoutMs: 4000 }).catch(err => ({
+			status: 503,
+			json: { error: shortError(err) },
+		})),
+		requestJson(`${HEARTBEAT_API_URL}/api/health`, { timeoutMs: 4000 }).catch(err => ({
 			status: 503,
 			json: { error: shortError(err) },
 		})),
@@ -152,6 +157,12 @@ async function getSystemStatus() {
 			status: randomnessApi.status,
 			data: randomnessApi.json,
 		},
+		heartbeatApi: {
+			url: HEARTBEAT_API_URL,
+			online: heartbeatApi.status >= 200 && heartbeatApi.status < 300,
+			status: heartbeatApi.status,
+			data: heartbeatApi.json,
+		},
 		chain: {
 			rpcUrl: RPC_URL,
 			chainId: Number(network.chainId),
@@ -177,6 +188,177 @@ async function getSystemStatus() {
 			latestOnChainEpoch,
 		},
 	};
+}
+
+function deriveHeartbeatSummary(limit = 720) {
+	const snapshots = readSnapshots(limit);
+	const latest = snapshots[snapshots.length - 1] || null;
+	if (!latest) {
+		return {
+			continuousVerifiedHours: 0,
+			continuousVerifiedLabel: 'No telemetry yet',
+			gapCount: 0,
+			longestGapMs: 0,
+			currentGapMs: null,
+			averageSolutionIntervalMs: null,
+			targetGapMs: 30000,
+			history: [],
+			snapshotCount: 0,
+		};
+	}
+
+	const acceptedEvents = [];
+	let prevAccepted = null;
+	let prevNonce = null;
+	for (const snap of snapshots) {
+		const accepted = Number(snap.accepted_submissions || 0);
+		const nonce = snap.last_solution_nonce == null ? null : Number(snap.last_solution_nonce);
+		const changed = prevAccepted !== null && (accepted > prevAccepted || (nonce != null && nonce !== prevNonce));
+		if (changed || (prevAccepted === null && accepted > 0 && nonce != null)) {
+			acceptedEvents.push({
+				timestampMs: Number(snap.timestamp_unix_ms || 0),
+				hashrateHs: Number(snap.hashrate_hs || 0),
+				temperatureC: snap.temperature_c == null ? null : Number(snap.temperature_c),
+				acceptedSubmissions: accepted,
+				nonce,
+				outputHash: snap.last_output_hash_hex || snap.last_solution_hash_hex || null,
+			});
+		}
+		prevAccepted = accepted;
+		prevNonce = nonce;
+	}
+
+	const gaps = [];
+	for (let i = 1; i < acceptedEvents.length; i += 1) {
+		const gapMs = acceptedEvents[i].timestampMs - acceptedEvents[i - 1].timestampMs;
+		if (gapMs > 0) gaps.push(gapMs);
+	}
+	const averageSolutionIntervalMs = gaps.length
+		? gaps.reduce((sum, value) => sum + value, 0) / gaps.length
+		: null;
+	const targetGapMs = Math.max(30000, Math.round((averageSolutionIntervalMs || 5000) * 6));
+	const gapCount = gaps.filter(gap => gap > targetGapMs).length;
+	const longestGapMs = gaps.length ? Math.max(...gaps) : 0;
+	const currentGapMs = acceptedEvents.length ? Math.max(0, Date.now() - acceptedEvents[acceptedEvents.length - 1].timestampMs) : null;
+	const continuousVerifiedHours = Math.max(0, Number(latest.uptime_seconds || 0)) / 3600;
+	const continuousVerifiedLabel = gapCount === 0
+		? `Your device has been continuously verified for ${continuousVerifiedHours.toFixed(1)} hours. No gaps detected.`
+		: `Your device has been continuously verified for ${continuousVerifiedHours.toFixed(1)} hours with ${gapCount} heartbeat gap${gapCount === 1 ? '' : 's'} detected.`;
+
+	const history = acceptedEvents.slice(-24).map((event, index, arr) => ({
+		timestamp: new Date(event.timestampMs).toISOString(),
+		acceptedSubmissions: event.acceptedSubmissions,
+		nonce: event.nonce,
+		outputHash: event.outputHash,
+		hashrateHs: event.hashrateHs,
+		temperatureC: event.temperatureC,
+		gapMs: index === 0 ? null : Math.max(0, event.timestampMs - arr[index - 1].timestampMs),
+		gapFlag: index === 0 ? false : Math.max(0, event.timestampMs - arr[index - 1].timestampMs) > targetGapMs,
+	}));
+
+	return {
+		continuousVerifiedHours,
+		continuousVerifiedLabel,
+		gapCount,
+		longestGapMs,
+		currentGapMs,
+		averageSolutionIntervalMs,
+		targetGapMs,
+		history,
+		snapshotCount: snapshots.length,
+	};
+}
+
+async function getHeartbeatStatus() {
+	const response = await requestJson(`${HEARTBEAT_API_URL}/api/heartbeat/status`, { timeoutMs: 4000 }).catch(err => ({
+		status: 503,
+		json: { error: shortError(err) },
+	}));
+	return response.status >= 200 && response.status < 300
+		? response.json
+		: { error: response.json?.error || `Heartbeat API returned ${response.status}` };
+}
+
+async function getHeartbeatAlerts() {
+	const response = await requestJson(`${HEARTBEAT_API_URL}/api/heartbeat/alerts?all=1`, { timeoutMs: 4000 }).catch(err => ({
+		status: 503,
+		json: { error: shortError(err) },
+	}));
+	return response.status >= 200 && response.status < 300
+		? response.json
+		: { error: response.json?.error || `Heartbeat API returned ${response.status}`, active: [], history: [] };
+}
+
+async function getThreatProfile() {
+	const [heartbeatStatus, heartbeatAlerts] = await Promise.all([
+		getHeartbeatStatus(),
+		getHeartbeatAlerts(),
+	]);
+	const telemetry = deriveHeartbeatSummary();
+	return {
+		heartbeatStatus,
+		heartbeatAlerts,
+		telemetry,
+	};
+}
+
+async function getRelayProfile() {
+	const [system, heartbeatStatus, latestRandomness] = await Promise.all([
+		getSystemStatus(),
+		getHeartbeatStatus(),
+		requestJson(`${RANDOMNESS_API_URL}/api/randomness/latest`, { timeoutMs: 4000 }).catch(err => ({
+			status: 503,
+			json: { error: shortError(err) },
+		})),
+	]);
+
+	const latest = latestRandomness.status >= 200 && latestRandomness.status < 300 ? latestRandomness.json : null;
+	const relayReady = !!(
+		system.randomnessApi?.online &&
+		system.heartbeatApi?.online &&
+		heartbeatStatus?.heartbeat?.online &&
+		heartbeatStatus?.security?.suspicious === false &&
+		latest?.signature
+	);
+
+	const profile = {
+		version: 1,
+		exportedAt: new Date().toISOString(),
+		relayReady,
+		miner: {
+			name: heartbeatStatus?.miner?.name || 'Temporal Gradient miner',
+			region: heartbeatStatus?.miner?.region || 'unknown',
+			operator: heartbeatStatus?.miner?.operator || system.chain?.walletAddress || WALLET_ADDRESS,
+		},
+		transport: {
+			rpcReachable: true,
+			randomnessApiOnline: !!system.randomnessApi?.online,
+			heartbeatOnline: !!heartbeatStatus?.heartbeat?.online,
+			telemetryFresh: !!heartbeatStatus?.heartbeat?.telemetryFresh,
+			intrusionScore: Number(heartbeatStatus?.security?.intrusionScore || 0),
+		},
+		proofOfPresence: latest ? {
+			outputHash: latest.outputHash,
+			epochId: latest.epochId,
+			leafIndex: latest.leafIndex,
+			timestamp: latest.timestamp,
+			signature: latest.signature,
+			recoveredSigner: system.chain?.walletAddress || WALLET_ADDRESS,
+		} : null,
+		capabilities: [
+			'heartbeat-attested-egress',
+			'verified-miner-identity',
+			'continuous-connectivity-monitoring',
+			'future-peer-relay-ready',
+		],
+		constraints: [
+			'No packet forwarding plane implemented yet.',
+			'Peer discovery and encrypted relay circuits still need to be added.',
+			'Current build proves miner continuity and relay readiness only.',
+		],
+	};
+
+	return profile;
 }
 
 async function getOnChainEpoch(epochId) {
@@ -389,6 +571,46 @@ const server = http.createServer(async (req, res) => {
 		try {
 			const status = await getSystemStatus();
 			sendJson(res, 200, status);
+		} catch (err) {
+			sendJson(res, 500, { error: shortError(err) });
+		}
+		return;
+	}
+
+	if (url.pathname === '/api/security/heartbeat/status' && req.method === 'GET') {
+		try {
+			const status = await getHeartbeatStatus();
+			sendJson(res, status?.error ? 503 : 200, status);
+		} catch (err) {
+			sendJson(res, 500, { error: shortError(err) });
+		}
+		return;
+	}
+
+	if (url.pathname === '/api/security/heartbeat/alerts' && req.method === 'GET') {
+		try {
+			const alerts = await getHeartbeatAlerts();
+			sendJson(res, alerts?.error ? 503 : 200, alerts);
+		} catch (err) {
+			sendJson(res, 500, { error: shortError(err) });
+		}
+		return;
+	}
+
+	if (url.pathname === '/api/security/threat-profile' && req.method === 'GET') {
+		try {
+			const profile = await getThreatProfile();
+			sendJson(res, 200, profile);
+		} catch (err) {
+			sendJson(res, 500, { error: shortError(err) });
+		}
+		return;
+	}
+
+	if (url.pathname === '/api/security/relay-profile' && req.method === 'GET') {
+		try {
+			const profile = await getRelayProfile();
+			sendJson(res, 200, profile);
 		} catch (err) {
 			sendJson(res, 500, { error: shortError(err) });
 		}
