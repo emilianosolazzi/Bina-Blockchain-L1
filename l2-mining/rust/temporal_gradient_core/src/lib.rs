@@ -1,7 +1,9 @@
 pub mod chain;
 pub mod config;
+pub mod cpu;
 pub mod crypto;
 pub mod logging;
+pub mod memory;
 pub mod paths;
 pub mod pending;
 pub mod pqc;
@@ -9,14 +11,18 @@ pub mod runtime;
 pub mod seed;
 pub mod storage_verification;
 pub mod telemetry;
+pub mod tg_output_filter;
+pub mod tg_relay_transport;
 
 pub use chain::{wallet_address_from_config, LiveChallenge, LiveMiningClient, LiveSubmission};
 pub use config::{load_or_create_config, default_config_json, MinerConfig};
+pub use cpu::{detect_cpu_safely, get_cpu_temperature, has_cpu_feature, mask_cpu_identity, CpuFeature, CpuIdentity, MaskingConfig};
 pub use crypto::{
     build_commitment_payload, contract_hash_message, create_entropy_hash, has_leading_zero_bits,
     miner_address_from_signing_key, CommitmentPayload, DynamicMiningCommitment, MiningMaterial,
 };
 pub use logging::setup_logging;
+pub use memory::{SecureBuffer, SecureBufferError};
 pub use paths::{app_paths, ensure_app_layout, AppPaths};
 pub use pqc::{apply_pqc_enhancement, PqcMode};
 pub use runtime::{spawn_miner, MinerHandle};
@@ -27,3 +33,8 @@ pub use storage_verification::{
     VerificationResult, VerificationStats,
 };
 pub use telemetry::{MinerState, MiningPhase, PhaseTracker, TelemetrySnapshot};
+pub use tg_output_filter::{FilterConfig, FilterError, OutputRecord, Ready, TgOutputFilter, Uninitialized};
+pub use tg_relay_transport::{
+    relay_connect, relay_connect_pinned, ReliableRelayChannel, RelayChannel, SecureTransport,
+    TransportConfig, TransportError, TransportStats, TransportStatsSnapshot,
+};

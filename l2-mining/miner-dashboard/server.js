@@ -11,6 +11,7 @@ const PORT = Number(process.env.PORT || 4173);
 const ROOT = __dirname;
 const INDEX = path.join(ROOT, 'index.html');
 const TELEMETRY_FILE = process.env.TELEMETRY_FILE || path.resolve(ROOT, '..', 'rust', 'miner-telemetry.jsonl');
+const RELAY_STATUS_FILE = process.env.RELAY_STATUS_FILE || path.join(path.dirname(TELEMETRY_FILE), `${path.parse(TELEMETRY_FILE).name}.relay-status.json`);
 const RANDOMNESS_API_URL = process.env.RANDOMNESS_API_URL || 'http://127.0.0.1:4271';
 const HEARTBEAT_API_URL = process.env.HEARTBEAT_API_URL || 'http://127.0.0.1:4380';
 const RPC_URL = process.env.RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com';
@@ -94,6 +95,55 @@ function requestJson(targetUrl, options = {}) {
 	});
 }
 
+function readRelayStatus() {
+	if (!fs.existsSync(RELAY_STATUS_FILE)) {
+		return {
+			enabled: false,
+			state: 'disabled',
+			endpoint: null,
+			stats: {
+				bytes_sent: 0,
+				bytes_received: 0,
+				messages_sent: 0,
+				messages_received: 0,
+				noise_bytes_sent: 0,
+				reconnect_count: 0,
+				key_refreshes: 0,
+				integrity_failures: 0,
+			},
+			last_error: null,
+			updated_at: null,
+			available: false,
+		};
+	}
+
+	try {
+		return {
+			...JSON.parse(fs.readFileSync(RELAY_STATUS_FILE, 'utf8')),
+			available: true,
+		};
+	} catch (err) {
+		return {
+			enabled: false,
+			state: 'error',
+			endpoint: null,
+			stats: {
+				bytes_sent: 0,
+				bytes_received: 0,
+				messages_sent: 0,
+				messages_received: 0,
+				noise_bytes_sent: 0,
+				reconnect_count: 0,
+				key_refreshes: 0,
+				integrity_failures: 0,
+			},
+			last_error: shortError(err),
+			updated_at: null,
+			available: false,
+		};
+	}
+}
+
 async function getSystemStatus() {
 	const core = new ethers.Contract(CORE_ADDRESS, CORE_ABI, provider);
 	const tgbt = new ethers.Contract(TGBT_ADDRESS, TGBT_ABI, provider);
@@ -149,7 +199,9 @@ async function getSystemStatus() {
 			host: HOST,
 			port: PORT,
 			telemetryFile: TELEMETRY_FILE,
+			relayStatusFile: RELAY_STATUS_FILE,
 			solutionsBackend: process.env.MONGODB_URI ? 'mongodb' : 'file',
+			relayStatus: readRelayStatus(),
 		},
 		randomnessApi: {
 			url: RANDOMNESS_API_URL,
@@ -313,12 +365,14 @@ async function getRelayProfile() {
 	]);
 
 	const latest = latestRandomness.status >= 200 && latestRandomness.status < 300 ? latestRandomness.json : null;
+	const relayStatus = readRelayStatus();
 	const relayReady = !!(
 		system.randomnessApi?.online &&
 		system.heartbeatApi?.online &&
 		heartbeatStatus?.heartbeat?.online &&
 		heartbeatStatus?.security?.suspicious === false &&
-		latest?.signature
+		latest?.signature &&
+		(relayStatus.state === 'connected' || relayStatus.enabled === false)
 	);
 
 	const profile = {
@@ -336,6 +390,7 @@ async function getRelayProfile() {
 			heartbeatOnline: !!heartbeatStatus?.heartbeat?.online,
 			telemetryFresh: !!heartbeatStatus?.heartbeat?.telemetryFresh,
 			intrusionScore: Number(heartbeatStatus?.security?.intrusionScore || 0),
+			relayChannel: relayStatus,
 		},
 		proofOfPresence: latest ? {
 			outputHash: latest.outputHash,
@@ -614,6 +669,11 @@ const server = http.createServer(async (req, res) => {
 		} catch (err) {
 			sendJson(res, 500, { error: shortError(err) });
 		}
+		return;
+	}
+
+	if (url.pathname === '/api/security/relay-status' && req.method === 'GET') {
+		sendJson(res, 200, readRelayStatus());
 		return;
 	}
 

@@ -679,6 +679,8 @@
             <h3>Relay readiness</h3>
             <div class="status-list">
               <div class="status-item"><span>Relay ready</span><span id="relayReadyBadge" class="badge">—</span></div>
+              <div class="status-item"><span>Secure relay</span><span id="relayChannelState" class="badge">—</span></div>
+              <div class="status-item"><span>Relay endpoint</span><span id="relayEndpoint" class="mono">—</span></div>
               <div class="status-item"><span>Operator</span><span id="relayOperator" class="mono">—</span></div>
               <div class="status-item"><span>Region</span><span id="relayRegion">—</span></div>
               <div class="status-item"><span>Latest proof signer</span><span id="relaySigner" class="mono">—</span></div>
@@ -691,6 +693,9 @@
               <div class="status-item"><span>Epoch / leaf</span><span id="relayEpochLeaf">—</span></div>
               <div class="status-item"><span>Heartbeat API</span><span id="relayHeartbeatOnline">—</span></div>
               <div class="status-item"><span>Randomness API</span><span id="relayRandomnessOnline">—</span></div>
+              <div class="status-item"><span>Mirrored msgs</span><span id="relayMessagesMirrored">—</span></div>
+              <div class="status-item"><span>Sent / cover</span><span id="relayTrafficSummary">—</span></div>
+              <div class="status-item"><span>Reconnect / ratchet</span><span id="relayReconnectRatchet">—</span></div>
             </div>
           </div>
         </div>
@@ -995,6 +1000,15 @@
     function fmtMsDuration(ms) {
       if (ms == null) return '—';
       return fmtDuration(Math.round(Number(ms) / 1000));
+    }
+
+    function fmtBytes(bytes) {
+      if (bytes == null || Number.isNaN(Number(bytes))) return '—';
+      const value = Number(bytes);
+      if (value < 1024) return `${value} B`;
+      if (value < 1024 ** 2) return `${fmtNum(value / 1024)} KB`;
+      if (value < 1024 ** 3) return `${fmtNum(value / (1024 ** 2))} MB`;
+      return `${fmtNum(value / (1024 ** 3))} GB`;
     }
 
     function shortHash(value, size = 12) {
@@ -1387,7 +1401,12 @@
         : '<div class="helper">No active alerts. Mining heartbeat is clean.</div>';
 
       if (relay) {
+        const relayChannel = relay.transport?.relayChannel || null;
         setBadge(els.relayReadyBadge, relay.relayReady ? 'Ready' : 'Not ready', relay.relayReady ? 'ok' : 'warn');
+        const relayChannelState = relayChannel?.state || (relayChannel?.enabled ? 'unknown' : 'disabled');
+        const relayChannelTone = relayChannelState === 'connected' ? 'ok' : (relayChannelState === 'error' ? 'fail' : 'warn');
+        setBadge(els.relayChannelState, relayChannelState.replace(/_/g, ' '), relayChannelTone);
+        els.relayEndpoint.textContent = relayChannel?.endpoint || '—';
         els.relayOperator.textContent = relay.miner?.operator || '—';
         els.relayRegion.textContent = relay.miner?.region || '—';
         els.relaySigner.textContent = relay.proofOfPresence?.recoveredSigner || '—';
@@ -1397,9 +1416,14 @@
         els.relayHeartbeatOnline.className = relay.transport?.heartbeatOnline ? 'ok' : 'warn';
         els.relayRandomnessOnline.textContent = relay.transport?.randomnessApiOnline ? 'Online' : 'Offline';
         els.relayRandomnessOnline.className = relay.transport?.randomnessApiOnline ? 'ok' : 'warn';
+        els.relayMessagesMirrored.textContent = fmtNum(relayChannel?.stats?.messages_sent || 0);
+        els.relayTrafficSummary.textContent = `${fmtBytes(relayChannel?.stats?.bytes_sent || 0)} / ${fmtBytes(relayChannel?.stats?.noise_bytes_sent || 0)}`;
+        els.relayReconnectRatchet.textContent = `${fmtNum(relayChannel?.stats?.reconnect_count || 0)} / ${fmtNum(relayChannel?.stats?.key_refreshes || 0)}`;
         els.relayProfilePreview.textContent = JSON.stringify(relay, null, 2);
       } else {
         setBadge(els.relayReadyBadge, 'Unknown', 'warn');
+        setBadge(els.relayChannelState, 'Unknown', 'warn');
+        els.relayEndpoint.textContent = '—';
         els.relayOperator.textContent = '—';
         els.relayRegion.textContent = '—';
         els.relaySigner.textContent = '—';
@@ -1407,6 +1431,9 @@
         els.relayEpochLeaf.textContent = '—';
         els.relayHeartbeatOnline.textContent = '—';
         els.relayRandomnessOnline.textContent = '—';
+        els.relayMessagesMirrored.textContent = '—';
+        els.relayTrafficSummary.textContent = '—';
+        els.relayReconnectRatchet.textContent = '—';
         els.relayProfilePreview.textContent = 'Relay profile unavailable.';
       }
     }

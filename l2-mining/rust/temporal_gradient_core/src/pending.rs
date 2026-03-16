@@ -6,13 +6,15 @@
 //! reveal window — reveals it immediately instead of searching for a new
 //! solution.
 
+use crate::memory::SecureBuffer;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Everything needed to reveal a previously committed mining solution.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 pub struct PendingCommitment {
     /// The block number at which the commitment was mined.
     pub commit_block: u64,
@@ -30,6 +32,18 @@ pub struct PendingCommitment {
     pub commit_hash: [u8; 32],
     /// Pool id.
     pub pool_id: u8,
+}
+
+impl PendingCommitment {
+    pub fn secure_reveal_signature(&self) -> Result<SecureBuffer> {
+        SecureBuffer::from_slice(&self.reveal_signature)
+            .map_err(|err| anyhow::anyhow!("Failed to protect pending reveal signature in memory: {err}"))
+    }
+
+    pub fn secure_secret_value(&self) -> Result<SecureBuffer> {
+        SecureBuffer::from_slice(&self.secret_value)
+            .map_err(|err| anyhow::anyhow!("Failed to protect pending secret value in memory: {err}"))
+    }
 }
 
 /// Derives the path for the pending-commitment file from the key-file path.

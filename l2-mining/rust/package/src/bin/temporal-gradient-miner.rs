@@ -1,11 +1,14 @@
 use anyhow::{Context, Result};
 use clap::Parser;
+use serde::Serialize;
 use std::fs::OpenOptions;
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use temporal_gradient_core::{
-    ensure_app_layout, load_or_create_config, setup_logging, spawn_miner,
-    wallet_address_from_config,
+    ensure_app_layout, load_or_create_config, relay_connect, relay_connect_pinned,
+    setup_logging, spawn_miner, wallet_address_from_config, MinerConfig, ReliableRelayChannel,
+    SecureBuffer, SecureTransport, TelemetrySnapshot, TransportStatsSnapshot,
 };
 use tokio::signal;
 
@@ -19,8 +22,72 @@ struct Cli {
     telemetry_file: Option<PathBuf>,
     #[arg(long)]
     exit_after_solutions: Option<u64>,
+    #[arg(long)]
+    relay_endpoint: Option<String>,
+    #[arg(long)]
+    relay_pin_sha256: Option<String>,
+    #[arg(long)]
+    relay_hmac_key: Option<String>,
     #[arg(long, default_value_t = false)]
     quiet: bool,
+}
+
+#[derive(Debug, Clone)]
+struct RelayEgressConfig {
+    endpoint: String,
+    pinned_cert_sha256: Option<[u8; 32]>,
+    hmac_key: Option<[u8; 32]>,
+}
+
+#[derive(Debug, Serialize)]
+struct RelayTelemetryEnvelope<'a> {
+    schema: &'static str,
+    miner_name: &'a str,
+    wallet_address: &'a str,
+    telemetry: &'a TelemetrySnapshot,
+}
+
+#[derive(Debug, Clone)]
+#[derive(Serialize)]
+struct RelayStatus {
+    enabled: bool,
+    endpoint: Option<String>,
+    state: RelayState,
+    stats: TransportStatsSnapshot,
+    last_error: Option<String>,
+    updated_at: String,
+}
+
+impl Default for RelayStatus {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            endpoint: None,
+            state: RelayState::Disabled,
+            stats: TransportStatsSnapshot {
+                bytes_sent: 0,
+                bytes_received: 0,
+                messages_sent: 0,
+                messages_received: 0,
+                noise_bytes_sent: 0,
+                reconnect_count: 0,
+                key_refreshes: 0,
+                integrity_failures: 0,
+            },
+            last_error: None,
+            updated_at: chrono_like_now(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RelayState {
+    Disabled,
+    Connecting,
+    Connected,
+    Error,
 }
 
 #[tokio::main]
@@ -34,11 +101,21 @@ async fn main() -> Result<()> {
     if let Some(limit) = cli.exit_after_solutions {
         config.exit_after_solutions = Some(limit);
     }
+    if let Some(endpoint) = cli.relay_endpoint {
+        config.relay_endpoint = Some(endpoint);
+    }
+    if let Some(pin) = cli.relay_pin_sha256 {
+        config.relay_pinned_cert_sha256 = Some(pin);
+    }
+    if let Some(hmac_key) = cli.relay_hmac_key {
+        config.relay_hmac_key = Some(hmac_key);
+    }
 
     setup_logging(&config.log_level)?;
     tracing::info!("Loaded config from {}", config_path.display());
 
     let telemetry_path = config.telemetry_path()?;
+    let relay_status_path = relay_status_path_for_telemetry(&telemetry_path);
     if let Some(parent) = telemetry_path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create {}", parent.display()))?;
@@ -49,6 +126,18 @@ async fn main() -> Result<()> {
 
     let interactive = std::io::stdout().is_terminal() && !cli.quiet;
     let wallet_addr = wallet_address_from_config(&config).unwrap_or_else(|_| "unknown".into());
+    let relay_config = RelayEgressConfig::from_miner_config(&config)?;
+    let relay_status = Arc::new(Mutex::new(RelayStatus {
+        enabled: relay_config.is_some(),
+        endpoint: relay_config.as_ref().map(|cfg| cfg.endpoint.clone()),
+        state: if relay_config.is_some() {
+            RelayState::Connecting
+        } else {
+            RelayState::Disabled
+        },
+        ..RelayStatus::default()
+    }));
+    persist_relay_status(&relay_status, &relay_status_path)?;
 
     if interactive {
         print!("{}", display::banner());
@@ -57,7 +146,11 @@ async fn main() -> Result<()> {
 
     let handle = spawn_miner(config.clone())?;
     let mut rx = handle.subscribe();
+    let mut relay_rx = relay_config.as_ref().map(|_| handle.subscribe());
     let quiet = cli.quiet;
+    let relay_wallet = wallet_addr.clone();
+    let relay_miner_name = config.miner_name.clone();
+    let writer_status = Arc::clone(&relay_status);
     let writer_task = tokio::spawn(async move {
         let mut file = OpenOptions::new()
             .create(true)
@@ -71,13 +164,81 @@ async fn main() -> Result<()> {
             writeln!(file, "{}", line)?;
 
             if interactive {
-                print!("{}", display::format_dashboard(&snapshot, &wallet_addr));
+                let relay_status = writer_status
+                    .lock()
+                    .map(|guard| guard.clone())
+                    .unwrap_or_default();
+                print!("{}", display::format_dashboard(&snapshot, &wallet_addr, &relay_status));
             } else if !quiet {
                 println!("{}", line);
             }
         }
 
         Ok::<(), anyhow::Error>(())
+    });
+
+    let relay_task = relay_config.map(|relay_config| {
+        let relay_status = Arc::clone(&relay_status);
+        let relay_status_path = relay_status_path.clone();
+        tokio::spawn(async move {
+            update_relay_status(&relay_status, |status| {
+                status.state = RelayState::Connecting;
+                status.last_error = None;
+            });
+            persist_relay_status(&relay_status, &relay_status_path)?;
+            let mut channel = connect_relay_channel(&relay_config).await?;
+            tracing::info!("Relay telemetry egress connected to {}", relay_config.endpoint);
+            update_relay_status(&relay_status, |status| {
+                status.state = RelayState::Connected;
+                status.stats = channel.stats();
+                status.last_error = None;
+            });
+            persist_relay_status(&relay_status, &relay_status_path)?;
+            let rx = relay_rx
+                .as_mut()
+                .expect("relay receiver should exist when relay config is present");
+
+            while let Ok(snapshot) = rx.recv().await {
+                let envelope = RelayTelemetryEnvelope {
+                    schema: "tg.telemetry.v1",
+                    miner_name: &relay_miner_name,
+                    wallet_address: &relay_wallet,
+                    telemetry: &snapshot,
+                };
+                let payload = serde_json::to_vec(&envelope)?;
+                match channel.send(&payload).await {
+                    Ok(()) => {
+                        let stats = channel.stats();
+                        update_relay_status(&relay_status, |status| {
+                            status.state = RelayState::Connected;
+                            status.stats = stats;
+                            status.last_error = None;
+                        });
+                        persist_relay_status(&relay_status, &relay_status_path)?;
+                    }
+                    Err(err) => {
+                        let err = err.context(format!(
+                            "Failed to relay telemetry to {}",
+                            relay_config.endpoint
+                        ));
+                        update_relay_status(&relay_status, |status| {
+                            status.state = RelayState::Error;
+                            status.last_error = Some(format!("{err:#}"));
+                            status.stats = channel.stats();
+                        });
+                        persist_relay_status(&relay_status, &relay_status_path)?;
+                        return Err(err);
+                    }
+                }
+            }
+
+            update_relay_status(&relay_status, |status| {
+                status.state = RelayState::Disabled;
+            });
+            persist_relay_status(&relay_status, &relay_status_path)?;
+            channel.close().await.ok();
+            Ok::<(), anyhow::Error>(())
+        })
     });
 
     let shutdown = handle.shutdown_token();
@@ -90,12 +251,104 @@ async fn main() -> Result<()> {
 
     handle.wait().await?;
     writer_task.await??;
+    if let Some(task) = relay_task {
+        task.await??;
+    }
     Ok(())
+}
+
+impl RelayEgressConfig {
+    fn from_miner_config(config: &MinerConfig) -> Result<Option<Self>> {
+        let Some(endpoint) = config.relay_endpoint.clone().filter(|value| !value.trim().is_empty()) else {
+            return Ok(None);
+        };
+
+        let pinned_cert_sha256 = match config.relay_pinned_cert_sha256.as_deref() {
+            Some(value) if !value.trim().is_empty() => Some(parse_hex_32(value).with_context(|| {
+                "Invalid relay_pinned_cert_sha256; expected 32-byte hex string"
+            })?),
+            _ => None,
+        };
+
+        let hmac_key = match config.relay_hmac_key.as_deref() {
+            Some(value) if !value.trim().is_empty() => Some(parse_hex_32(value)
+                .with_context(|| "Invalid relay_hmac_key; expected 32-byte hex string")?),
+            _ => None,
+        };
+
+        Ok(Some(Self {
+            endpoint,
+            pinned_cert_sha256,
+            hmac_key,
+        }))
+    }
+}
+
+async fn connect_relay_channel(config: &RelayEgressConfig) -> Result<ReliableRelayChannel> {
+    match (config.pinned_cert_sha256, config.hmac_key) {
+        (Some(pin), Some(hmac_key)) => relay_connect_pinned(&config.endpoint, pin, hmac_key).await,
+        _ => relay_connect(&config.endpoint).await,
+    }
+}
+
+fn parse_hex_32(value: &str) -> Result<[u8; 32]> {
+    let trimmed = value.trim().strip_prefix("0x").unwrap_or(value.trim());
+    let mut decoded = hex::decode(trimmed)
+        .with_context(|| format!("Failed to decode hex value: {value}"))?;
+    let decoded_len = decoded.len();
+    let secure = SecureBuffer::from_slice(&decoded)
+        .map_err(|err| anyhow::anyhow!("Failed to protect parsed secret in memory: {err}"))?;
+    decoded.fill(0);
+    secure
+        .to_array::<32>()
+        .map_err(|_| anyhow::anyhow!("Expected exactly 32 bytes, got {}", decoded_len))
+}
+
+fn update_relay_status(state: &Arc<Mutex<RelayStatus>>, update: impl FnOnce(&mut RelayStatus)) {
+    if let Ok(mut guard) = state.lock() {
+        update(&mut guard);
+        guard.updated_at = chrono_like_now();
+    }
+}
+
+fn persist_relay_status(state: &Arc<Mutex<RelayStatus>>, path: &std::path::Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create {}", parent.display()))?;
+    }
+    let snapshot = state
+        .lock()
+        .map(|guard| guard.clone())
+        .unwrap_or_default();
+    let payload = serde_json::to_string_pretty(&snapshot)?;
+    std::fs::write(path, payload)
+        .with_context(|| format!("Failed to write {}", path.display()))?;
+    Ok(())
+}
+
+fn relay_status_path_for_telemetry(telemetry_path: &std::path::Path) -> PathBuf {
+    let parent = telemetry_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let stem = telemetry_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("miner-telemetry");
+    parent.join(format!("{stem}.relay-status.json"))
+}
+
+fn chrono_like_now() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    format!("{}", now)
 }
 
 // ─── Interactive terminal display ──────────────────────────────────────────
 
 mod display {
+    use super::{RelayState, RelayStatus};
     use temporal_gradient_core::{MiningPhase, TelemetrySnapshot};
 
     const DIVIDER: &str = "═══════════════════════════════════════════════════════════════";
@@ -122,7 +375,7 @@ mod display {
         .join("\n")
     }
 
-    pub fn format_dashboard(snap: &TelemetrySnapshot, wallet: &str) -> String {
+    pub fn format_dashboard(snap: &TelemetrySnapshot, wallet: &str, relay: &RelayStatus) -> String {
         let mut out = String::with_capacity(2048);
 
         // Clear screen + move cursor home
@@ -231,6 +484,41 @@ mod display {
             "  \x1b[2mRewards are minted directly to your wallet as TGBT tokens.\x1b[0m\n",
         );
 
+        out.push('\n');
+
+        // ── Relay Egress ───────────────────────────────────────────
+        out.push_str("  \x1b[1;37mRELAY EGRESS\x1b[0m\n");
+        out.push_str(&format!(
+            "  Status:           {}\n",
+            relay_state_colored(relay.state)
+        ));
+        if let Some(endpoint) = &relay.endpoint {
+            out.push_str(&format!("  Endpoint:         {}\n", shorten(endpoint, 28)));
+        } else {
+            out.push_str("  Endpoint:         not configured\n");
+        }
+        if relay.enabled {
+            out.push_str(&format!(
+                "  Mirrored:         {} msgs \x1b[2m|\x1b[0m {} sent \x1b[2m|\x1b[0m {} reconnects\n",
+                fmt_number(relay.stats.messages_sent),
+                fmt_bytes(relay.stats.bytes_sent),
+                fmt_number(relay.stats.reconnect_count)
+            ));
+            out.push_str(&format!(
+                "  Cover traffic:    {} \x1b[2m|\x1b[0m Key ratchets: {}\n",
+                fmt_bytes(relay.stats.noise_bytes_sent),
+                fmt_number(relay.stats.key_refreshes)
+            ));
+            if let Some(last_error) = &relay.last_error {
+                out.push_str(&format!(
+                    "  Last error:       \x1b[31m{}\x1b[0m\n",
+                    shorten(last_error, 52)
+                ));
+            }
+        } else {
+            out.push_str("  \x1b[2mSecure relay egress is disabled for this miner session.\x1b[0m\n");
+        }
+
         out.push_str(&format!("\n{}\n", DIVIDER));
 
         out
@@ -299,6 +587,31 @@ mod display {
             format!("{}...{}", &s[..visible.min(s.len())], &s[s.len().saturating_sub(4)..])
         } else {
             s.to_string()
+        }
+    }
+
+    fn fmt_bytes(bytes: u64) -> String {
+        const KB: f64 = 1024.0;
+        const MB: f64 = KB * 1024.0;
+        const GB: f64 = MB * 1024.0;
+        let b = bytes as f64;
+        if b < KB {
+            format!("{} B", bytes)
+        } else if b < MB {
+            format!("{:.1} KB", b / KB)
+        } else if b < GB {
+            format!("{:.1} MB", b / MB)
+        } else {
+            format!("{:.2} GB", b / GB)
+        }
+    }
+
+    fn relay_state_colored(state: RelayState) -> String {
+        match state {
+            RelayState::Disabled => "\x1b[2mdisabled\x1b[0m".to_string(),
+            RelayState::Connecting => "\x1b[33mconnecting\x1b[0m".to_string(),
+            RelayState::Connected => "\x1b[32;1mconnected\x1b[0m".to_string(),
+            RelayState::Error => "\x1b[31;1merror\x1b[0m".to_string(),
         }
     }
 }

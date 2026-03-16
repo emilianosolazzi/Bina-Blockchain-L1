@@ -4,11 +4,12 @@ use k256::ecdsa::{signature::Signer as _, Signature, SigningKey};
 use rand::{rngs::OsRng, RngCore};
 use sha2::Digest;
 use sha3::Keccak256;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 pub const QR_HASH_ITERATIONS: u8 = 3;
 pub const QR_HASH_ROTATION: u8 = 7;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Zeroize, ZeroizeOnDrop)]
 pub struct DynamicMiningCommitment {
     pub commit_hash: [u8; 32],
     pub pool_id: u8,
@@ -16,7 +17,7 @@ pub struct DynamicMiningCommitment {
     pub deadline: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Zeroize, ZeroizeOnDrop)]
 pub struct MiningMaterial {
     pub previous_output: [u8; 32],
     pub temporal_seed: [u8; 8],
@@ -26,7 +27,7 @@ pub struct MiningMaterial {
     pub secret_value: [u8; 32],
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Zeroize, ZeroizeOnDrop)]
 pub struct CommitmentPayload {
     pub commitment: DynamicMiningCommitment,
     pub entropy_hash: [u8; 32],

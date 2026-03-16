@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -49,12 +50,20 @@ pub struct TelemetrySnapshot {
     pub accepted_submissions: u64,
     pub rejected_submissions: u64,
     pub total_rewards_estimate: f64,
+    #[serde(default)]
+    pub output_count: u64,
     pub last_solution_nonce: Option<u64>,
     pub last_solution_hash_hex: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_commit_hash_hex: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_output_hash_hex: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter_fp_rate: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter_memory_kb: Option<u64>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub epoch_stats: HashMap<u64, u64>,
     pub temperature_c: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mining_phase: Option<MiningPhase>,

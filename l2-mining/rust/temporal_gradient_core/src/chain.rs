@@ -1,5 +1,6 @@
 use crate::config::MinerConfig;
 use crate::crypto::DynamicMiningCommitment;
+use crate::memory::SecureBuffer;
 use crate::telemetry::{MiningPhase, PhaseTracker};
 use anyhow::{anyhow, Context, Result};
 use ethers::{
@@ -13,7 +14,7 @@ use ethers::{
 };
 use rand::{rngs::OsRng, RngCore};
 use std::{fs, path::Path, sync::Arc, time::Duration};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 pub const DEFAULT_CONTRACT_PLACEHOLDER: &str = "0xYourContractAddress";
 
@@ -41,7 +42,7 @@ pub struct LiveChallenge {
     pub prevrandao: [u8; 32],
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Zeroize, ZeroizeOnDrop)]
 pub struct LiveSubmission {
     pub commitment: DynamicMiningCommitment,
     pub previous_output: [u8; 32],
@@ -149,7 +150,7 @@ impl LiveMiningClient {
         self.wait_for_mining_cooldown(&contract, phase).await?;
 
         // ── Save pending commitment to disk BEFORE sending the tx ──
-        let pending = crate::pending::PendingCommitment {
+        let mut pending = crate::pending::PendingCommitment {
             commit_block: 0, // updated after tx confirms
             previous_output: submission.previous_output,
             temporal_seed: submission.temporal_seed,
@@ -186,11 +187,8 @@ impl LiveMiningClient {
             .block_number
             .ok_or_else(|| anyhow!("Missing commitment block number"))?
             .as_u64();
-        let updated = crate::pending::PendingCommitment {
-            commit_block,
-            ..pending
-        };
-        crate::pending::save(key_path, &updated)?;
+        pending.commit_block = commit_block;
+        crate::pending::save(key_path, &pending)?;
 
         let min_blocks = contract.min_commitment_age().call().await?.as_u64();
         let target_block = commit_block.saturating_add(min_blocks);
@@ -261,6 +259,8 @@ impl LiveMiningClient {
         }
 
         phase.set(MiningPhase::Revealing, None);
+        let secure_reveal_signature = pending.secure_reveal_signature()?;
+        let secure_secret_value = pending.secure_secret_value()?;
         let submission = LiveSubmission {
             commitment: crate::crypto::DynamicMiningCommitment {
                 commit_hash: pending.commit_hash,
@@ -271,8 +271,13 @@ impl LiveMiningClient {
             previous_output: pending.previous_output,
             temporal_seed: pending.temporal_seed,
             nonce: pending.nonce,
-            reveal_signature: pending.reveal_signature.clone(),
-            secret_value: pending.secret_value,
+            reveal_signature: secure_reveal_signature
+                .as_slice()
+                .ok_or_else(|| anyhow!("Secure pending reveal signature unavailable"))?
+                .to_vec(),
+            secret_value: secure_secret_value
+                .to_array::<32>()
+                .map_err(|err| anyhow!("Failed to read pending secret value from secure memory: {err}"))?,
         };
 
         let receipt = self.send_reveal(&contract, &submission).await?;
@@ -288,12 +293,24 @@ impl LiveMiningClient {
         contract: &MiningContract<MiningClient>,
         submission: &LiveSubmission,
     ) -> Result<TransactionReceipt> {
+        let secure_reveal_signature = SecureBuffer::from_slice(&submission.reveal_signature)
+            .map_err(|err| anyhow!("Failed to protect reveal signature in memory: {err}"))?;
+        let secure_secret_value = SecureBuffer::from_slice(&submission.secret_value)
+            .map_err(|err| anyhow!("Failed to protect reveal secret in memory: {err}"))?;
         let reveal_tx = contract.reveal_mining_commitment(
             submission.previous_output.into(),
             Bytes::from(submission.temporal_seed.to_vec()),
             submission.nonce,
-            Bytes::from(submission.reveal_signature.clone()),
-            submission.secret_value.into(),
+            Bytes::from(
+                secure_reveal_signature
+                    .as_slice()
+                    .ok_or_else(|| anyhow!("Secure reveal signature unavailable"))?
+                    .to_vec(),
+            ),
+            secure_secret_value
+                .to_array::<32>()
+                .map_err(|err| anyhow!("Failed to read reveal secret from secure memory: {err}"))?
+                .into(),
             submission.commitment.pool_id,
         );
         let reveal_gas = reveal_tx
@@ -478,7 +495,7 @@ fn load_or_create_wallet(config: &MinerConfig) -> Result<LocalWallet> {
         fs::create_dir_all(parent).with_context(|| format!("Failed to create {}", parent.display()))?;
     }
 
-    let key_bytes = if key_path.exists() {
+    let mut key_bytes = if key_path.exists() {
         let raw = fs::read_to_string(key_path)
             .with_context(|| format!("Failed to read {}", key_path.display()))?;
         hex::decode(raw.trim()).context("Private key must be hex-encoded")?
@@ -487,17 +504,25 @@ fn load_or_create_wallet(config: &MinerConfig) -> Result<LocalWallet> {
         OsRng.fill_bytes(&mut generated);
         fs::write(key_path, hex::encode(generated))
             .with_context(|| format!("Failed to write {}", key_path.display()))?;
-        generated.to_vec()
+        let bytes = generated.to_vec();
+        generated.zeroize();
+        bytes
     };
 
     if key_bytes.len() != 32 {
+        key_bytes.zeroize();
         return Err(anyhow!("Expected a 32-byte private key"));
     }
 
-    let mut temp = [0u8; 32];
-    temp.copy_from_slice(&key_bytes);
-    let wallet = LocalWallet::from_bytes(&temp).context("Invalid secp256k1 private key")?;
-    temp.zeroize();
+    let secure_key = SecureBuffer::from_slice(&key_bytes)
+        .map_err(|err| anyhow!("Failed to protect private key in memory: {err}"))?;
+    key_bytes.zeroize();
+    let wallet = LocalWallet::from_bytes(
+        secure_key
+            .as_slice()
+            .ok_or_else(|| anyhow!("Secure private key buffer unavailable"))?,
+    )
+    .context("Invalid secp256k1 private key")?;
     Ok(wallet)
 }
 

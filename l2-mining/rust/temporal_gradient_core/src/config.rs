@@ -22,6 +22,12 @@ pub struct MinerConfig {
     pub max_retries: usize,
     pub exit_after_solutions: Option<u64>,
     pub telemetry_file: Option<String>,
+    #[serde(default)]
+    pub relay_endpoint: Option<String>,
+    #[serde(default)]
+    pub relay_pinned_cert_sha256: Option<String>,
+    #[serde(default)]
+    pub relay_hmac_key: Option<String>,
     pub difficulty_zero_bits: u8,
     pub pqc_mode: String,
 }
@@ -44,6 +50,9 @@ impl Default for MinerConfig {
             max_retries: 5,
             exit_after_solutions: None,
             telemetry_file: None,
+            relay_endpoint: None,
+            relay_pinned_cert_sha256: None,
+            relay_hmac_key: None,
             difficulty_zero_bits: 11,
             pqc_mode: "enhanced".to_string(),
         }

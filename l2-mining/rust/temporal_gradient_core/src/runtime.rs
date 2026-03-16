@@ -1,27 +1,43 @@
 use crate::chain::{LiveChallenge, LiveMiningClient, LiveSubmission};
 use crate::config::MinerConfig;
+use crate::cpu::get_cpu_temperature;
 use crate::crypto::{
     build_commitment_payload, contract_hash_message, has_leading_zero_bits, miner_address_from_signing_key,
     pre_filter_nonce, random_secret, MiningMaterial,
 };
+use crate::memory::SecureBuffer;
 use crate::pqc::PqcMode;
 use crate::seed::{decode_temporal_seed_timestamp, generate_temporal_seed};
 use crate::telemetry::{MinerState, MiningPhase, PhaseTracker, TelemetrySnapshot};
+use crate::tg_output_filter::{MemoryBackend, Ready, SledBackend, TgOutputFilter};
 use anyhow::{anyhow, Result};
 use ethers::signers::LocalWallet;
 use ethers::types::U256;
 use k256::ecdsa::SigningKey;
 use rand::rngs::OsRng;
 use sha3::{Digest, Keccak256};
-use std::sync::{atomic::{AtomicBool, AtomicU64, Ordering}, Arc};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::{atomic::{AtomicBool, AtomicU64, Ordering}, Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, Mutex};
 use tokio::task::JoinHandle;
 use tokio::time;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
-#[derive(Debug, Clone)]
+type SharedOutputFilter = Arc<RwLock<TgOutputFilter<Ready>>>;
+
+#[derive(Debug, Clone, Default)]
+struct OutputFilterMetrics {
+    output_count: u64,
+    filter_fp_rate: Option<f64>,
+    filter_memory_kb: Option<u64>,
+    epoch_stats: std::collections::HashMap<u64, u64>,
+}
+
+#[derive(Debug, Clone, Zeroize, ZeroizeOnDrop)]
 struct LiveWorkerCandidate {
     nonce: u64,
     temporal_seed: [u8; 8],
@@ -37,7 +53,17 @@ struct LiveWorkerSearchResult {
     candidate: Option<LiveWorkerCandidate>,
 }
 
-#[derive(Debug)]
+fn secure_random_secret_array() -> Result<[u8; 32]> {
+    let mut raw = random_secret();
+    let secure = SecureBuffer::from_slice(&raw)
+        .map_err(|err| anyhow!("Failed to protect mining secret in memory: {err}"))?;
+    raw.zeroize();
+    secure
+        .to_array::<32>()
+        .map_err(|err| anyhow!("Failed to extract mining secret from secure memory: {err}"))
+}
+
+#[derive(Debug, Clone)]
 struct RuntimeStats {
     state: MinerState,
     solutions: u64,
@@ -72,6 +98,7 @@ pub struct MinerHandle {
     config: MinerConfig,
     started_at: Instant,
     stats: Arc<Mutex<RuntimeStats>>,
+    output_filter: SharedOutputFilter,
     hash_counter: Arc<AtomicU64>,
     telemetry_tx: broadcast::Sender<TelemetrySnapshot>,
     shutdown: CancellationToken,
@@ -84,7 +111,13 @@ impl MinerHandle {
     }
 
     pub async fn snapshot(&self) -> TelemetrySnapshot {
-        snapshot_from_state(&self.config, self.started_at, &self.stats, &self.hash_counter).await
+        snapshot_from_state(
+            &self.config,
+            self.started_at,
+            &self.stats,
+            &self.hash_counter,
+            &self.output_filter,
+        ).await
     }
 
     pub fn shutdown(&self) {
@@ -103,23 +136,34 @@ impl MinerHandle {
 pub fn spawn_miner(config: MinerConfig) -> Result<MinerHandle> {
     let (telemetry_tx, _) = broadcast::channel(256);
     let stats = Arc::new(Mutex::new(RuntimeStats::default()));
+    let output_filter = build_output_filter(&config)?;
     let hash_counter = Arc::new(AtomicU64::new(0));
     let started_at = Instant::now();
     let shutdown = CancellationToken::new();
     let task_config = config.clone();
     let task_stats = Arc::clone(&stats);
+    let task_output_filter = Arc::clone(&output_filter);
     let task_hash_counter = Arc::clone(&hash_counter);
     let task_tx = telemetry_tx.clone();
     let task_shutdown = shutdown.clone();
 
     let join_handle = tokio::spawn(async move {
-        run_runtime(task_config, task_stats, task_hash_counter, started_at, task_tx, task_shutdown).await
+        run_runtime(
+            task_config,
+            task_stats,
+            task_output_filter,
+            task_hash_counter,
+            started_at,
+            task_tx,
+            task_shutdown,
+        ).await
     });
 
     Ok(MinerHandle {
         config,
         started_at,
         stats,
+        output_filter,
         hash_counter,
         telemetry_tx,
         shutdown,
@@ -130,6 +174,7 @@ pub fn spawn_miner(config: MinerConfig) -> Result<MinerHandle> {
 async fn run_runtime(
     config: MinerConfig,
     stats: Arc<Mutex<RuntimeStats>>,
+    output_filter: SharedOutputFilter,
     hash_counter: Arc<AtomicU64>,
     started_at: Instant,
     telemetry_tx: broadcast::Sender<TelemetrySnapshot>,
@@ -137,15 +182,25 @@ async fn run_runtime(
 ) -> Result<()> {
     if let Some(live_client) = LiveMiningClient::connect(&config).await? {
         info!("Live chain submission mode enabled for contract {}", config.contract_address);
-        return run_live_runtime(config, stats, hash_counter, started_at, telemetry_tx, shutdown, live_client).await;
+        return run_live_runtime(
+            config,
+            stats,
+            output_filter,
+            hash_counter,
+            started_at,
+            telemetry_tx,
+            shutdown,
+            live_client,
+        ).await;
     }
 
-    run_simulated_runtime(config, stats, hash_counter, started_at, telemetry_tx, shutdown).await
+    run_simulated_runtime(config, stats, output_filter, hash_counter, started_at, telemetry_tx, shutdown).await
 }
 
 async fn run_simulated_runtime(
     config: MinerConfig,
     stats: Arc<Mutex<RuntimeStats>>,
+    output_filter: SharedOutputFilter,
     hash_counter: Arc<AtomicU64>,
     started_at: Instant,
     telemetry_tx: broadcast::Sender<TelemetrySnapshot>,
@@ -162,6 +217,7 @@ async fn run_simulated_runtime(
             worker_id,
             config.clone(),
             Arc::clone(&stats),
+            Arc::clone(&output_filter),
             Arc::clone(&hash_counter),
             started_at,
             telemetry_tx.clone(),
@@ -176,7 +232,7 @@ async fn run_simulated_runtime(
                 break;
             }
             _ = ticker.tick() => {
-                let snapshot = snapshot_from_state(&config, started_at, &stats, &hash_counter).await;
+                let snapshot = snapshot_from_state(&config, started_at, &stats, &hash_counter, &output_filter).await;
                 let _ = telemetry_tx.send(snapshot);
             }
         }
@@ -200,7 +256,7 @@ async fn run_simulated_runtime(
         guard.state = MinerState::Stopped;
     }
 
-    let final_snapshot = snapshot_from_state(&config, started_at, &stats, &hash_counter).await;
+    let final_snapshot = snapshot_from_state(&config, started_at, &stats, &hash_counter, &output_filter).await;
     let _ = telemetry_tx.send(final_snapshot);
     info!("Miner runtime stopped cleanly");
     Ok(())
@@ -209,6 +265,7 @@ async fn run_simulated_runtime(
 async fn run_live_runtime(
     config: MinerConfig,
     stats: Arc<Mutex<RuntimeStats>>,
+    output_filter: SharedOutputFilter,
     hash_counter: Arc<AtomicU64>,
     started_at: Instant,
     telemetry_tx: broadcast::Sender<TelemetrySnapshot>,
@@ -226,6 +283,7 @@ async fn run_live_runtime(
     // display stays updated even while submit_solution is blocking.
     {
         let bg_stats = Arc::clone(&stats);
+        let bg_filter = Arc::clone(&output_filter);
         let bg_hashes = Arc::clone(&hash_counter);
         let bg_tx = telemetry_tx.clone();
         let bg_shutdown = shutdown.clone();
@@ -238,7 +296,7 @@ async fn run_live_runtime(
                     _ = bg_shutdown.cancelled() => break,
                     _ = interval.tick() => {
                         let snapshot = snapshot_with_phase(
-                            &bg_config, started_at, &bg_stats, &bg_hashes, &bg_phase,
+                            &bg_config, started_at, &bg_stats, &bg_hashes, &bg_filter, &bg_phase,
                         ).await;
                         let _ = bg_tx.send(snapshot);
                     }
@@ -270,8 +328,18 @@ async fn run_live_runtime(
                     guard.accepted_submissions = guard.accepted_submissions.saturating_add(1);
                     guard.total_rewards_estimate += reward;
                     guard.last_solution_nonce = Some(pending.nonce);
-                    guard.last_solution_hash_hex =
-                        Some(hex_string(&pending.commit_hash));
+                    guard.last_solution_hash_hex = Some(hex_string(&pending.commit_hash));
+                    guard.last_output_hash_hex = LiveMiningClient::extract_output_hash_from_receipt(&receipt);
+                }
+                if let Some(output_hash_hex) = LiveMiningClient::extract_output_hash_from_receipt(&receipt) {
+                    if let Some(output_hash) = parse_hex_bytes32(&output_hash_hex) {
+                        let wallet_addr = hex_string(live_client.miner_address().as_bytes());
+                        if let Err(err) = record_output_solution(&output_filter, output_hash, pending.nonce, &wallet_addr) {
+                            warn!("Failed to record resumed output in filter: {err:#}");
+                        }
+                    } else {
+                        warn!("Could not parse resumed output hash {output_hash_hex} for filter recording");
+                    }
                 }
                 info!(
                     "Resumed and revealed saved commitment nonce={} reward={reward}",
@@ -319,6 +387,7 @@ async fn run_live_runtime(
             &config,
             &stats,
             &hash_counter,
+            &output_filter,
             &telemetry_tx,
             &shutdown,
             &challenge,
@@ -332,6 +401,21 @@ async fn run_live_runtime(
                 Ok(receipt) => {
                     let reward = reward_from_receipt_or_estimate(&receipt, config.difficulty_zero_bits);
                     let output_hash = LiveMiningClient::extract_output_hash_from_receipt(&receipt);
+                    if let Some(output_hash_hex) = output_hash.as_deref() {
+                        if let Some(output_hash_bytes) = parse_hex_bytes32(output_hash_hex) {
+                            let wallet_addr = hex_string(live_client.miner_address().as_bytes());
+                            if let Err(err) = record_output_solution(
+                                &output_filter,
+                                output_hash_bytes,
+                                submission.nonce,
+                                &wallet_addr,
+                            ) {
+                                warn!("Failed to record live output in filter: {err:#}");
+                            }
+                        } else {
+                            warn!("Could not parse live output hash {output_hash_hex} for filter recording");
+                        }
+                    }
                     phase_tracker.set(MiningPhase::RewardReceived, None);
                     {
                         let mut guard = stats.lock().await;
@@ -369,7 +453,7 @@ async fn run_live_runtime(
         guard.state = MinerState::Stopped;
     }
 
-    let final_snapshot = snapshot_from_state(&config, started_at, &stats, &hash_counter).await;
+    let final_snapshot = snapshot_from_state(&config, started_at, &stats, &hash_counter, &output_filter).await;
     let _ = telemetry_tx.send(final_snapshot);
     info!("Live miner runtime stopped cleanly");
     Ok(())
@@ -380,6 +464,7 @@ async fn attempt_live_solution(
     config: &MinerConfig,
     stats: &Arc<Mutex<RuntimeStats>>,
     hash_counter: &Arc<AtomicU64>,
+    output_filter: &SharedOutputFilter,
     telemetry_tx: &broadcast::Sender<TelemetrySnapshot>,
     shutdown: &CancellationToken,
     challenge: &LiveChallenge,
@@ -403,6 +488,7 @@ async fn attempt_live_solution(
         let contract_address = live_client.contract_address;
         let signer = signer.clone();
         let solution_found = Arc::clone(&solution_found);
+        let output_filter = Arc::clone(output_filter);
         let shutdown = shutdown.clone();
 
         tasks.push(tokio::task::spawn_blocking(move || {
@@ -416,6 +502,7 @@ async fn attempt_live_solution(
                 miner_address_bytes,
                 contract_address,
                 signer,
+                output_filter,
                 solution_found,
                 shutdown,
             )
@@ -436,7 +523,7 @@ async fn attempt_live_solution(
     {
         let mut guard = stats.lock().await;
         hash_counter.fetch_add(hashes_checked, Ordering::Relaxed);
-        guard.temperature_c = current_temperature_c();
+        guard.temperature_c = get_cpu_temperature();
     }
 
     *nonce_cursor = nonce_cursor.saturating_add((batch_size * worker_count) as u64);
@@ -459,8 +546,15 @@ async fn attempt_live_solution(
         guard.last_solution_hash_hex = Some(hex_string(&candidate.solution_hash));
         guard.last_commit_hash_hex = None;
         guard.last_output_hash_hex = None;
-        guard.temperature_c = current_temperature_c().or(guard.temperature_c);
-        snapshot_from_guard(config, started_at, &guard, hash_counter.load(Ordering::Relaxed))
+        guard.temperature_c = get_cpu_temperature().or(guard.temperature_c);
+        let metrics = output_filter_metrics(output_filter);
+        snapshot_from_guard(
+            config,
+            started_at,
+            &guard,
+            hash_counter.load(Ordering::Relaxed),
+            &metrics,
+        )
     };
     let _ = telemetry_tx.send(preview);
 
@@ -469,7 +563,7 @@ async fn attempt_live_solution(
         previous_output: challenge.previous_output,
         temporal_seed: candidate.temporal_seed,
         nonce: candidate.nonce,
-        reveal_signature: candidate.reveal_signature,
+        reveal_signature: candidate.reveal_signature.clone(),
         secret_value: candidate.secret_value,
     }))
 }
@@ -484,6 +578,7 @@ fn search_live_worker_batch(
     miner_address_bytes: [u8; 20],
     contract_address: ethers::types::Address,
     signer: LocalWallet,
+    output_filter: SharedOutputFilter,
     solution_found: Arc<AtomicBool>,
     shutdown: CancellationToken,
 ) -> Result<LiveWorkerSearchResult> {
@@ -507,7 +602,7 @@ fn search_live_worker_batch(
             .saturating_add((batch_index as u64) * step);
         hashes_checked = hashes_checked.saturating_add(1);
 
-        let secret_value = random_secret();
+        let secret_value = secure_random_secret_array()?;
         let material = MiningMaterial {
             previous_output: challenge.previous_output,
             temporal_seed,
@@ -520,6 +615,15 @@ fn search_live_worker_batch(
         let entropy_hash = crate::crypto::create_entropy_hash(&material);
         let reveal_signature = signer.sign_hash(ethers::types::H256::from(entropy_hash))?.to_vec();
         let solution_hash = quantum_resistant_hash_live(&reveal_signature, &entropy_hash, &secret_value);
+
+        {
+            let filter = output_filter
+                .read()
+                .map_err(|_| anyhow!("output filter read lock poisoned"))?;
+            if !filter.is_candidate(&solution_hash) {
+                continue;
+            }
+        }
 
         if meets_difficulty(&solution_hash, challenge.difficulty) {
             solution_found.store(true, Ordering::SeqCst);
@@ -557,6 +661,7 @@ async fn run_worker(
     worker_id: usize,
     config: MinerConfig,
     stats: Arc<Mutex<RuntimeStats>>,
+    output_filter: SharedOutputFilter,
     hash_counter: Arc<AtomicU64>,
     started_at: Instant,
     telemetry_tx: broadcast::Sender<TelemetrySnapshot>,
@@ -609,7 +714,7 @@ async fn run_worker(
                 continue;
             }
 
-            let secret_value = random_secret();
+            let secret_value = secure_random_secret_array()?;
             let material = MiningMaterial {
                 previous_output,
                 temporal_seed,
@@ -626,10 +731,28 @@ async fn run_worker(
                 pqc_mode,
             );
 
+            {
+                let filter = output_filter
+                    .read()
+                    .map_err(|_| anyhow!("output filter read lock poisoned"))?;
+                if !filter.is_candidate(&payload.solution_hash) {
+                    continue;
+                }
+            }
+
             if has_leading_zero_bits(&payload.solution_hash, config.difficulty_zero_bits) {
                 if pending_hashes > 0 {
                     hash_counter.fetch_add(pending_hashes, Ordering::Relaxed);
                     pending_hashes = 0;
+                }
+                let wallet_addr = hex_string(&miner_address);
+                if let Err(err) = record_output_solution(
+                    &output_filter,
+                    payload.solution_hash,
+                    current_nonce,
+                    &wallet_addr,
+                ) {
+                    warn!("worker {worker_id} failed to record output in filter: {err:#}");
                 }
                 let snapshot = {
                     let mut guard = stats.lock().await;
@@ -638,8 +761,16 @@ async fn run_worker(
                     guard.total_rewards_estimate += estimate_reward(config.difficulty_zero_bits);
                     guard.last_solution_nonce = Some(current_nonce);
                     guard.last_solution_hash_hex = Some(hex_string(&payload.solution_hash));
-                    guard.temperature_c = current_temperature_c().or(guard.temperature_c);
-                    snapshot_from_guard(&config, started_at, &guard, hash_counter.load(Ordering::Relaxed))
+                    guard.last_output_hash_hex = Some(hex_string(&payload.solution_hash));
+                    guard.temperature_c = get_cpu_temperature().or(guard.temperature_c);
+                    let metrics = output_filter_metrics(&output_filter);
+                    snapshot_from_guard(
+                        &config,
+                        started_at,
+                        &guard,
+                        hash_counter.load(Ordering::Relaxed),
+                        &metrics,
+                    )
                 };
 
                 let _ = telemetry_tx.send(snapshot);
@@ -670,9 +801,17 @@ async fn snapshot_from_state(
     started_at: Instant,
     stats: &Arc<Mutex<RuntimeStats>>,
     hash_counter: &Arc<AtomicU64>,
+    output_filter: &SharedOutputFilter,
 ) -> TelemetrySnapshot {
-    let guard = stats.lock().await;
-    snapshot_from_guard(config, started_at, &guard, hash_counter.load(Ordering::Relaxed))
+    let guard = stats.lock().await.clone();
+    let metrics = output_filter_metrics(output_filter);
+    snapshot_from_guard(
+        config,
+        started_at,
+        &guard,
+        hash_counter.load(Ordering::Relaxed),
+        &metrics,
+    )
 }
 
 fn snapshot_from_guard(
@@ -680,6 +819,7 @@ fn snapshot_from_guard(
     started_at: Instant,
     guard: &RuntimeStats,
     hashes: u64,
+    filter_metrics: &OutputFilterMetrics,
 ) -> TelemetrySnapshot {
     let uptime = started_at.elapsed().as_secs().max(1);
     TelemetrySnapshot {
@@ -693,10 +833,14 @@ fn snapshot_from_guard(
         accepted_submissions: guard.accepted_submissions,
         rejected_submissions: guard.rejected_submissions,
         total_rewards_estimate: guard.total_rewards_estimate,
+        output_count: filter_metrics.output_count,
         last_solution_nonce: guard.last_solution_nonce,
         last_solution_hash_hex: guard.last_solution_hash_hex.clone(),
         last_commit_hash_hex: guard.last_commit_hash_hex.clone(),
         last_output_hash_hex: guard.last_output_hash_hex.clone(),
+        filter_fp_rate: filter_metrics.filter_fp_rate,
+        filter_memory_kb: filter_metrics.filter_memory_kb,
+        epoch_stats: filter_metrics.epoch_stats.clone(),
         temperature_c: guard.temperature_c,
         mining_phase: None,
         phase_blocks_remaining: None,
@@ -709,15 +853,106 @@ async fn snapshot_with_phase(
     started_at: Instant,
     stats: &Arc<Mutex<RuntimeStats>>,
     hash_counter: &Arc<AtomicU64>,
+    output_filter: &SharedOutputFilter,
     phase_tracker: &PhaseTracker,
 ) -> TelemetrySnapshot {
     let ps = phase_tracker.get();
-    let guard = stats.lock().await;
-    let mut snapshot = snapshot_from_guard(config, started_at, &guard, hash_counter.load(Ordering::Relaxed));
+    let guard = stats.lock().await.clone();
+    let metrics = output_filter_metrics(output_filter);
+    let mut snapshot = snapshot_from_guard(
+        config,
+        started_at,
+        &guard,
+        hash_counter.load(Ordering::Relaxed),
+        &metrics,
+    );
     snapshot.mining_phase = ps.phase;
     snapshot.phase_blocks_remaining = ps.blocks_remaining;
     snapshot.phase_eta_seconds = ps.eta_seconds;
     snapshot
+}
+
+fn build_output_filter(config: &MinerConfig) -> Result<SharedOutputFilter> {
+    let filter = match build_persistent_output_filter(config) {
+        Ok(filter) => filter,
+        Err(err) => {
+            warn!("Falling back to in-memory output filter: {err:#}");
+            TgOutputFilter::new()
+                .with_storage(Arc::new(MemoryBackend::default()))
+                .build()
+                .map_err(|filter_err| anyhow!("Failed to build in-memory output filter: {filter_err}"))?
+        }
+    };
+
+    Ok(Arc::new(RwLock::new(filter)))
+}
+
+fn build_persistent_output_filter(config: &MinerConfig) -> Result<TgOutputFilter<Ready>> {
+    let db_path = output_filter_path(&config.private_key_path);
+    if let Some(parent) = db_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let backend = Arc::new(
+        SledBackend::new(&db_path)
+            .map_err(|err| anyhow!("Failed to open output filter db at {}: {err}", db_path.display()))?,
+    );
+
+    let mut filter = TgOutputFilter::new()
+        .with_storage(backend)
+        .build()
+        .map_err(|err| anyhow!("Failed to build persistent output filter: {err}"))?;
+
+    let removed = filter.garbage_collect();
+    if removed > 0 {
+        info!("Output filter garbage-collected {removed} expired records");
+    }
+    filter.log_summary();
+    Ok(filter)
+}
+
+fn output_filter_path(key_path: &str) -> PathBuf {
+    let path = Path::new(key_path);
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    let parent = path.parent().unwrap_or(Path::new("."));
+    parent.join(format!("{stem}.output-filter.db"))
+}
+
+fn output_filter_metrics(output_filter: &SharedOutputFilter) -> OutputFilterMetrics {
+    let filter = match output_filter.read() {
+        Ok(filter) => filter,
+        Err(_) => {
+            warn!("Output filter read lock poisoned while building telemetry snapshot");
+            return OutputFilterMetrics::default();
+        }
+    };
+
+    OutputFilterMetrics {
+        output_count: filter.output_count(),
+        filter_fp_rate: Some(filter.false_positive_rate()),
+        filter_memory_kb: Some((filter.memory_bytes() / 1024) as u64),
+        epoch_stats: filter.epoch_stats(),
+    }
+}
+
+fn record_output_solution(
+    output_filter: &SharedOutputFilter,
+    output_hash: [u8; 32],
+    nonce: u64,
+    wallet_addr: &str,
+) -> Result<bool> {
+    let mut filter = output_filter
+        .write()
+        .map_err(|_| anyhow!("output filter write lock poisoned"))?;
+    filter
+        .record_solution(output_hash, nonce, wallet_addr)
+        .map_err(|err| anyhow!("failed to record output in filter: {err}"))
+}
+
+fn parse_hex_bytes32(value: &str) -> Option<[u8; 32]> {
+    let trimmed = value.strip_prefix("0x").unwrap_or(value);
+    let bytes = hex::decode(trimmed).ok()?;
+    bytes.try_into().ok()
 }
 
 fn reward_from_receipt_or_estimate(receipt: &ethers::types::TransactionReceipt, difficulty_zero_bits: u8) -> f64 {
@@ -732,39 +967,6 @@ fn reward_from_receipt_or_estimate(receipt: &ethers::types::TransactionReceipt, 
             );
             estimated
         }
-    }
-}
-
-fn current_temperature_c() -> Option<f32> {
-    #[cfg(target_os = "linux")]
-    {
-        use std::fs;
-
-        for zone in 0..16 {
-            let base = format!("/sys/class/thermal/thermal_zone{zone}");
-            let temp_path = format!("{base}/temp");
-            let temp_text = match fs::read_to_string(&temp_path) {
-                Ok(value) => value,
-                Err(_) => continue,
-            };
-
-            let raw = match temp_text.trim().parse::<f32>() {
-                Ok(value) => value,
-                Err(_) => continue,
-            };
-
-            let temp_c = if raw > 500.0 { raw / 1000.0 } else { raw };
-            if (0.0..150.0).contains(&temp_c) {
-                return Some(temp_c);
-            }
-        }
-
-        None
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        None
     }
 }
 
