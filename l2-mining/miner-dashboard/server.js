@@ -1,7 +1,9 @@
 const http = require('http');
+const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const { URL } = require('url');
+const { ethers } = require('ethers');
 const { createStore } = require('./solution-store');
 
 const HOST = process.env.HOST || '127.0.0.1';
@@ -9,6 +11,32 @@ const PORT = Number(process.env.PORT || 4173);
 const ROOT = __dirname;
 const INDEX = path.join(ROOT, 'index.html');
 const TELEMETRY_FILE = process.env.TELEMETRY_FILE || path.resolve(ROOT, '..', 'rust', 'miner-telemetry.jsonl');
+const RANDOMNESS_API_URL = process.env.RANDOMNESS_API_URL || 'http://127.0.0.1:4271';
+const RPC_URL = process.env.RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com';
+const CORE_ADDRESS = process.env.CORE_ADDRESS || '0x843fAc753610163776374Ab0261029BAEA0251b7';
+const TGBT_ADDRESS = process.env.TGBT_ADDRESS || '0x496598fDeab78fb2986e89d396249779595418E9';
+const TOKENOMICS_ADDRESS = process.env.TOKENOMICS_ADDRESS || '0xcf0a632A88D759f4A4ad0eA0317B5BE5A10638A5';
+const BATCH_ADDRESS = process.env.BATCH_ADDRESS || '0xd52467e0C442c0817665fdB11f86FC47dC56ef3E';
+const WALLET_ADDRESS = process.env.WALLET_ADDRESS || '0x3058bd411b9ec0dF6C7d0b04914C9bd2934b7fb3';
+const CHALLENGE_WINDOW = Number(process.env.CHALLENGE_WINDOW || 100);
+const MODULE_IDS = {
+	BATCH_MINING_MODULE: ethers.id('BATCH_MINING_MODULE'),
+	TOKENOMICS_MODULE: ethers.id('TOKENOMICS_MODULE'),
+};
+
+const provider = new ethers.JsonRpcProvider(RPC_URL);
+const CORE_ABI = [
+	'function moduleAddress(bytes32 moduleId) view returns (address)',
+];
+const TGBT_ABI = [
+	'function balanceOf(address) view returns (uint256)',
+	'function decimals() view returns (uint8)',
+	'function symbol() view returns (string)',
+];
+const BATCH_ABI = [
+	'function currentEpochId() view returns (uint256)',
+	'function getEpochInfo(uint256 epochId) view returns (tuple(bytes32 merkleRoot, uint64 startBlock, uint64 endBlock, uint32 leafCount, address operator, uint8 poolId, bool finalized, uint256 totalReward, bool storageAttested, bytes32 attestationHash))',
+];
 
 // Difficulty-based reward estimate (mirrors miner Rust logic)
 const DIFFICULTY_BITS = 11;
@@ -16,8 +44,187 @@ const EST_TGBT_PER_SOLUTION = Math.max(DIFFICULTY_BITS / 8, 1); // 1.375
 
 let store = null;
 
+function toChecksumOrNull(value) {
+	if (!value) return null;
+	try {
+		return ethers.getAddress(value);
+	} catch {
+		return value;
+	}
+}
+
+function shortError(err) {
+	if (!err) return 'Unknown error';
+	return err.message || String(err);
+}
+
+function requestJson(targetUrl, options = {}) {
+	return new Promise((resolve, reject) => {
+		const parsed = new URL(targetUrl);
+		const transport = parsed.protocol === 'https:' ? https : http;
+		const req = transport.request(parsed, {
+			method: options.method || 'GET',
+			headers: {
+				'Accept': 'application/json',
+				...(options.headers || {}),
+			},
+		}, (res) => {
+			let raw = '';
+			res.setEncoding('utf8');
+			res.on('data', chunk => raw += chunk);
+			res.on('end', () => {
+				let json = null;
+				try {
+					json = raw ? JSON.parse(raw) : null;
+				} catch {
+					json = { raw };
+				}
+				resolve({ status: res.statusCode || 500, json, headers: res.headers });
+			});
+		});
+		req.on('error', reject);
+		if (options.timeoutMs) {
+			req.setTimeout(options.timeoutMs, () => req.destroy(new Error(`Request timed out after ${options.timeoutMs}ms`)));
+		}
+		if (options.body) {
+			req.write(options.body);
+		}
+		req.end();
+	});
+}
+
+async function getSystemStatus() {
+	const core = new ethers.Contract(CORE_ADDRESS, CORE_ABI, provider);
+	const tgbt = new ethers.Contract(TGBT_ADDRESS, TGBT_ABI, provider);
+	const batch = new ethers.Contract(BATCH_ADDRESS, BATCH_ABI, provider);
+
+	const [randomnessApi, ethBalance, tokenBalance, tokenDecimals, tokenSymbol, coreBatchModule, coreTokenomicsModule, nextEpochId, currentBlock, network] = await Promise.all([
+		requestJson(`${RANDOMNESS_API_URL}/api/health`, { timeoutMs: 4000 }).catch(err => ({
+			status: 503,
+			json: { error: shortError(err) },
+		})),
+		provider.getBalance(WALLET_ADDRESS),
+		tgbt.balanceOf(WALLET_ADDRESS),
+		tgbt.decimals(),
+		tgbt.symbol(),
+		core.moduleAddress(MODULE_IDS.BATCH_MINING_MODULE),
+		core.moduleAddress(MODULE_IDS.TOKENOMICS_MODULE),
+		batch.currentEpochId(),
+		provider.getBlockNumber(),
+		provider.getNetwork(),
+	]);
+
+	let latestOnChainEpoch = null;
+	if (Number(nextEpochId) > 0) {
+		try {
+			const epochId = Number(nextEpochId) - 1;
+			const info = await batch.getEpochInfo(epochId);
+			latestOnChainEpoch = {
+				epochId,
+				merkleRoot: info.merkleRoot,
+				startBlock: Number(info.startBlock),
+				endBlock: Number(info.endBlock),
+				leafCount: Number(info.leafCount),
+				operator: info.operator,
+				poolId: Number(info.poolId),
+				finalized: info.finalized,
+				totalReward: ethers.formatEther(info.totalReward),
+				storageAttested: info.storageAttested,
+				attestationHash: info.attestationHash,
+				blocksUntilFinalizable: Math.max(0, Number(info.startBlock) + CHALLENGE_WINDOW - Number(currentBlock)),
+				blocksPastChallenge: Math.max(0, Number(currentBlock) - (Number(info.startBlock) + CHALLENGE_WINDOW)),
+			};
+		} catch (err) {
+			latestOnChainEpoch = { error: shortError(err) };
+		}
+	}
+
+	return {
+		dashboard: {
+			host: HOST,
+			port: PORT,
+			telemetryFile: TELEMETRY_FILE,
+			solutionsBackend: process.env.MONGODB_URI ? 'mongodb' : 'file',
+		},
+		randomnessApi: {
+			url: RANDOMNESS_API_URL,
+			online: randomnessApi.status >= 200 && randomnessApi.status < 300,
+			status: randomnessApi.status,
+			data: randomnessApi.json,
+		},
+		chain: {
+			rpcUrl: RPC_URL,
+			chainId: Number(network.chainId),
+			currentBlock: Number(currentBlock),
+			challengeWindow: CHALLENGE_WINDOW,
+			walletAddress: WALLET_ADDRESS,
+			ethBalance: ethers.formatEther(ethBalance),
+			token: {
+				address: TGBT_ADDRESS,
+				symbol: tokenSymbol,
+				balance: ethers.formatUnits(tokenBalance, tokenDecimals),
+			},
+			contracts: {
+				core: CORE_ADDRESS,
+				tokenomics: TOKENOMICS_ADDRESS,
+				batch: BATCH_ADDRESS,
+				coreBatchModule: toChecksumOrNull(coreBatchModule),
+				coreTokenomicsModule: toChecksumOrNull(coreTokenomicsModule),
+				batchWiredCorrectly: toChecksumOrNull(coreBatchModule)?.toLowerCase() === BATCH_ADDRESS.toLowerCase(),
+				tokenomicsWiredCorrectly: toChecksumOrNull(coreTokenomicsModule)?.toLowerCase() === TOKENOMICS_ADDRESS.toLowerCase(),
+			},
+			nextEpochId: Number(nextEpochId),
+			latestOnChainEpoch,
+		},
+	};
+}
+
+async function getOnChainEpoch(epochId) {
+	const batch = new ethers.Contract(BATCH_ADDRESS, BATCH_ABI, provider);
+	const currentBlock = await provider.getBlockNumber();
+	const info = await batch.getEpochInfo(epochId);
+	if (!info || !info.merkleRoot || /^0x0+$/.test(info.merkleRoot)) {
+		throw new Error(`Epoch ${epochId} not found on-chain`);
+	}
+	return {
+		epochId: Number(epochId),
+		merkleRoot: info.merkleRoot,
+		startBlock: Number(info.startBlock),
+		endBlock: Number(info.endBlock),
+		leafCount: Number(info.leafCount),
+		operator: info.operator,
+		poolId: Number(info.poolId),
+		finalized: info.finalized,
+		totalReward: ethers.formatEther(info.totalReward),
+		storageAttested: info.storageAttested,
+		attestationHash: info.attestationHash,
+		currentBlock: Number(currentBlock),
+		challengeWindow: CHALLENGE_WINDOW,
+		blocksUntilFinalizable: Math.max(0, Number(info.startBlock) + CHALLENGE_WINDOW - Number(currentBlock)),
+		blocksPastChallenge: Math.max(0, Number(currentBlock) - (Number(info.startBlock) + CHALLENGE_WINDOW)),
+	};
+}
+
 // ── Telemetry-to-solution detector ──────────────────────
 let prevSnap = null;
+
+function normalizePhase(snap) {
+	if (!snap) return null;
+	return snap.mining_phase || (snap.state === 'running' ? 'searching' : null);
+}
+
+function syncLatestSolutionDetails(snap) {
+	if (!store || !snap || snap.last_solution_nonce == null) return;
+
+	store.updateSolutionDetails({
+		nonce: snap.last_solution_nonce,
+		accepted: true,
+		hash: snap.last_solution_hash_hex || undefined,
+		commitHash: snap.last_commit_hash_hex || snap.last_solution_hash_hex || undefined,
+		outputHash: snap.last_output_hash_hex || snap.last_solution_hash_hex || undefined,
+		phase: normalizePhase(snap) || undefined,
+	}).catch(err => console.error('[SolutionStore] update error:', err.message));
+}
 
 function detectAndStoreSolution(snap) {
 	if (!store || !snap) return;
@@ -38,11 +245,11 @@ function detectAndStoreSolution(snap) {
 			nonce: snap.last_solution_nonce,
 			hash: snap.last_solution_hash_hex,
 			commitHash: snap.last_commit_hash_hex || snap.last_solution_hash_hex,
-			outputHash: snap.last_output_hash_hex || null,
+			outputHash: snap.last_output_hash_hex || snap.last_solution_hash_hex || null,
 			reward,
 			estimated: onChainDelta <= 0,
 			accepted: true,
-			phase: snap.mining_phase,
+			phase: normalizePhase(snap),
 			uptime: snap.uptime_seconds,
 			hashrate: snap.hashrate_hs,
 			totalHashes: snap.hashes,
@@ -62,13 +269,15 @@ function detectAndStoreSolution(snap) {
 			reward: 0,
 			estimated: false,
 			accepted: false,
-			phase: snap.mining_phase,
+			phase: normalizePhase(snap),
 			uptime: snap.uptime_seconds,
 			hashrate: snap.hashrate_hs,
 			totalHashes: snap.hashes,
 			solutionNumber: null,
 		}).catch(err => console.error('[SolutionStore] insert error:', err.message));
 	}
+
+	syncLatestSolutionDetails(snap);
 
 	prevSnap = snap;
 }
@@ -127,6 +336,25 @@ function readBody(req) {
 	});
 }
 
+async function proxyRandomnessApi(req, res, targetPath, method = 'GET', body = null) {
+	try {
+		const targetUrl = `${RANDOMNESS_API_URL}${targetPath}`;
+		const response = await requestJson(targetUrl, {
+			method,
+			body: body ? JSON.stringify(body) : null,
+			headers: body ? { 'Content-Type': 'application/json' } : {},
+			timeoutMs: 10000,
+		});
+		sendJson(res, response.status, response.json ?? {});
+	} catch (err) {
+		sendJson(res, 502, {
+			error: 'Failed to reach randomness API',
+			detail: shortError(err),
+			target: `${RANDOMNESS_API_URL}${targetPath}`,
+		});
+	}
+}
+
 // ── HTTP Server ─────────────────────────────────────────
 
 const server = http.createServer(async (req, res) => {
@@ -157,17 +385,80 @@ const server = http.createServer(async (req, res) => {
 		return;
 	}
 
+	if (url.pathname === '/api/system/status' && req.method === 'GET') {
+		try {
+			const status = await getSystemStatus();
+			sendJson(res, 200, status);
+		} catch (err) {
+			sendJson(res, 500, { error: shortError(err) });
+		}
+		return;
+	}
+
+	const onChainEpochMatch = url.pathname.match(/^\/api\/system\/onchain-epoch\/(\d+)$/);
+	if (onChainEpochMatch && req.method === 'GET') {
+		try {
+			const epoch = await getOnChainEpoch(Number(onChainEpochMatch[1]));
+			sendJson(res, 200, epoch);
+		} catch (err) {
+			sendJson(res, 404, { error: shortError(err), epochId: Number(onChainEpochMatch[1]) });
+		}
+		return;
+	}
+
+	if (url.pathname === '/api/network/health' && req.method === 'GET') {
+		await proxyRandomnessApi(req, res, '/api/health');
+		return;
+	}
+
+	if (url.pathname === '/api/network/randomness/latest' && req.method === 'GET') {
+		await proxyRandomnessApi(req, res, '/api/randomness/latest');
+		return;
+	}
+
+	const proofProxyMatch = url.pathname.match(/^\/api\/network\/randomness\/([0-9a-fA-Fx]+)\/proof$/);
+	if (proofProxyMatch && req.method === 'GET') {
+		await proxyRandomnessApi(req, res, `/api/randomness/${proofProxyMatch[1]}/proof`);
+		return;
+	}
+
+	if (url.pathname === '/api/network/epochs' && req.method === 'GET') {
+		await proxyRandomnessApi(req, res, `/api/epochs${url.search || ''}`);
+		return;
+	}
+
+	const epochProxyMatch = url.pathname.match(/^\/api\/network\/epochs\/(\d+)$/);
+	if (epochProxyMatch && req.method === 'GET') {
+		await proxyRandomnessApi(req, res, `/api/epochs/${epochProxyMatch[1]}`);
+		return;
+	}
+
+	const verifyStorageMatch = url.pathname.match(/^\/api\/network\/epochs\/(\d+)\/verify-storage$/);
+	if (verifyStorageMatch && req.method === 'POST') {
+		await proxyRandomnessApi(req, res, `/api/epochs/${verifyStorageMatch[1]}/verify-storage`, 'POST');
+		return;
+	}
+
 	// ── Solution storage API ─────────────────────────────
 	if (url.pathname === '/api/solutions' && req.method === 'GET') {
 		try {
 			const limit = Math.max(1, Math.min(200, Number(url.searchParams.get('limit') || 50)));
 			const skip = Math.max(0, Number(url.searchParams.get('skip') || 0));
 			const filter = url.searchParams.get('filter'); // 'accepted' | 'rejected' | null
-			let solutions = await store.getSolutions({ limit: limit + skip, skip: 0 });
+			const sinceMs = Number(url.searchParams.get('sinceMs') || 0);
+			let solutions = await store.getSolutions({ limit: 100000, skip: 0 });
 			if (filter === 'accepted') solutions = solutions.filter(s => s.accepted);
 			if (filter === 'rejected') solutions = solutions.filter(s => !s.accepted);
+			if (sinceMs > 0) {
+				solutions = solutions.filter(s => Number(s.timestampMs || Date.parse(s.timestamp || s.createdAt || 0)) >= sinceMs);
+			}
+			const stats = {
+				total: solutions.length,
+				accepted: solutions.filter(s => s.accepted).length,
+				rejected: solutions.filter(s => !s.accepted).length,
+				totalRewards: solutions.reduce((sum, s) => sum + Number(s.reward || 0), 0),
+			};
 			solutions = solutions.slice(skip, skip + limit);
-			const stats = await store.getStats();
 			sendJson(res, 200, { solutions, stats });
 		} catch (err) {
 			sendJson(res, 500, { error: err.message });
@@ -216,6 +507,7 @@ const server = http.createServer(async (req, res) => {
 			if (!latest) {
 				return;
 			}
+			syncLatestSolutionDetails(latest);
 			if (latest.timestamp_unix_ms !== lastTimestamp) {
 				lastTimestamp = latest.timestamp_unix_ms;
 				detectAndStoreSolution(latest);
@@ -265,7 +557,7 @@ const server = http.createServer(async (req, res) => {
 						reward,
 						estimated: onChainDelta <= 0,
 						accepted: true,
-						phase: snap.mining_phase,
+						phase: normalizePhase(snap),
 						uptime: snap.uptime_seconds,
 						hashrate: snap.hashrate_hs,
 						totalHashes: snap.hashes,
@@ -283,7 +575,7 @@ const server = http.createServer(async (req, res) => {
 						reward: 0,
 						estimated: false,
 						accepted: false,
-						phase: snap.mining_phase,
+						phase: normalizePhase(snap),
 						uptime: snap.uptime_seconds,
 						hashrate: snap.hashrate_hs,
 						totalHashes: snap.hashes,
@@ -305,5 +597,7 @@ const server = http.createServer(async (req, res) => {
 	server.listen(PORT, HOST, () => {
 		console.log(`Temporal Gradient dashboard listening on http://${HOST}:${PORT}`);
 		console.log(`Telemetry file: ${TELEMETRY_FILE}`);
+		console.log(`Randomness API: ${RANDOMNESS_API_URL}`);
+		console.log(`RPC URL: ${RPC_URL}`);
 	});
 })();

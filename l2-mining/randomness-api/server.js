@@ -22,6 +22,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { ethers } = require('ethers');
+const { getEpochFilePath, verifyEpochStorage } = require('./storage-attestation');
 
 // ── Config ──────────────────────────────────────────────
 const HOST = process.env.RANDOMNESS_HOST || '127.0.0.1';
@@ -56,6 +57,8 @@ function loadEpochStore() {
 				poolId:     data.poolId || 0,
 				operator:   data.operator || null,
 				totalReward: data.totalReward || 0,
+				storageVerification: data.storageVerification || null,
+				onChainAttestation: data.onChainAttestation || null,
 			});
 			epochLeaves[data.epochId] = data.leaves || [];
 
@@ -102,6 +105,8 @@ function saveEpoch(epochData) {
 			poolId:     epochData.poolId || 0,
 			operator:   epochData.operator || null,
 			totalReward: epochData.totalReward || 0,
+			storageVerification: epochData.storageVerification || null,
+			onChainAttestation: epochData.onChainAttestation || null,
 		});
 	}
 	epochLeaves[epochData.epochId] = epochData.leaves || [];
@@ -117,6 +122,19 @@ function saveEpoch(epochData) {
 			signature:  last.signature || null,
 		};
 	}
+}
+
+function updateEpoch(epochId, patch) {
+	const file = getEpochFilePath(epochId);
+	if (!fs.existsSync(file)) {
+		throw new Error(`Epoch file not found: ${file}`);
+	}
+
+	const current = JSON.parse(fs.readFileSync(file, 'utf8'));
+	const next = { ...current, ...patch };
+	fs.writeFileSync(file, JSON.stringify(next, null, 2));
+	saveEpoch(next);
+	return next;
 }
 
 // ── HTTP Helpers ────────────────────────────────────────
@@ -147,12 +165,14 @@ function readBody(req) {
 }
 
 // ── Signature helper ────────────────────────────────────
-function signOutput(outputHash) {
+async function signOutput(outputHash) {
 	if (!MINER_PRIVATE_KEY) return null;
 	try {
 		const wallet = new ethers.Wallet(MINER_PRIVATE_KEY);
-		const message = ethers.getBytes(outputHash);
-		return wallet.signMessageSync(message);
+		const message = ethers.getBytes
+			? ethers.getBytes(outputHash)
+			: ethers.utils.arrayify(outputHash);
+		return await wallet.signMessage(message);
 	} catch {
 		return null;
 	}
@@ -230,6 +250,8 @@ function handleEpochDetail(_req, res, epochId) {
 
 	sendJson(res, 200, {
 		...ep,
+		storageVerification: ep.storageVerification || null,
+		onChainAttestation: ep.onChainAttestation || null,
 		leaves,
 	});
 }
@@ -254,12 +276,14 @@ async function handleCreateEpoch(req, res) {
 
 		body.createdAt = body.createdAt || new Date().toISOString();
 		body.leafCount = body.leaves.length;
+		body.storageVerification = body.storageVerification || null;
+		body.onChainAttestation = body.onChainAttestation || null;
 
 		// Sign each leaf if we have a key
 		if (MINER_PRIVATE_KEY) {
 			for (const leaf of body.leaves) {
 				if (!leaf.signature) {
-					leaf.signature = signOutput(leaf.outputHash);
+					leaf.signature = await signOutput(leaf.outputHash);
 				}
 			}
 		}
@@ -269,6 +293,56 @@ async function handleCreateEpoch(req, res) {
 		sendJson(res, 201, { ok: true, epochId: body.epochId, leafCount: body.leafCount });
 	} catch (err) {
 		sendJson(res, 400, { error: err.message });
+	}
+}
+
+async function handleRecordOnChainAttestation(req, res, epochId) {
+	const ep = epochIndex.find(e => e.epochId === epochId);
+	if (!ep) return sendJson(res, 404, { error: 'Epoch not found' });
+
+	try {
+		const body = await readBody(req);
+		if (!body.attestationHash) {
+			return sendJson(res, 400, { error: 'Missing attestationHash' });
+		}
+
+		const updated = updateEpoch(epochId, {
+			onChainAttestation: {
+				attestationHash: body.attestationHash,
+				txHash: body.txHash || null,
+				recordedAt: body.recordedAt || new Date().toISOString(),
+				recorder: body.recorder || null,
+			},
+		});
+
+		sendJson(res, 200, {
+			ok: true,
+			epochId,
+			onChainAttestation: updated.onChainAttestation,
+		});
+	} catch (err) {
+		sendJson(res, 400, { error: err.message, epochId });
+	}
+}
+
+async function handleVerifyEpochStorage(_req, res, epochId) {
+	const ep = epochIndex.find(e => e.epochId === epochId);
+	if (!ep) return sendJson(res, 404, { error: 'Epoch not found' });
+
+	try {
+		const report = await verifyEpochStorage(epochId);
+		updateEpoch(epochId, {
+			storageVerification: {
+				...report,
+				verifiedAt: new Date().toISOString(),
+			},
+		});
+		sendJson(res, 200, report);
+	} catch (err) {
+		sendJson(res, 500, {
+			error: err.message,
+			epochId,
+		});
 	}
 }
 
@@ -305,6 +379,14 @@ const server = http.createServer((req, res) => {
 		const epochMatch = p.match(/^\/api\/epochs\/(\d+)$/);
 		if (req.method === 'GET' && epochMatch) {
 			return handleEpochDetail(req, res, Number(epochMatch[1]));
+		}
+		const verifyMatch = p.match(/^\/api\/epochs\/(\d+)\/verify-storage$/);
+		if (req.method === 'POST' && verifyMatch) {
+			return handleVerifyEpochStorage(req, res, Number(verifyMatch[1]));
+		}
+		const onChainMatch = p.match(/^\/api\/epochs\/(\d+)\/attestation-onchain$/);
+		if (req.method === 'POST' && onChainMatch) {
+			return handleRecordOnChainAttestation(req, res, Number(onChainMatch[1]));
 		}
 		// POST /api/epochs — epoch-builder pushes a new epoch
 		if (req.method === 'POST' && p === '/api/epochs') {

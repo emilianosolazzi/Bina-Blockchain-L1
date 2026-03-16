@@ -79,12 +79,18 @@ pub struct PhaseState {
 #[derive(Debug, Clone)]
 pub struct PhaseTracker {
     inner: Arc<Mutex<PhaseState>>,
+    block_time_millis: u64,
 }
 
 impl PhaseTracker {
     pub fn new() -> Self {
+        Self::with_block_time_millis(12_000)
+    }
+
+    pub fn with_block_time_millis(block_time_millis: u64) -> Self {
         Self {
             inner: Arc::new(Mutex::new(PhaseState::default())),
+            block_time_millis: block_time_millis.max(1),
         }
     }
 
@@ -92,7 +98,10 @@ impl PhaseTracker {
         let mut s = self.inner.lock().unwrap();
         s.phase = Some(phase);
         s.blocks_remaining = blocks_remaining;
-        s.eta_seconds = blocks_remaining.map(|b| b * 12);
+        s.eta_seconds = blocks_remaining.map(|b| {
+            let eta_millis = b.saturating_mul(self.block_time_millis);
+            eta_millis.saturating_add(999) / 1000
+        });
     }
 
     pub fn get(&self) -> PhaseState {

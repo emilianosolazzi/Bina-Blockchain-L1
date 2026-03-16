@@ -10,6 +10,7 @@
   "gas_price_multiplier": 1.1,
   "log_level": "INFO",
   "stats_interval_seconds": 5,
+  "block_time_millis": 12000,
   "max_retries": 5,
   "exit_after_solutions": 1,
   "telemetry_file": "c:/Users/comar/OneDrive/Documents/Entropy_Randomness/Randomness_Entropy/l2-mining/rust/miner-telemetry.jsonl",

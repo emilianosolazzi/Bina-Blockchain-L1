@@ -57,6 +57,7 @@ pub struct LiveMiningClient {
     pub client: Arc<MiningClient>,
     pub contract_address: Address,
     pub pool_id: u8,
+    pub block_time_millis: u64,
 }
 
 impl LiveMiningClient {
@@ -81,6 +82,7 @@ impl LiveMiningClient {
             client,
             contract_address,
             pool_id: config.pool_id,
+            block_time_millis: config.block_time_millis.max(1_000),
         }))
     }
 
@@ -359,8 +361,11 @@ impl LiveMiningClient {
             }
             let remaining = expires_at.saturating_sub(current_block);
             phase.set(MiningPhase::WaitingForClearance, Some(remaining));
-            tracing::info!("Waiting for commitment expiry: {remaining} blocks remaining (~{}s)", remaining * 12);
-            tokio::time::sleep(Duration::from_secs(12)).await;
+            tracing::info!(
+                "Waiting for commitment expiry: {remaining} blocks remaining (~{}s)",
+                self.eta_seconds_for_blocks(remaining)
+            );
+            tokio::time::sleep(self.block_sleep_duration()).await;
         }
     }
 
@@ -390,10 +395,19 @@ impl LiveMiningClient {
             phase.set(MiningPhase::WaitingForClearance, Some(remaining));
             tracing::info!(
                 "Mining cooldown: {remaining} blocks until minBlockInterval clears (~{}s)",
-                remaining * 12
+                self.eta_seconds_for_blocks(remaining)
             );
-            tokio::time::sleep(Duration::from_secs(12)).await;
+            tokio::time::sleep(self.block_sleep_duration()).await;
         }
+    }
+
+    fn eta_seconds_for_blocks(&self, blocks: u64) -> u64 {
+        let millis = blocks.saturating_mul(self.block_time_millis);
+        millis.saturating_add(999).checked_div(1_000).unwrap_or(0)
+    }
+
+    fn block_sleep_duration(&self) -> Duration {
+        Duration::from_millis(self.block_time_millis.max(1_000))
     }
 
     pub fn extract_reward_from_receipt(receipt: &TransactionReceipt) -> Option<f64> {

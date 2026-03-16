@@ -23,6 +23,8 @@ interface IBatchMiningModule {
         uint8     poolId;              // mining pool used
         bool      finalized;           // whether rewards have been settled
         uint256   totalReward;         // total TGBT awarded for the epoch
+        bool      storageAttested;     // whether an archive attestation was anchored on-chain
+        bytes32   attestationHash;     // keccak256 hash of the attestation payload
     }
 
     // ── Events ──────────────────────────────────────────
@@ -40,6 +42,11 @@ interface IBatchMiningModule {
         uint256 totalReward
     );
 
+    event StorageAttested(
+        uint256 indexed epochId,
+        bytes32 attestationHash
+    );
+
     /// @dev Emitted by wrapper functions that call verifyRandomnessLeaf
     ///      and then act on the result (not from the view itself).
     event RandomnessLeafVerified(
@@ -54,6 +61,7 @@ interface IBatchMiningModule {
     error EpochNotFound(uint256 epochId);
     error EpochAlreadyFinalized(uint256 epochId);
     error EpochNotFinalized(uint256 epochId);
+    error StorageAttestationAlreadyRecorded(uint256 epochId);
     error InvalidMerkleProof();
     error InvalidLeafCount();
     error NotEpochOperator();
@@ -84,6 +92,11 @@ interface IBatchMiningModule {
     ///         Mints the accumulated TGBT reward to the operator.
     /// @param epochId  The epoch to finalise.
     function finalizeEpoch(uint256 epochId) external;
+
+    /// @notice Record the storage attestation hash for an already-finalised epoch.
+    /// @param epochId The finalised epoch to annotate.
+    /// @param attestationHash Keccak256 hash of the attestation payload.
+    function recordStorageAttestation(uint256 epochId, bytes32 attestationHash) external;
 
     // ── Randomness verification (anyone can call) ───────
 

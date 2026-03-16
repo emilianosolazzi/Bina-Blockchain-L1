@@ -41,6 +41,7 @@ contract MinerRewardsCalculator {
     uint256 public constant BASE_WEIGHT = 1e18;
     uint256 public constant DEFAULT_BONUS_THRESHOLD = 2;
     uint16 public constant DEFAULT_BONUS_MULTIPLIER = 125;
+    uint256 public constant DEFAULT_BLOCK_TIME_SECONDS = 12;
 
     // Current parameters (can be updated)
     uint256 public targetDifficulty;
@@ -52,6 +53,7 @@ contract MinerRewardsCalculator {
     uint256 public blocksPerEpoch;
     uint256 public halvingInterval;
     uint256 public nextHalvingBlock;
+    uint256 public blockTimeSeconds;
     
     // Pool parameters map
     mapping(uint8 => MiningLib.MiningPool) public miningPools;
@@ -91,6 +93,7 @@ contract MinerRewardsCalculator {
         blocksPerEpoch = 0;
         halvingInterval = 0;
         nextHalvingBlock = 0;
+        blockTimeSeconds = DEFAULT_BLOCK_TIME_SECONDS;
         
         // Default pool
         miningPools[0] = MiningLib.MiningPool({
@@ -203,8 +206,7 @@ contract MinerRewardsCalculator {
     ) {
         if (networkHashrate == 0 || tokenPriceUSD == 0) return (0, 0, 0);
         
-        // Average 5760 blocks per day (15 second blocks)
-        uint256 blocksPerDay = 5760;
+        uint256 blocksPerDay = getBlocksPerDay();
         
         // Calculate mining rewards
         uint256 minerShare = (minerHashrate * 1e18) / networkHashrate;
@@ -228,6 +230,15 @@ contract MinerRewardsCalculator {
         }
         
         return (roiDays, monthlyRevenue, monthlyProfit);
+    }
+
+    function setBlockTimeSeconds(uint256 newBlockTimeSeconds) external {
+        require(newBlockTimeSeconds > 0, "invalid block time");
+        blockTimeSeconds = newBlockTimeSeconds;
+    }
+
+    function getBlocksPerDay() public view returns (uint256) {
+        return 1 days / (blockTimeSeconds == 0 ? DEFAULT_BLOCK_TIME_SECONDS : blockTimeSeconds);
     }
     
     /**

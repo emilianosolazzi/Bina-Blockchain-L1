@@ -7,6 +7,7 @@ pub mod pending;
 pub mod pqc;
 pub mod runtime;
 pub mod seed;
+pub mod storage_verification;
 pub mod telemetry;
 
 pub use chain::{wallet_address_from_config, LiveChallenge, LiveMiningClient, LiveSubmission};
@@ -20,4 +21,9 @@ pub use paths::{app_paths, ensure_app_layout, AppPaths};
 pub use pqc::{apply_pqc_enhancement, PqcMode};
 pub use runtime::{spawn_miner, MinerHandle};
 pub use seed::{decode_temporal_seed_timestamp, encode_temporal_seed, generate_temporal_seed};
+pub use storage_verification::{
+    AttestationStatus, ChallengeType, EntropyStorageVerifier, ProviderReputation,
+    SettlementGateDecision, StorageAttestation, StorageChallenge, StorageProof, StorageProtocol,
+    VerificationResult, VerificationStats,
+};
 pub use telemetry::{MinerState, MiningPhase, PhaseTracker, TelemetrySnapshot};

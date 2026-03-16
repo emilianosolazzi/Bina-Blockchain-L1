@@ -49,10 +49,12 @@ const EPOCH_STATE_FILE = path.resolve(__dirname, 'epoch-state.json');
 const BATCH_ABI = [
 	'function commitEpochRoot(uint256 epochId, bytes32 merkleRoot, uint32 leafCount, uint8 poolId, uint256 deadline, bytes signature) external',
 	'function finalizeEpoch(uint256 epochId) external',
+	'function recordStorageAttestation(uint256 epochId, bytes32 attestationHash) external',
 	'function currentEpochId() view returns (uint256)',
-	'function getEpochInfo(uint256 epochId) view returns (tuple(bytes32 merkleRoot, uint64 startBlock, uint64 endBlock, uint32 leafCount, address operator, uint8 poolId, bool finalized, uint256 totalReward))',
+	'function getEpochInfo(uint256 epochId) view returns (tuple(bytes32 merkleRoot, uint64 startBlock, uint64 endBlock, uint32 leafCount, address operator, uint8 poolId, bool finalized, uint256 totalReward, bool storageAttested, bytes32 attestationHash))',
 	'event EpochRootCommitted(uint256 indexed epochId, address indexed operator, bytes32 merkleRoot, uint32 leafCount, uint8 poolId)',
 	'event EpochFinalized(uint256 indexed epochId, uint256 totalReward)',
+	'event StorageAttested(uint256 indexed epochId, bytes32 attestationHash)',
 ];
 
 // EIP-712 domain & types for epoch root signing
@@ -222,6 +224,16 @@ async function finalizeEpochOnChain(wallet, epochId) {
 	return receipt;
 }
 
+async function recordStorageAttestationOnChain(wallet, epochId, attestationHash) {
+	const contract = new ethers.Contract(BATCH_CONTRACT, BATCH_ABI, wallet);
+
+	console.log(`[EpochBuilder] Recording storage attestation for epoch ${epochId}…`);
+	const tx = await contract.recordStorageAttestation(epochId, attestationHash);
+	const receipt = await tx.wait();
+	console.log(`[EpochBuilder] ✓ Storage attestation recorded for epoch ${epochId} in tx ${receipt.transactionHash}`);
+	return receipt;
+}
+
 // ── API push ────────────────────────────────────────────
 
 async function pushEpochToApi(epochData) {
@@ -240,6 +252,51 @@ async function pushEpochToApi(epochData) {
 	} catch (err) {
 		console.error(`[EpochBuilder] API push error:`, err.message);
 	}
+}
+
+async function verifyEpochStorageWithApi(epochId) {
+	const resp = await fetch(`${RANDOMNESS_API}/api/epochs/${epochId}/verify-storage`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+	});
+
+	const raw = await resp.text();
+	const json = JSON.parse(raw);
+	if (!resp.ok) {
+		throw new Error(json.error || `storage verification failed for epoch ${epochId}`);
+	}
+
+	if (!json.settlement_gate?.approved) {
+		const reasons = json.settlement_gate?.reasons?.join('; ') || 'storage gate rejected';
+		throw new Error(reasons);
+	}
+
+	return {
+		report: json,
+		attestationHash: ethers.utils.keccak256(ethers.utils.toUtf8Bytes(raw)),
+	};
+}
+
+async function persistOnChainAttestationToApi(epochId, attestationHash, receipt, wallet) {
+	const payload = {
+		attestationHash,
+		txHash: receipt.transactionHash,
+		recordedAt: new Date().toISOString(),
+		recorder: wallet.address,
+	};
+
+	const resp = await fetch(`${RANDOMNESS_API}/api/epochs/${epochId}/attestation-onchain`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(payload),
+	});
+
+	const json = await resp.json();
+	if (!resp.ok) {
+		throw new Error(json.error || `failed to persist on-chain attestation for epoch ${epochId}`);
+	}
+
+	return json;
 }
 
 // ── Main loop ───────────────────────────────────────────
@@ -322,12 +379,22 @@ async function finalizePendingEpochs() {
 	for (let epId = 0; epId < state.nextEpochId; epId++) {
 		try {
 			const info = await contract.getEpochInfo(epId);
-			if (info.finalized) continue;
 			if (info.merkleRoot === ethers.constants.HashZero) continue;
+			if (info.finalized && info.storageAttested) continue;
 
 			const readyBlock = Number(info.startBlock) + CHALLENGE_WINDOW;
 			if (currentBlock >= readyBlock) {
-				await finalizeEpochOnChain(wallet, epId);
+				const verification = await verifyEpochStorageWithApi(epId);
+				console.log(`[EpochBuilder] Storage verified for epoch ${epId} via ${verification.report.provider}`);
+
+				if (!info.finalized) {
+					await finalizeEpochOnChain(wallet, epId);
+				}
+
+				if (!info.storageAttested) {
+					const attestationReceipt = await recordStorageAttestationOnChain(wallet, epId, verification.attestationHash);
+					await persistOnChainAttestationToApi(epId, verification.attestationHash, attestationReceipt, wallet);
+				}
 			} else {
 				console.log(`[EpochBuilder] Epoch ${epId} waiting for block ${readyBlock} (current: ${currentBlock})`);
 			}

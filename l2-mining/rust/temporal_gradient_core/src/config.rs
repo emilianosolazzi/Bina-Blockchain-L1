@@ -18,6 +18,7 @@ pub struct MinerConfig {
     pub gas_price_multiplier: f64,
     pub log_level: String,
     pub stats_interval_seconds: u64,
+    pub block_time_millis: u64,
     pub max_retries: usize,
     pub exit_after_solutions: Option<u64>,
     pub telemetry_file: Option<String>,
@@ -39,6 +40,7 @@ impl Default for MinerConfig {
             gas_price_multiplier: 1.10,
             log_level: "INFO".to_string(),
             stats_interval_seconds: 5,
+            block_time_millis: 12_000,
             max_retries: 5,
             exit_after_solutions: None,
             telemetry_file: None,
@@ -58,6 +60,9 @@ impl MinerConfig {
         }
         if self.stats_interval_seconds == 0 {
             self.stats_interval_seconds = 5;
+        }
+        if self.block_time_millis == 0 {
+            self.block_time_millis = 12_000;
         }
         if self.gas_price_multiplier <= 0.0 {
             self.gas_price_multiplier = 1.10;

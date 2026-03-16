@@ -87,6 +87,8 @@ contract BatchMiningModule is ModuleBase, EIP712("TemporalGradientBatch", "1"), 
         uint8    poolId;
         bool     finalized;
         uint256  totalReward;
+        bool     storageAttested;
+        bytes32  attestationHash;
     }
 
     // ── Initialiser (matches ModuleBase pattern) ────────
@@ -157,7 +159,9 @@ contract BatchMiningModule is ModuleBase, EIP712("TemporalGradientBatch", "1"), 
             operator:    msg.sender,
             poolId:      poolId,
             finalized:   false,
-            totalReward: 0
+            totalReward: 0,
+            storageAttested: false,
+            attestationHash: bytes32(0)
         });
 
         lastCommitBlock[msg.sender] = block.number;
@@ -206,6 +210,24 @@ contract BatchMiningModule is ModuleBase, EIP712("TemporalGradientBatch", "1"), 
         emit EpochFinalized(epochId, actualReward);
     }
 
+    /// @inheritdoc IBatchMiningModule
+    function recordStorageAttestation(uint256 epochId, bytes32 attestationHash) external override whenSystemActive {
+        EpochData storage ep = _epochs[epochId];
+        if (ep.merkleRoot == bytes32(0))
+            revert IBatchMiningModule.EpochNotFound(epochId);
+        if (!ep.finalized)
+            revert IBatchMiningModule.EpochNotFinalized(epochId);
+        if (ep.operator != msg.sender)
+            revert IBatchMiningModule.NotEpochOperator();
+        if (ep.storageAttested)
+            revert IBatchMiningModule.StorageAttestationAlreadyRecorded(epochId);
+
+        ep.storageAttested = true;
+        ep.attestationHash = attestationHash;
+
+        emit StorageAttested(epochId, attestationHash);
+    }
+
     // ── Randomness verification ─────────────────────────
 
     /// @inheritdoc IBatchMiningModule
@@ -241,7 +263,9 @@ contract BatchMiningModule is ModuleBase, EIP712("TemporalGradientBatch", "1"), 
             operator:    ep.operator,
             poolId:      ep.poolId,
             finalized:   ep.finalized,
-            totalReward: ep.totalReward
+            totalReward: ep.totalReward,
+            storageAttested: ep.storageAttested,
+            attestationHash: ep.attestationHash
         });
     }
 

@@ -21,6 +21,7 @@ contract TokenomicsModule is ModuleBase, ITokenomicsModule {
     uint256 public constant MAX_BONUS_MULTIPLIER = 500;
     uint256 public constant DEFAULT_BONUS_THRESHOLD = 2;
     uint16 public constant DEFAULT_BONUS_MULTIPLIER = 125;
+    uint256 public constant DEFAULT_BLOCK_TIME_SECONDS = 12;
 
     bytes32 public constant RULE_VIOLATION = keccak256("RULE_VIOLATION");
     bytes32 public constant MALICIOUS_BEHAVIOR = keccak256("MALICIOUS");
@@ -37,6 +38,7 @@ contract TokenomicsModule is ModuleBase, ITokenomicsModule {
     uint256 public totalMined;
     uint256 public bonusThreshold;
     uint16 public bonusMultiplier;
+    uint256 public blockTimeSeconds;
 
     mapping(address => uint256) public lastActivityBlock;
     mapping(address => uint256) public missedContributions;
@@ -50,6 +52,7 @@ contract TokenomicsModule is ModuleBase, ITokenomicsModule {
     error ZeroToken();
     error InvalidMultiplier();
     error InvalidThreshold();
+    error InvalidBlockTime();
     error InvalidSeverity();
     error InvalidViolationType();
     error UnauthorizedRole(bytes32 role, address caller);
@@ -77,6 +80,7 @@ contract TokenomicsModule is ModuleBase, ITokenomicsModule {
         totalMined = 0;
         bonusThreshold = initialBonusThreshold == 0 ? DEFAULT_BONUS_THRESHOLD : initialBonusThreshold;
         bonusMultiplier = initialBonusMultiplier == 0 ? DEFAULT_BONUS_MULTIPLIER : initialBonusMultiplier;
+        blockTimeSeconds = DEFAULT_BLOCK_TIME_SECONDS;
     }
 
     function onBlockMined(
@@ -121,6 +125,11 @@ contract TokenomicsModule is ModuleBase, ITokenomicsModule {
 
     function setEpochBlocks(uint256 newBlocksPerEpoch) external onlyGovernance {
         TokenomicsLib.setEpochBlocks(epochState, newBlocksPerEpoch);
+    }
+
+    function setBlockTimeSeconds(uint256 newBlockTimeSeconds) external onlyGovernance {
+        if (newBlockTimeSeconds == 0) revert InvalidBlockTime();
+        blockTimeSeconds = newBlockTimeSeconds;
     }
 
     function setHalvingInterval(uint256 newHalvingInterval) external onlyGovernance {
@@ -169,7 +178,7 @@ contract TokenomicsModule is ModuleBase, ITokenomicsModule {
         }
 
         uint256 inactiveBlocks = block.number - lastActivityBlock[account];
-        uint256 inactiveDays = (inactiveBlocks * 15) / 86400;
+        uint256 inactiveDays = (inactiveBlocks * blockTimeSeconds) / 1 days;
 
         if (inactiveDays <= 30) return;
 

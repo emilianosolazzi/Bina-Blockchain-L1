@@ -27,7 +27,7 @@ const { ethers } = require('ethers');
 const ADDRESSES = {
 	core:       '0x843fAc753610163776374Ab0261029BAEA0251b7',
 	tokenomics: '0xcf0a632A88D759f4A4ad0eA0317B5BE5A10638A5',
-	batch:      '0xFf75dc4415EE11228697276CfBF550D0eb344dFC',
+	batch:      '0xd52467e0C442c0817665fdB11f86FC47dC56ef3E',
 	tgbt:       '0x496598fDeab78fb2986e89d396249779595418E9',
 	admin:      '0x3058bd411b9ec0dF6C7d0b04914C9bd2934b7fb3',
 	deployer:   '0xF11676bc166E2427c8Ecf134911572cb5aEe6c52',
@@ -71,7 +71,7 @@ const BATCH_ABI = [
 	'function currentEpochId() view returns (uint256)',
 	'function REQUIRED_TSTAKE() view returns (uint256)',
 	'function REWARD_PER_SOLUTION() view returns (uint256)',
-	'function getEpochInfo(uint256 epochId) view returns (tuple(bytes32 merkleRoot, uint64 startBlock, uint64 endBlock, uint32 leafCount, address operator, uint8 poolId, bool finalized, uint256 totalReward))',
+	'function getEpochInfo(uint256 epochId) view returns (tuple(bytes32 merkleRoot, uint64 startBlock, uint64 endBlock, uint32 leafCount, address operator, uint8 poolId, bool finalized, uint256 totalReward, bool storageAttested, bytes32 attestationHash))',
 ];
 
 const ERC20_ABI = [
@@ -185,6 +185,8 @@ async function cmdEpochInfo(epochId) {
 	console.log('  poolId:     ', info.poolId.toString());
 	console.log('  finalized:  ', info.finalized);
 	console.log('  totalReward:', ethers.utils.formatEther(info.totalReward), 'TGBT');
+	console.log('  storageAttested:', info.storageAttested);
+	console.log('  attestationHash:', info.attestationHash);
 }
 
 async function cmdBalance(address) {

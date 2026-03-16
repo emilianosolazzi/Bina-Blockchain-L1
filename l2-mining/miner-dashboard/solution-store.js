@@ -76,6 +76,25 @@ class FileStore {
 			: null;
 	}
 
+	async updateSolutionDetails({ nonce, accepted, ...patch }) {
+		if (nonce == null) return null;
+		for (let i = this._data.solutions.length - 1; i >= 0; i--) {
+			const item = this._data.solutions[i];
+			if (item.nonce !== nonce) continue;
+			if (accepted != null && item.accepted !== accepted) continue;
+
+			for (const [key, value] of Object.entries(patch)) {
+				if (value !== undefined && value !== null && value !== '') {
+					item[key] = value;
+				}
+			}
+
+			this._save();
+			return item;
+		}
+		return null;
+	}
+
 	async close() {}
 }
 
@@ -140,6 +159,28 @@ class MongoStore {
 
 	async getLatest() {
 		return this.collection.findOne({}, { sort: { timestamp: -1 } });
+	}
+
+	async updateSolutionDetails({ nonce, accepted, ...patch }) {
+		if (nonce == null) return null;
+		const set = {};
+		for (const [key, value] of Object.entries(patch)) {
+			if (value !== undefined && value !== null && value !== '') {
+				set[key] = value;
+			}
+		}
+		if (Object.keys(set).length === 0) return null;
+
+		const query = { nonce };
+		if (accepted != null) query.accepted = accepted;
+
+		const result = await this.collection.findOneAndUpdate(
+			query,
+			{ $set: set },
+			{ sort: { timestampMs: -1 }, returnDocument: 'after' }
+		);
+
+		return result.value || null;
 	}
 
 	async close() {

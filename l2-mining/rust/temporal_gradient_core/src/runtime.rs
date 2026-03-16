@@ -13,7 +13,7 @@ use ethers::types::U256;
 use k256::ecdsa::SigningKey;
 use rand::rngs::OsRng;
 use sha3::{Digest, Keccak256};
-use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
+use std::sync::{atomic::{AtomicBool, AtomicU64, Ordering}, Arc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, Mutex};
 use tokio::task::JoinHandle;
@@ -23,7 +23,6 @@ use tracing::{debug, info, warn};
 
 #[derive(Debug, Clone)]
 struct LiveWorkerCandidate {
-    worker_id: usize,
     nonce: u64,
     temporal_seed: [u8; 8],
     reveal_signature: Vec<u8>,
@@ -41,7 +40,6 @@ struct LiveWorkerSearchResult {
 #[derive(Debug)]
 struct RuntimeStats {
     state: MinerState,
-    hashes: u64,
     solutions: u64,
     accepted_submissions: u64,
     rejected_submissions: u64,
@@ -57,7 +55,6 @@ impl Default for RuntimeStats {
     fn default() -> Self {
         Self {
             state: MinerState::Starting,
-            hashes: 0,
             solutions: 0,
             accepted_submissions: 0,
             rejected_submissions: 0,
@@ -66,7 +63,7 @@ impl Default for RuntimeStats {
             last_solution_hash_hex: None,
             last_commit_hash_hex: None,
             last_output_hash_hex: None,
-            temperature_c: Some(50.0),
+            temperature_c: None,
         }
     }
 }
@@ -75,6 +72,7 @@ pub struct MinerHandle {
     config: MinerConfig,
     started_at: Instant,
     stats: Arc<Mutex<RuntimeStats>>,
+    hash_counter: Arc<AtomicU64>,
     telemetry_tx: broadcast::Sender<TelemetrySnapshot>,
     shutdown: CancellationToken,
     join_handle: JoinHandle<Result<()>>,
@@ -86,7 +84,7 @@ impl MinerHandle {
     }
 
     pub async fn snapshot(&self) -> TelemetrySnapshot {
-        snapshot_from_state(&self.config, self.started_at, &self.stats).await
+        snapshot_from_state(&self.config, self.started_at, &self.stats, &self.hash_counter).await
     }
 
     pub fn shutdown(&self) {
@@ -105,21 +103,24 @@ impl MinerHandle {
 pub fn spawn_miner(config: MinerConfig) -> Result<MinerHandle> {
     let (telemetry_tx, _) = broadcast::channel(256);
     let stats = Arc::new(Mutex::new(RuntimeStats::default()));
+    let hash_counter = Arc::new(AtomicU64::new(0));
     let started_at = Instant::now();
     let shutdown = CancellationToken::new();
     let task_config = config.clone();
     let task_stats = Arc::clone(&stats);
+    let task_hash_counter = Arc::clone(&hash_counter);
     let task_tx = telemetry_tx.clone();
     let task_shutdown = shutdown.clone();
 
     let join_handle = tokio::spawn(async move {
-        run_runtime(task_config, task_stats, started_at, task_tx, task_shutdown).await
+        run_runtime(task_config, task_stats, task_hash_counter, started_at, task_tx, task_shutdown).await
     });
 
     Ok(MinerHandle {
         config,
         started_at,
         stats,
+        hash_counter,
         telemetry_tx,
         shutdown,
         join_handle,
@@ -129,21 +130,23 @@ pub fn spawn_miner(config: MinerConfig) -> Result<MinerHandle> {
 async fn run_runtime(
     config: MinerConfig,
     stats: Arc<Mutex<RuntimeStats>>,
+    hash_counter: Arc<AtomicU64>,
     started_at: Instant,
     telemetry_tx: broadcast::Sender<TelemetrySnapshot>,
     shutdown: CancellationToken,
 ) -> Result<()> {
     if let Some(live_client) = LiveMiningClient::connect(&config).await? {
         info!("Live chain submission mode enabled for contract {}", config.contract_address);
-        return run_live_runtime(config, stats, started_at, telemetry_tx, shutdown, live_client).await;
+        return run_live_runtime(config, stats, hash_counter, started_at, telemetry_tx, shutdown, live_client).await;
     }
 
-    run_simulated_runtime(config, stats, started_at, telemetry_tx, shutdown).await
+    run_simulated_runtime(config, stats, hash_counter, started_at, telemetry_tx, shutdown).await
 }
 
 async fn run_simulated_runtime(
     config: MinerConfig,
     stats: Arc<Mutex<RuntimeStats>>,
+    hash_counter: Arc<AtomicU64>,
     started_at: Instant,
     telemetry_tx: broadcast::Sender<TelemetrySnapshot>,
     shutdown: CancellationToken,
@@ -159,6 +162,7 @@ async fn run_simulated_runtime(
             worker_id,
             config.clone(),
             Arc::clone(&stats),
+            Arc::clone(&hash_counter),
             started_at,
             telemetry_tx.clone(),
             shutdown.clone(),
@@ -172,7 +176,7 @@ async fn run_simulated_runtime(
                 break;
             }
             _ = ticker.tick() => {
-                let snapshot = snapshot_from_state(&config, started_at, &stats).await;
+                let snapshot = snapshot_from_state(&config, started_at, &stats, &hash_counter).await;
                 let _ = telemetry_tx.send(snapshot);
             }
         }
@@ -196,7 +200,7 @@ async fn run_simulated_runtime(
         guard.state = MinerState::Stopped;
     }
 
-    let final_snapshot = snapshot_from_state(&config, started_at, &stats).await;
+    let final_snapshot = snapshot_from_state(&config, started_at, &stats, &hash_counter).await;
     let _ = telemetry_tx.send(final_snapshot);
     info!("Miner runtime stopped cleanly");
     Ok(())
@@ -205,6 +209,7 @@ async fn run_simulated_runtime(
 async fn run_live_runtime(
     config: MinerConfig,
     stats: Arc<Mutex<RuntimeStats>>,
+    hash_counter: Arc<AtomicU64>,
     started_at: Instant,
     telemetry_tx: broadcast::Sender<TelemetrySnapshot>,
     shutdown: CancellationToken,
@@ -215,12 +220,13 @@ async fn run_live_runtime(
         guard.state = MinerState::Running;
     }
 
-    let phase_tracker = PhaseTracker::new();
+    let phase_tracker = PhaseTracker::with_block_time_millis(config.block_time_millis);
 
     // Background telemetry ticker — emits snapshots every second so the
     // display stays updated even while submit_solution is blocking.
     {
         let bg_stats = Arc::clone(&stats);
+        let bg_hashes = Arc::clone(&hash_counter);
         let bg_tx = telemetry_tx.clone();
         let bg_shutdown = shutdown.clone();
         let bg_config = config.clone();
@@ -232,7 +238,7 @@ async fn run_live_runtime(
                     _ = bg_shutdown.cancelled() => break,
                     _ = interval.tick() => {
                         let snapshot = snapshot_with_phase(
-                            &bg_config, started_at, &bg_stats, &bg_phase,
+                            &bg_config, started_at, &bg_stats, &bg_hashes, &bg_phase,
                         ).await;
                         let _ = bg_tx.send(snapshot);
                     }
@@ -256,8 +262,7 @@ async fn run_live_runtime(
             .await
         {
             Ok(Some(receipt)) => {
-                let on_chain = LiveMiningClient::extract_reward_from_receipt(&receipt).unwrap_or(0.0);
-                let reward = if on_chain > 0.0 { on_chain } else { estimate_reward(config.difficulty_zero_bits) };
+                let reward = reward_from_receipt_or_estimate(&receipt, config.difficulty_zero_bits);
                 phase_tracker.set(MiningPhase::RewardReceived, None);
                 {
                     let mut guard = stats.lock().await;
@@ -313,6 +318,7 @@ async fn run_live_runtime(
             &live_client,
             &config,
             &stats,
+            &hash_counter,
             &telemetry_tx,
             &shutdown,
             &challenge,
@@ -324,8 +330,7 @@ async fn run_live_runtime(
 
             match live_client.submit_solution(&submission, &phase_tracker, &config.private_key_path).await {
                 Ok(receipt) => {
-                    let on_chain = LiveMiningClient::extract_reward_from_receipt(&receipt).unwrap_or(0.0);
-                    let reward = if on_chain > 0.0 { on_chain } else { estimate_reward(config.difficulty_zero_bits) };
+                    let reward = reward_from_receipt_or_estimate(&receipt, config.difficulty_zero_bits);
                     let output_hash = LiveMiningClient::extract_output_hash_from_receipt(&receipt);
                     phase_tracker.set(MiningPhase::RewardReceived, None);
                     {
@@ -364,7 +369,7 @@ async fn run_live_runtime(
         guard.state = MinerState::Stopped;
     }
 
-    let final_snapshot = snapshot_from_state(&config, started_at, &stats).await;
+    let final_snapshot = snapshot_from_state(&config, started_at, &stats, &hash_counter).await;
     let _ = telemetry_tx.send(final_snapshot);
     info!("Live miner runtime stopped cleanly");
     Ok(())
@@ -374,6 +379,7 @@ async fn attempt_live_solution(
     live_client: &LiveMiningClient,
     config: &MinerConfig,
     stats: &Arc<Mutex<RuntimeStats>>,
+    hash_counter: &Arc<AtomicU64>,
     telemetry_tx: &broadcast::Sender<TelemetrySnapshot>,
     shutdown: &CancellationToken,
     challenge: &LiveChallenge,
@@ -429,8 +435,8 @@ async fn attempt_live_solution(
 
     {
         let mut guard = stats.lock().await;
-        guard.hashes = guard.hashes.saturating_add(hashes_checked);
-        guard.temperature_c = Some(45.0);
+        hash_counter.fetch_add(hashes_checked, Ordering::Relaxed);
+        guard.temperature_c = current_temperature_c();
     }
 
     *nonce_cursor = nonce_cursor.saturating_add((batch_size * worker_count) as u64);
@@ -453,8 +459,8 @@ async fn attempt_live_solution(
         guard.last_solution_hash_hex = Some(hex_string(&candidate.solution_hash));
         guard.last_commit_hash_hex = None;
         guard.last_output_hash_hex = None;
-        guard.temperature_c = Some(45.0 + ((candidate.worker_id % 10) as f32));
-        snapshot_from_guard(config, started_at, &guard)
+        guard.temperature_c = current_temperature_c().or(guard.temperature_c);
+        snapshot_from_guard(config, started_at, &guard, hash_counter.load(Ordering::Relaxed))
     };
     let _ = telemetry_tx.send(preview);
 
@@ -530,7 +536,6 @@ fn search_live_worker_batch(
             return Ok(LiveWorkerSearchResult {
                 hashes_checked,
                 candidate: Some(LiveWorkerCandidate {
-                    worker_id,
                     nonce: current_nonce,
                     temporal_seed,
                     reveal_signature,
@@ -552,6 +557,7 @@ async fn run_worker(
     worker_id: usize,
     config: MinerConfig,
     stats: Arc<Mutex<RuntimeStats>>,
+    hash_counter: Arc<AtomicU64>,
     started_at: Instant,
     telemetry_tx: broadcast::Sender<TelemetrySnapshot>,
     shutdown: CancellationToken,
@@ -564,6 +570,7 @@ async fn run_worker(
     let target_divisor = (config.difficulty_zero_bits as u64).max(1);
 
     debug!("worker {worker_id} started");
+    let mut pending_hashes = 0u64;
     while !shutdown.is_cancelled() {
         let temporal_seed = generate_temporal_seed()?;
         let time_based_entropy = contract_hash_message(
@@ -591,11 +598,11 @@ async fn run_worker(
 
             let current_nonce = nonce;
             nonce = nonce.saturating_add(nonce_step);
+            pending_hashes = pending_hashes.saturating_add(1);
 
-            {
-                let mut guard = stats.lock().await;
-                guard.hashes = guard.hashes.saturating_add(1);
-                guard.temperature_c = Some(45.0 + ((worker_id % 10) as f32));
+            if pending_hashes >= 256 {
+                hash_counter.fetch_add(pending_hashes, Ordering::Relaxed);
+                pending_hashes = 0;
             }
 
             if !pre_filter_nonce(current_nonce, &pre_input, target_divisor) {
@@ -620,6 +627,10 @@ async fn run_worker(
             );
 
             if has_leading_zero_bits(&payload.solution_hash, config.difficulty_zero_bits) {
+                if pending_hashes > 0 {
+                    hash_counter.fetch_add(pending_hashes, Ordering::Relaxed);
+                    pending_hashes = 0;
+                }
                 let snapshot = {
                     let mut guard = stats.lock().await;
                     guard.solutions = guard.solutions.saturating_add(1);
@@ -627,7 +638,8 @@ async fn run_worker(
                     guard.total_rewards_estimate += estimate_reward(config.difficulty_zero_bits);
                     guard.last_solution_nonce = Some(current_nonce);
                     guard.last_solution_hash_hex = Some(hex_string(&payload.solution_hash));
-                    snapshot_from_guard(&config, started_at, &guard)
+                    guard.temperature_c = current_temperature_c().or(guard.temperature_c);
+                    snapshot_from_guard(&config, started_at, &guard, hash_counter.load(Ordering::Relaxed))
                 };
 
                 let _ = telemetry_tx.send(snapshot);
@@ -646,6 +658,10 @@ async fn run_worker(
         time::sleep(Duration::from_millis(10)).await;
     }
 
+    if pending_hashes > 0 {
+        hash_counter.fetch_add(pending_hashes, Ordering::Relaxed);
+    }
+
     Ok(())
 }
 
@@ -653,15 +669,17 @@ async fn snapshot_from_state(
     config: &MinerConfig,
     started_at: Instant,
     stats: &Arc<Mutex<RuntimeStats>>,
+    hash_counter: &Arc<AtomicU64>,
 ) -> TelemetrySnapshot {
     let guard = stats.lock().await;
-    snapshot_from_guard(config, started_at, &guard)
+    snapshot_from_guard(config, started_at, &guard, hash_counter.load(Ordering::Relaxed))
 }
 
 fn snapshot_from_guard(
     config: &MinerConfig,
     started_at: Instant,
     guard: &RuntimeStats,
+    hashes: u64,
 ) -> TelemetrySnapshot {
     let uptime = started_at.elapsed().as_secs().max(1);
     TelemetrySnapshot {
@@ -669,8 +687,8 @@ fn snapshot_from_guard(
         state: guard.state,
         uptime_seconds: uptime,
         worker_count: config.threads,
-        hashes: guard.hashes,
-        hashrate_hs: guard.hashes as f64 / uptime as f64,
+        hashes,
+        hashrate_hs: hashes as f64 / uptime as f64,
         solutions: guard.solutions,
         accepted_submissions: guard.accepted_submissions,
         rejected_submissions: guard.rejected_submissions,
@@ -690,15 +708,64 @@ async fn snapshot_with_phase(
     config: &MinerConfig,
     started_at: Instant,
     stats: &Arc<Mutex<RuntimeStats>>,
+    hash_counter: &Arc<AtomicU64>,
     phase_tracker: &PhaseTracker,
 ) -> TelemetrySnapshot {
     let ps = phase_tracker.get();
     let guard = stats.lock().await;
-    let mut snapshot = snapshot_from_guard(config, started_at, &guard);
+    let mut snapshot = snapshot_from_guard(config, started_at, &guard, hash_counter.load(Ordering::Relaxed));
     snapshot.mining_phase = ps.phase;
     snapshot.phase_blocks_remaining = ps.blocks_remaining;
     snapshot.phase_eta_seconds = ps.eta_seconds;
     snapshot
+}
+
+fn reward_from_receipt_or_estimate(receipt: &ethers::types::TransactionReceipt, difficulty_zero_bits: u8) -> f64 {
+    match LiveMiningClient::extract_reward_from_receipt(receipt) {
+        Some(on_chain) if on_chain > 0.0 => on_chain,
+        _ => {
+            let estimated = estimate_reward(difficulty_zero_bits);
+            warn!(
+                tx_hash = ?receipt.transaction_hash,
+                estimated_reward = estimated,
+                "Receipt did not expose an on-chain reward event; using estimated reward fallback"
+            );
+            estimated
+        }
+    }
+}
+
+fn current_temperature_c() -> Option<f32> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::fs;
+
+        for zone in 0..16 {
+            let base = format!("/sys/class/thermal/thermal_zone{zone}");
+            let temp_path = format!("{base}/temp");
+            let temp_text = match fs::read_to_string(&temp_path) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+
+            let raw = match temp_text.trim().parse::<f32>() {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+
+            let temp_c = if raw > 500.0 { raw / 1000.0 } else { raw };
+            if (0.0..150.0).contains(&temp_c) {
+                return Some(temp_c);
+            }
+        }
+
+        None
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
 }
 
 fn estimate_reward(difficulty_zero_bits: u8) -> f64 {

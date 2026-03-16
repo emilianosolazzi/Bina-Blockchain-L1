@@ -42,6 +42,7 @@
     h1 { margin: 0 0 4px; font-size: 30px; }
     h1 span.tgbt-badge {
       background: linear-gradient(135deg, #fbbf24, #f59e0b);
+      background-clip: text;
       -webkit-background-clip: text; -webkit-text-fill-color: transparent;
       font-size: 16px; font-weight: 700; vertical-align: middle; margin-left: 10px;
     }
@@ -79,6 +80,7 @@
     .reward-hero .big-tgbt {
       font-size: 48px; font-weight: 800; margin: 0;
       background: linear-gradient(135deg, #fbbf24, #f59e0b, #d97706);
+      background-clip: text;
       -webkit-background-clip: text; -webkit-text-fill-color: transparent;
     }
     .reward-hero .big-tgbt .unit { font-size: 22px; font-weight: 600; }
@@ -167,6 +169,281 @@
     }
     .sol-storage-badge .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent-2); }
 
+    .system-grid {
+      display: grid;
+      grid-template-columns: repeat(12, minmax(0,1fr));
+      gap: 16px;
+    }
+    .status-card {
+      grid-column: span 3;
+      padding: 18px;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+    }
+    .status-card h3 {
+      margin: 0 0 12px;
+      color: var(--text);
+      font-size: 16px;
+    }
+    .status-list {
+      display: grid;
+      gap: 10px;
+      font-size: 13px;
+    }
+    .status-item {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: flex-start;
+    }
+    .status-item span:first-child {
+      color: var(--muted);
+    }
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      word-break: break-all;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 700;
+      border: 1px solid var(--border);
+      background: rgba(15,23,42,.75);
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .badge.ok {
+      color: var(--accent-2);
+      border-color: rgba(34,197,94,.28);
+      background: rgba(34,197,94,.1);
+    }
+    .badge.warn {
+      color: var(--warn);
+      border-color: rgba(245,158,11,.28);
+      background: rgba(245,158,11,.1);
+    }
+    .badge.fail {
+      color: var(--danger);
+      border-color: rgba(239,68,68,.28);
+      background: rgba(239,68,68,.1);
+    }
+    .action-btn {
+      padding: 7px 14px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: rgba(15,23,42,.82);
+      color: var(--text);
+      cursor: pointer;
+      transition: all .2s ease;
+    }
+    .action-btn:hover { border-color: var(--accent); color: var(--accent); }
+    .action-btn:disabled { opacity: .5; cursor: not-allowed; }
+    .stack {
+      display: grid;
+      gap: 12px;
+    }
+    .proof-box {
+      background: rgba(2,6,23,.65);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 12px;
+      font-size: 12px;
+    }
+    .proof-nodes {
+      max-height: 180px;
+      overflow-y: auto;
+      display: grid;
+      gap: 6px;
+      margin-top: 8px;
+    }
+    .proof-node {
+      padding: 8px 10px;
+      border-radius: 10px;
+      background: rgba(15,23,42,.85);
+      border: 1px solid var(--border);
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      word-break: break-all;
+    }
+    .epoch-table td, .epoch-table th {
+      vertical-align: top;
+    }
+    .epoch-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .text-input {
+      width: 100%;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: rgba(2,6,23,.7);
+      color: var(--text);
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    }
+    .helper {
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .section-title {
+      margin: 0;
+      color: var(--text);
+      font-size: 18px;
+    }
+    .banner-stack {
+      display: grid;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+    .banner {
+      display: none;
+      padding: 14px 16px;
+      border-radius: 16px;
+      border: 1px solid var(--border);
+      background: rgba(15,23,42,.88);
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    .banner.show { display: flex; }
+    .banner.warn {
+      border-color: rgba(245,158,11,.3);
+      background: rgba(245,158,11,.08);
+    }
+    .banner.fail {
+      border-color: rgba(239,68,68,.3);
+      background: rgba(239,68,68,.08);
+    }
+    .banner-title { font-weight: 700; margin-bottom: 4px; }
+    .banner-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    .copy-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .copy-btn {
+      padding: 6px 12px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: rgba(56,189,248,.08);
+      color: var(--accent);
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .copy-btn:hover { border-color: var(--accent); }
+    .drawer-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(2,6,23,.72);
+      backdrop-filter: blur(6px);
+      display: none;
+      z-index: 30;
+    }
+    .drawer-backdrop.show { display: block; }
+    .drawer {
+      position: fixed;
+      top: 0;
+      right: 0;
+      width: min(720px, 100vw);
+      height: 100vh;
+      background: rgba(7,17,31,.98);
+      border-left: 1px solid var(--border);
+      box-shadow: -20px 0 50px rgba(0,0,0,.4);
+      transform: translateX(100%);
+      transition: transform .25s ease;
+      z-index: 31;
+      overflow-y: auto;
+      padding: 24px;
+    }
+    .drawer.show { transform: translateX(0); }
+    .drawer-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+    .drawer-title {
+      margin: 0;
+      font-size: 24px;
+    }
+    .drawer-close {
+      padding: 8px 12px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: rgba(15,23,42,.8);
+      color: var(--text);
+      cursor: pointer;
+    }
+    .drawer-grid {
+      display: grid;
+      gap: 16px;
+    }
+    .drawer-card {
+      padding: 16px;
+      border-radius: 16px;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+    }
+    .drawer-card h4 {
+      margin: 0 0 12px;
+      font-size: 16px;
+      color: var(--text);
+    }
+    .leaf-list {
+      display: grid;
+      gap: 10px;
+      max-height: 320px;
+      overflow-y: auto;
+    }
+    .leaf-item {
+      padding: 12px;
+      border-radius: 12px;
+      background: rgba(2,6,23,.6);
+      border: 1px solid var(--border);
+    }
+    .leaf-meta {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+    .wallet-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+    .toast {
+      position: fixed;
+      left: 50%;
+      bottom: 24px;
+      transform: translateX(-50%) translateY(20px);
+      opacity: 0;
+      pointer-events: none;
+      transition: all .2s ease;
+      z-index: 40;
+      padding: 12px 16px;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background: rgba(15,23,42,.95);
+      color: var(--text);
+      font-size: 13px;
+      max-width: 80vw;
+    }
+    .toast.show {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
+
     /* ── Pulse animation for live mining ── */
     @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .5; } }
     .live-dot {
@@ -180,6 +457,7 @@
       .card { grid-column: span 6; }
       .left, .right { grid-column: span 12; }
       .reward-hero { gap: 20px; }
+      .status-card { grid-column: span 6; }
     }
     @media (max-width: 640px) {
       .card { grid-column: span 12; }
@@ -188,6 +466,7 @@
       .metric { font-size: 26px; }
       .reward-hero .big-tgbt { font-size: 36px; }
       .reward-sep { display: none; }
+      .status-card { grid-column: span 12; }
     }
   </style>
 </head>
@@ -203,6 +482,27 @@
           <div class="pill"><span class="live-dot" id="liveDot"></span>Connection: <strong id="conn">Connecting…</strong></div>
           <div class="pill">Mode: <strong id="modeLabel">Continuous</strong></div>
           <div class="pill">Updated: <strong id="updatedAt">—</strong></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="banner-stack">
+      <div id="bannerStalledFinalization" class="banner warn">
+        <div>
+          <div class="banner-title">⚠️ Finalization stalled</div>
+          <div id="bannerStalledText" class="helper">—</div>
+        </div>
+        <div class="banner-actions">
+          <button class="action-btn" id="bannerViewEpoch">View epoch</button>
+        </div>
+      </div>
+      <div id="bannerStorageFailure" class="banner fail">
+        <div>
+          <div class="banner-title">⚠️ Storage verification issue</div>
+          <div id="bannerStorageText" class="helper">—</div>
+        </div>
+        <div class="banner-actions">
+          <button class="action-btn" id="bannerRetryStorage">Verify again</button>
         </div>
       </div>
     </section>
@@ -306,10 +606,16 @@
             <h3>Solution Storage</h3>
             <div class="sol-storage-badge" id="storageBadge"><span class="dot"></span><span id="storageLabel">File</span></div>
           </div>
-          <div class="solutions-filters">
+          <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;">
+            <div class="solutions-filters">
+              <div class="sol-filter active" data-scope="session">Current session</div>
+              <div class="sol-filter" data-scope="all">All history</div>
+            </div>
+            <div class="solutions-filters">
             <div class="sol-filter active" data-filter="all">All</div>
             <div class="sol-filter" data-filter="accepted">Accepted</div>
             <div class="sol-filter" data-filter="rejected">Failed</div>
+            </div>
           </div>
         </div>
         <div style="overflow-x:auto;">
@@ -340,7 +646,192 @@
         </div>
       </div>
     </section>
+
+    <section class="grid" style="margin-top:16px;">
+      <div class="panel" style="grid-column: span 12;">
+        <div class="solutions-header">
+          <h3 class="section-title">System & Chain Status</h3>
+          <button class="action-btn" id="refreshSystem">Refresh status</button>
+        </div>
+        <div class="system-grid">
+          <div class="status-card">
+            <h3>Services</h3>
+            <div class="status-list">
+              <div class="status-item"><span>Dashboard</span><span class="badge ok">Online</span></div>
+              <div class="status-item"><span>Randomness API</span><span id="randomnessApiBadge" class="badge">Checking…</span></div>
+              <div class="status-item"><span>Telemetry source</span><span id="telemetryPath" class="mono">—</span></div>
+              <div class="status-item"><span>Solution backend</span><span id="solutionBackend">—</span></div>
+            </div>
+          </div>
+          <div class="status-card">
+            <h3>Wallet</h3>
+            <div class="status-list">
+              <div class="status-item"><span>Address</span><span id="walletAddress" class="mono">—</span></div>
+              <div class="status-item"><span>TGBT</span><span id="walletTgbt">—</span></div>
+              <div class="status-item"><span>ETH</span><span id="walletEth">—</span></div>
+              <div class="status-item"><span>RPC</span><span id="rpcStatus" class="mono">—</span></div>
+            </div>
+          </div>
+          <div class="status-card">
+            <h3>Contract Wiring</h3>
+            <div class="status-list">
+              <div class="status-item"><span>Batch in Core</span><span id="batchWireBadge" class="badge">—</span></div>
+              <div class="status-item"><span>Tokenomics in Core</span><span id="tokenomicsWireBadge" class="badge">—</span></div>
+              <div class="status-item"><span>Live batch</span><span id="liveBatchAddress" class="mono">—</span></div>
+              <div class="status-item"><span>Live tokenomics</span><span id="liveTokenomicsAddress" class="mono">—</span></div>
+            </div>
+          </div>
+          <div class="status-card">
+            <h3>On-chain Epoch</h3>
+            <div class="status-list">
+              <div class="status-item"><span>Next epoch id</span><span id="nextEpochId">—</span></div>
+              <div class="status-item"><span>Latest on-chain epoch</span><span id="latestOnChainEpoch">—</span></div>
+              <div class="status-item"><span>Finalized</span><span id="latestOnChainFinalized">—</span></div>
+              <div class="status-item"><span>Storage attested</span><span id="latestOnChainAttested">—</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel left">
+        <div class="solutions-header">
+          <h3 class="section-title">Latest Randomness</h3>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <button class="action-btn" id="refreshRandomness">Refresh randomness</button>
+            <button class="action-btn" id="loadLatestProof">Load latest proof</button>
+          </div>
+        </div>
+        <div class="stack">
+          <div class="kv" style="grid-template-columns: 160px 1fr;">
+            <div class="label">Latest output</div><div id="latestRandomnessHash" class="hash">—</div>
+            <div class="label">Epoch</div><div id="latestRandomnessEpoch">—</div>
+            <div class="label">Leaf index</div><div id="latestRandomnessLeaf">—</div>
+            <div class="label">Timestamp</div><div id="latestRandomnessTime">—</div>
+            <div class="label">Signature</div><div id="latestRandomnessSignature" class="hash">—</div>
+          </div>
+          <div class="helper">Consumers can take the output hash and fetch a Merkle proof, then verify it on-chain with <span class="mono">verifyRandomnessLeaf()</span>.</div>
+        </div>
+      </div>
+
+      <div class="panel right">
+        <div class="solutions-header">
+          <h3 class="section-title">Proof Inspector</h3>
+          <div class="copy-actions">
+            <button class="copy-btn" id="copyOutputHash">Copy output hash</button>
+            <button class="copy-btn" id="copyProofArgs">Copy proof args</button>
+            <button class="copy-btn" id="copyFullCall">Copy full call</button>
+            <button class="action-btn" id="refreshProof">Lookup proof</button>
+          </div>
+        </div>
+        <div class="stack">
+          <input id="proofOutputInput" class="text-input" placeholder="Paste an output hash (0x...)" />
+          <div id="proofStatus" class="helper">Enter an output hash or click “Load latest proof”.</div>
+          <div class="proof-box">
+            <div class="status-list">
+              <div class="status-item"><span>Epoch</span><span id="proofEpochId">—</span></div>
+              <div class="status-item"><span>Leaf index</span><span id="proofLeafIndex">—</span></div>
+              <div class="status-item"><span>Finalized</span><span id="proofFinalized">—</span></div>
+              <div class="status-item"><span>Merkle root</span><span id="proofMerkleRoot" class="mono">—</span></div>
+              <div class="status-item"><span>Proof nodes</span><span id="proofNodeCount">—</span></div>
+            </div>
+            <div class="proof-nodes" id="proofNodes"></div>
+          </div>
+          <div class="proof-box">
+            <div class="helper" style="margin-bottom:8px;">On-chain verification call</div>
+            <div id="verifyMethod" class="mono">—</div>
+            <div id="verifyArgs" class="proof-nodes"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel solutions-panel">
+        <div class="solutions-header">
+          <h3 class="section-title">Epoch Explorer</h3>
+          <button class="action-btn" id="refreshEpochs">Refresh epochs</button>
+        </div>
+        <div style="overflow-x:auto;">
+          <table class="sol-table epoch-table">
+            <thead>
+              <tr>
+                <th>Epoch</th>
+                <th>Created</th>
+                <th>Leaves</th>
+                <th>Reward</th>
+                <th>Finalized</th>
+                <th>Storage verification</th>
+                <th>On-chain attestation</th>
+                <th>Merkle root</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="epochBody">
+              <tr><td class="sol-empty" colspan="9">Loading epochs…</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div id="epochStatus" class="helper" style="margin-top:12px;">—</div>
+      </div>
+    </section>
   </div>
+
+  <div id="epochDrawerBackdrop" class="drawer-backdrop"></div>
+  <aside id="epochDrawer" class="drawer" aria-hidden="true">
+    <div class="drawer-head">
+      <div>
+        <p class="helper" style="margin:0 0 6px;">Epoch detail</p>
+        <h2 id="drawerEpochTitle" class="drawer-title">Epoch —</h2>
+        <div id="drawerEpochSubtitle" class="helper">Select an epoch from the table.</div>
+      </div>
+      <button id="closeDrawer" class="drawer-close">Close</button>
+    </div>
+    <div class="drawer-grid">
+      <div class="drawer-card">
+        <h4>Overview</h4>
+        <div class="kv" style="grid-template-columns: 170px 1fr;">
+          <div class="label">Merkle root</div><div id="drawerMerkleRoot" class="hash">—</div>
+          <div class="label">Leaf count</div><div id="drawerLeafCount">—</div>
+          <div class="label">Reward</div><div id="drawerReward">—</div>
+          <div class="label">Finalized</div><div id="drawerFinalized">—</div>
+          <div class="label">On-chain start block</div><div id="drawerStartBlock">—</div>
+          <div class="label">On-chain end block</div><div id="drawerEndBlock">—</div>
+          <div class="label">Blocks past challenge</div><div id="drawerBlocksPastChallenge">—</div>
+          <div class="label">Storage attested</div><div id="drawerStorageAttested">—</div>
+          <div class="label">Attestation hash</div><div id="drawerAttestationHash" class="hash">—</div>
+          <div class="label">Attestation tx</div><div id="drawerAttestationTx" class="hash">—</div>
+        </div>
+      </div>
+      <div class="drawer-card">
+        <h4>Storage attestation</h4>
+        <div id="drawerStorageSummary" class="helper">—</div>
+        <div class="copy-actions" style="margin-top:12px;">
+          <button class="copy-btn" id="copyDrawerAttestationHash">Copy attestation hash</button>
+          <button class="action-btn" id="drawerVerifyStorage">Verify storage now</button>
+        </div>
+      </div>
+      <div class="drawer-card">
+        <h4>Wallet actions</h4>
+        <div class="wallet-row" style="margin-bottom:12px;">
+          <button class="action-btn" id="connectWallet">Connect MetaMask</button>
+          <span id="walletConnectStatus" class="helper">Wallet not connected.</span>
+        </div>
+        <div class="wallet-row">
+          <button class="action-btn" id="walletFinalizeEpoch">Finalize epoch</button>
+          <button class="action-btn" id="walletRecordAttestation">Record attestation</button>
+        </div>
+        <div class="helper" style="margin-top:10px;">Uses the connected browser wallet. Intended for operator workflows before public launch.</div>
+      </div>
+      <div class="drawer-card">
+        <h4>Leaves & proofs</h4>
+        <div id="drawerLeafList" class="leaf-list">
+          <div class="helper">No leaves loaded.</div>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <div id="toast" class="toast"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/ethers@6.16.0/dist/ethers.umd.min.js"></script>
 
   <script>
     // Difficulty-based reward estimate: max(difficulty_zero_bits / 8, 1) TGBT per solution
@@ -355,7 +846,36 @@
       return { total: 0, perSolution: 0, estimated: false };
     }
 
-    const state = { history: [], latest: null, source: null, chartMode: 'hashrate', rewardEvents: [] };
+    const state = {
+      history: [],
+      latest: null,
+      source: null,
+      chartMode: 'hashrate',
+      rewardEvents: [],
+      sessionStartMs: null,
+      system: null,
+      randomnessLatest: null,
+      epochs: [],
+      proof: null,
+      selectedEpoch: null,
+      selectedEpochOnChain: null,
+      alerts: {
+        stalledEpochId: null,
+        storageFailedEpochId: null,
+      },
+      wallet: {
+        provider: null,
+        signer: null,
+        address: null,
+      },
+    };
+
+    const browserEthers = window.ethers || null;
+    const SEPOLIA_CHAIN_ID_HEX = '0xaa36a7';
+    const WALLET_BATCH_ABI = [
+      'function finalizeEpoch(uint256 epochId) external',
+      'function recordStorageAttestation(uint256 epochId, bytes32 attestationHash) external',
+    ];
 
     const els = Object.fromEntries([...document.querySelectorAll('[id]')].map(el => [el.id, el]));
 
@@ -397,6 +917,147 @@
       return `${ss}s`;
     }
 
+    function shortHash(value, size = 12) {
+      if (!value || typeof value !== 'string') return '—';
+      if (value.length <= size * 2) return value;
+      return `${value.slice(0, size)}…${value.slice(-size)}`;
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function setBadge(el, label, kind = '') {
+      if (!el) return;
+      el.className = `badge${kind ? ` ${kind}` : ''}`;
+      el.textContent = label;
+    }
+
+    function statusFromBool(ok, good = 'OK', bad = 'Mismatch') {
+      return ok
+        ? { label: good, kind: 'ok' }
+        : { label: bad, kind: 'fail' };
+    }
+
+    function storageSummary(ep) {
+      const sv = ep?.storageVerification;
+      if (!sv) return { label: 'Not verified', kind: 'warn', detail: 'No storage verification recorded yet.' };
+      if (sv.error) return { label: 'Verification failed', kind: 'fail', detail: sv.error };
+      if (sv.verified === false || sv.is_valid === false) return { label: 'Verification failed', kind: 'fail', detail: JSON.stringify(sv) };
+      const provider = sv.provider_id || sv.storage_provider || sv.provider || 'storage provider';
+      const hash = sv.attestation_hash || sv.attestationHash || null;
+      const detail = hash ? `${provider} • ${shortHash(hash, 10)}` : provider;
+      return { label: 'Verified', kind: 'ok', detail };
+    }
+
+    function attestationSummary(ep) {
+      const oa = ep?.onChainAttestation;
+      if (!oa || !oa.attestationHash) return { label: 'Not recorded', kind: 'warn', detail: 'Attestation hash not mirrored on-chain yet.' };
+      const tx = oa.txHash ? shortHash(oa.txHash, 10) : 'tx pending';
+      return { label: 'Recorded', kind: 'ok', detail: `${shortHash(oa.attestationHash, 10)} • ${tx}` };
+    }
+
+    function rewardLabel(value) {
+      const num = Number(value || 0);
+      return num > 0 ? `${fmtTGBT(num)} TGBT` : '—';
+    }
+
+    function finalizeLabel(ep) {
+      return ep?.finalized ? { label: 'Finalized', kind: 'ok' } : { label: 'Pending', kind: 'warn' };
+    }
+
+    async function copyText(text, label = 'Copied') {
+      const value = String(text ?? '').trim();
+      if (!value) {
+        showToast('Nothing to copy.', true);
+        return;
+      }
+
+      try {
+        if (navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(value);
+        } else {
+          const input = document.createElement('textarea');
+          input.value = value;
+          document.body.appendChild(input);
+          input.select();
+          document.execCommand('copy');
+          input.remove();
+        }
+        showToast(`${label} copied to clipboard.`);
+      } catch (err) {
+        showToast(`Copy failed: ${err.message}`, true);
+      }
+    }
+
+    let toastTimer = null;
+    function showToast(message, isError = false) {
+      els.toast.textContent = message;
+      els.toast.style.borderColor = isError ? 'rgba(239,68,68,.35)' : 'rgba(56,189,248,.35)';
+      els.toast.style.color = isError ? '#fecaca' : 'var(--text)';
+      els.toast.classList.add('show');
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => els.toast.classList.remove('show'), 2600);
+    }
+
+    function findEpoch(epochId) {
+      return state.epochs.find(ep => Number(ep.epochId) === Number(epochId)) || null;
+    }
+
+    function getAttestationHash(ep) {
+      return ep?.storageVerification?.attestationHash
+        || ep?.storageVerification?.attestation_hash
+        || ep?.onChainAttestation?.attestationHash
+        || ep?.onChainAttestation?.attestation_hash
+        || null;
+    }
+
+    function getProofArgsJson(proof) {
+      if (!proof?.verifyOnChain?.args) return '[]';
+      return JSON.stringify(proof.verifyOnChain.args, null, 2);
+    }
+
+    function getFullVerifyCall(proof) {
+      if (!proof) return '';
+      const proofArray = JSON.stringify(proof.proof || []);
+      return `verifyRandomnessLeaf(${proof.epochId}, ${proof.leafIndex}, \"${proof.outputHash}\", ${proofArray})`;
+    }
+
+    function renderAlerts() {
+      const latestOnChain = state.system?.chain?.latestOnChainEpoch;
+      if (latestOnChain && !latestOnChain.error && !latestOnChain.finalized && Number(latestOnChain.blocksPastChallenge || 0) > 0) {
+        state.alerts.stalledEpochId = latestOnChain.epochId;
+        els.bannerStalledText.textContent = `Epoch #${latestOnChain.epochId} has not been finalized — ${latestOnChain.blocksPastChallenge} blocks past the ${state.system?.chain?.challengeWindow || 100}-block challenge window.`;
+        els.bannerStalledFinalization.classList.add('show');
+      } else {
+        state.alerts.stalledEpochId = null;
+        els.bannerStalledFinalization.classList.remove('show');
+      }
+
+      const failedStorage = (state.epochs || []).find(ep => {
+        const sv = ep?.storageVerification;
+        return sv && (sv.error || sv.verified === false || sv.is_valid === false);
+      });
+      if (failedStorage) {
+        state.alerts.storageFailedEpochId = failedStorage.epochId;
+        els.bannerStorageText.textContent = `Epoch #${failedStorage.epochId} storage verification failed. ${failedStorage.storageVerification?.error || 'Review the attestation details and retry verification.'}`;
+        els.bannerStorageFailure.classList.add('show');
+      } else {
+        state.alerts.storageFailedEpochId = null;
+        els.bannerStorageFailure.classList.remove('show');
+      }
+    }
+
+    function normalizedPhase(snap) {
+	    if (!snap) return null;
+	    return snap.mining_phase || (snap.state === 'running' ? 'searching' : null);
+    }
+
     function phaseText(name, snap) {
       if (snap?.state === 'stopped') {
         if ((snap.accepted_submissions || 0) > 0) {
@@ -408,21 +1069,22 @@
     }
 
     function progressPercent(snap) {
-      if (!snap?.mining_phase) return 0;
-      if (snap.mining_phase === 'waiting_for_clearance') {
+        const phase = normalizedPhase(snap);
+        if (!phase) return 0;
+        if (phase === 'waiting_for_clearance') {
         const rem = snap.phase_blocks_remaining ?? 0;
         return (1 - Math.min(rem, 500) / 500) * 100;
       }
-      if (snap.mining_phase === 'commitment_locked') {
+        if (phase === 'commitment_locked') {
         const rem = snap.phase_blocks_remaining ?? 0;
         const total = Math.max(2, rem);
         return ((total - rem) / total) * 100;
       }
-      if (snap.mining_phase === 'reward_received') return 100;
-      if (snap.mining_phase === 'revealing') return 92;
-      if (snap.mining_phase === 'committing') return 75;
-      if (snap.mining_phase === 'solution_found') return 55;
-      if (snap.mining_phase === 'searching') return 20;
+        if (phase === 'reward_received') return 100;
+        if (phase === 'revealing') return 92;
+        if (phase === 'committing') return 75;
+        if (phase === 'solution_found') return 55;
+        if (phase === 'searching') return 20;
       return 5;
     }
 
@@ -465,17 +1127,21 @@
     function render(snap) {
       const prev = state.latest;
       state.latest = snap;
+      if (!state.sessionStartMs && snap.timestamp_unix_ms && snap.uptime_seconds != null) {
+        state.sessionStartMs = Number(snap.timestamp_unix_ms) - (Number(snap.uptime_seconds) * 1000);
+      }
       detectRewardEvent(prev, snap);
 
-      const [title, desc] = phaseText(snap.mining_phase, snap);
+	      const phase = normalizedPhase(snap);
+	      const [title, desc] = phaseText(phase, snap);
       els.phaseMetric.textContent = title;
       els.phaseTitle.textContent = title;
       els.phaseDesc.textContent = desc;
-      els.phaseMeta.textContent = snap.mining_phase ? `Phase: ${snap.mining_phase}` : (snap.state === 'stopped' ? 'Run finished' : '');
+	      els.phaseMeta.textContent = phase ? `Phase: ${phase}` : (snap.state === 'stopped' ? 'Run finished' : '');
       els.phaseEta.textContent = snap.phase_eta_seconds != null ? `ETA ${fmtDuration(snap.phase_eta_seconds)}` : '';
       els.progressBar.style.width = `${progressPercent(snap)}%`;
 
-      if (snap.mining_phase === 'reward_received') {
+	      if (phase === 'reward_received') {
         els.progressBar.style.background = 'linear-gradient(90deg, #fbbf24, #22c55e)';
       } else {
         els.progressBar.style.background = 'linear-gradient(90deg, var(--accent), var(--accent-2))';
@@ -530,19 +1196,376 @@
       els.blocksLeft.textContent = snap.phase_blocks_remaining != null ? fmtNum(snap.phase_blocks_remaining) : '—';
       els.eta.textContent = fmtDuration(snap.phase_eta_seconds);
       els.lastHash.textContent = snap.last_solution_hash_hex || '—';
-      els.lastCommitHash.textContent = snap.last_commit_hash_hex || '—';
-      els.lastOutputHash.textContent = snap.last_output_hash_hex || '—';
+	      els.lastCommitHash.textContent = snap.last_commit_hash_hex || snap.last_solution_hash_hex || '—';
+	      els.lastOutputHash.textContent = snap.last_output_hash_hex || snap.last_solution_hash_hex || '—';
       els.updatedAt.textContent = new Date(Number(snap.timestamp_unix_ms)).toLocaleTimeString();
 
       // Live dot color
-      if (snap.state === 'running') {
-        els.liveDot.className = snap.mining_phase === 'reward_received' ? 'live-dot gold' : 'live-dot';
+        if (snap.state === 'running') {
+          els.liveDot.className = phase === 'reward_received' ? 'live-dot gold' : 'live-dot';
       } else {
         els.liveDot.style.animation = 'none';
         els.liveDot.style.background = '#ef4444';
       }
 
       drawChart();
+    }
+
+    function renderSystemStatus() {
+      const sys = state.system;
+      if (!sys) return;
+
+      setBadge(els.randomnessApiBadge, sys.randomnessApi?.online ? 'Online' : 'Offline', sys.randomnessApi?.online ? 'ok' : 'fail');
+      els.telemetryPath.textContent = sys.dashboard?.telemetryFile || '—';
+      els.solutionBackend.textContent = sys.dashboard?.solutionsBackend || '—';
+      els.storageLabel.textContent = (sys.dashboard?.solutionsBackend || 'file').toUpperCase();
+
+      els.walletAddress.textContent = sys.chain?.walletAddress || '—';
+      els.walletTgbt.textContent = `${fmtTGBT(Number(sys.chain?.token?.balance || 0))} ${sys.chain?.token?.symbol || 'TGBT'}`;
+      els.walletEth.textContent = `${fmtNum(Number(sys.chain?.ethBalance || 0))} ETH`;
+      els.rpcStatus.textContent = sys.chain?.rpcUrl || '—';
+
+      const batchWiring = statusFromBool(sys.chain?.contracts?.batchWiredCorrectly, 'Correct', 'Mismatch');
+      const tokenomicsWiring = statusFromBool(sys.chain?.contracts?.tokenomicsWiredCorrectly, 'Correct', 'Mismatch');
+      setBadge(els.batchWireBadge, batchWiring.label, batchWiring.kind);
+      setBadge(els.tokenomicsWireBadge, tokenomicsWiring.label, tokenomicsWiring.kind);
+      els.liveBatchAddress.textContent = sys.chain?.contracts?.coreBatchModule || '—';
+      els.liveTokenomicsAddress.textContent = sys.chain?.contracts?.coreTokenomicsModule || '—';
+
+      els.nextEpochId.textContent = sys.chain?.nextEpochId ?? '—';
+      const latestOnChain = sys.chain?.latestOnChainEpoch;
+      if (latestOnChain && !latestOnChain.error) {
+        els.latestOnChainEpoch.textContent = latestOnChain.epochId;
+        const fin = latestOnChain.finalized ? 'Finalized' : 'Pending';
+        const att = latestOnChain.storageAttested ? 'Recorded' : 'Pending';
+        els.latestOnChainFinalized.textContent = fin;
+        els.latestOnChainFinalized.className = latestOnChain.finalized ? 'ok' : 'warn';
+        els.latestOnChainAttested.textContent = att;
+        els.latestOnChainAttested.className = latestOnChain.storageAttested ? 'ok' : 'warn';
+      } else if (latestOnChain?.error) {
+        els.latestOnChainEpoch.textContent = 'Error';
+        els.latestOnChainFinalized.textContent = latestOnChain.error;
+        els.latestOnChainFinalized.className = 'danger';
+        els.latestOnChainAttested.textContent = '—';
+        els.latestOnChainAttested.className = '';
+      } else {
+        els.latestOnChainEpoch.textContent = 'None yet';
+        els.latestOnChainFinalized.textContent = '—';
+        els.latestOnChainAttested.textContent = '—';
+      }
+
+      renderAlerts();
+    }
+
+    function renderLatestRandomness() {
+      const latest = state.randomnessLatest;
+      if (!latest || latest.error) {
+        els.latestRandomnessHash.textContent = latest?.error || 'No randomness available yet';
+        els.latestRandomnessEpoch.textContent = '—';
+        els.latestRandomnessLeaf.textContent = '—';
+        els.latestRandomnessTime.textContent = '—';
+        els.latestRandomnessSignature.textContent = '—';
+        return;
+      }
+
+      els.latestRandomnessHash.textContent = latest.outputHash || '—';
+      els.latestRandomnessEpoch.textContent = latest.epochId ?? '—';
+      els.latestRandomnessLeaf.textContent = latest.leafIndex ?? '—';
+      els.latestRandomnessTime.textContent = latest.timestamp ? new Date(latest.timestamp).toLocaleString() : '—';
+      els.latestRandomnessSignature.textContent = latest.signature || 'No signature available';
+      els.proofOutputInput.value = latest.outputHash || els.proofOutputInput.value;
+    }
+
+    function renderProof() {
+      const proof = state.proof;
+      if (!proof || proof.error) {
+        els.proofStatus.textContent = proof?.error || 'Enter an output hash or click “Load latest proof”.';
+        els.proofEpochId.textContent = '—';
+        els.proofLeafIndex.textContent = '—';
+        els.proofFinalized.textContent = '—';
+        els.proofMerkleRoot.textContent = '—';
+        els.proofNodeCount.textContent = '—';
+        els.proofNodes.innerHTML = '';
+        els.verifyMethod.textContent = '—';
+        els.verifyArgs.innerHTML = '';
+        return;
+      }
+
+      els.proofStatus.textContent = 'Proof loaded successfully.';
+      els.proofEpochId.textContent = proof.epochId;
+      els.proofLeafIndex.textContent = proof.leafIndex;
+      els.proofFinalized.textContent = proof.finalized ? 'Yes' : 'No';
+      els.proofFinalized.className = proof.finalized ? 'ok' : 'warn';
+      els.proofMerkleRoot.textContent = proof.merkleRoot || '—';
+      els.proofNodeCount.textContent = Array.isArray(proof.proof) ? proof.proof.length : 0;
+      els.proofNodes.innerHTML = (proof.proof || []).map(node => `<div class="proof-node">${escapeHtml(node)}</div>`).join('') || '<div class="helper">No proof nodes returned.</div>';
+      els.verifyMethod.textContent = proof.verifyOnChain?.method || '—';
+      els.verifyArgs.innerHTML = (proof.verifyOnChain?.args || []).map((arg, idx) => `<div class="proof-node"><strong>arg${idx}</strong>: ${escapeHtml(Array.isArray(arg) ? JSON.stringify(arg) : arg)}</div>`).join('');
+    }
+
+    function renderDrawer() {
+      const ep = state.selectedEpoch;
+      const onChain = state.selectedEpochOnChain;
+      if (!ep) {
+        els.drawerEpochTitle.textContent = 'Epoch —';
+        els.drawerEpochSubtitle.textContent = 'Select an epoch from the table.';
+        els.drawerLeafList.innerHTML = '<div class="helper">No leaves loaded.</div>';
+        return;
+      }
+
+      const storage = storageSummary(ep);
+      const attestationHash = getAttestationHash(ep);
+      const isFinalized = onChain && !onChain.error ? !!onChain.finalized : !!ep.finalized;
+      const isStorageAttested = onChain && !onChain.error ? !!onChain.storageAttested : !!ep?.onChainAttestation?.attestationHash;
+      const displayReward = onChain && !onChain.error ? onChain.totalReward : ep.totalReward;
+      const finalizeReady = onChain && !onChain.error
+        ? !onChain.finalized && Number(onChain.blocksUntilFinalizable || 0) === 0
+        : false;
+      els.drawerEpochTitle.textContent = `Epoch #${ep.epochId}`;
+      els.drawerEpochSubtitle.textContent = `${ep.createdAt ? new Date(ep.createdAt).toLocaleString() : 'Unknown creation time'} • ${fmtNum(ep.leafCount)} leaves`;
+      els.drawerMerkleRoot.textContent = ep.merkleRoot || '—';
+      els.drawerLeafCount.textContent = fmtNum(ep.leafCount);
+      els.drawerReward.textContent = rewardLabel(displayReward);
+      els.drawerFinalized.textContent = isFinalized ? 'Yes' : 'No';
+      els.drawerFinalized.className = isFinalized ? 'ok' : 'warn';
+      els.drawerStartBlock.textContent = onChain?.startBlock ?? '—';
+      els.drawerEndBlock.textContent = onChain?.endBlock ? onChain.endBlock : '—';
+      els.drawerBlocksPastChallenge.textContent = onChain
+        ? `${onChain.blocksPastChallenge} past / ${onChain.blocksUntilFinalizable} remaining`
+        : '—';
+      els.drawerStorageAttested.textContent = isStorageAttested ? 'Yes' : 'No';
+      els.drawerStorageAttested.className = isStorageAttested ? 'ok' : 'warn';
+      els.drawerAttestationHash.textContent = attestationHash || 'No attestation hash';
+      els.drawerAttestationTx.textContent = ep?.onChainAttestation?.txHash || 'No tx recorded';
+      els.drawerStorageSummary.textContent = storage.detail;
+      els.drawerVerifyStorage.disabled = false;
+      els.copyDrawerAttestationHash.disabled = !attestationHash;
+      els.walletFinalizeEpoch.disabled = !ep || !finalizeReady;
+      els.walletRecordAttestation.disabled = !ep || !attestationHash || isFinalized === false || isStorageAttested;
+
+      if (onChain?.error) {
+        els.walletConnectStatus.textContent = `On-chain status unavailable: ${onChain.error}`;
+      } else if (isStorageAttested) {
+        els.walletConnectStatus.textContent = 'Storage attestation is already recorded on-chain for this epoch.';
+      } else if (isFinalized) {
+        els.walletConnectStatus.textContent = `Epoch ${ep.epochId} is already finalized on-chain.`;
+      } else if (onChain && Number(onChain.blocksUntilFinalizable || 0) > 0) {
+        els.walletConnectStatus.textContent = `Epoch ${ep.epochId} is not ready yet — ${onChain.blocksUntilFinalizable} blocks remaining.`;
+      } else if (attestationHash) {
+        els.walletConnectStatus.textContent = 'Wallet ready. Finalize first, then record attestation if needed.';
+      } else {
+        els.walletConnectStatus.textContent = 'Wallet ready.';
+      }
+
+      const leaves = ep.leaves || [];
+      els.drawerLeafList.innerHTML = leaves.length
+        ? leaves.map(leaf => {
+            const proofNodeCount = Array.isArray(leaf.proof) ? leaf.proof.length : Number(leaf.proofSize || 0);
+            const proofArgs = JSON.stringify([ep.epochId, leaf.index, leaf.outputHash, leaf.proof || []]);
+            return `<div class="leaf-item">
+              <div class="leaf-meta"><span>Leaf #${leaf.index}</span><span>Proof nodes: ${proofNodeCount}</span></div>
+              <div class="hash">${escapeHtml(leaf.outputHash)}</div>
+              <div class="copy-actions" style="margin-top:10px;">
+                <button class="copy-btn" onclick="window.dashboardActions.copyValue('${escapeHtml(leaf.outputHash)}', 'Output hash')">Copy hash</button>
+                <button class="copy-btn" ${Array.isArray(leaf.proof) && leaf.proof.length ? '' : 'disabled'} onclick='window.dashboardActions.copyValue(${JSON.stringify(proofArgs)}, "Proof args")'>Copy args</button>
+                <button class="action-btn" onclick="window.dashboardActions.loadProof('${escapeHtml(leaf.outputHash)}')">Inspect proof</button>
+              </div>
+            </div>`;
+          }).join('')
+        : '<div class="helper">No leaves stored for this epoch.</div>';
+    }
+
+    async function fetchOnChainEpoch(epochId) {
+      try {
+        const res = await fetch(`/api/system/onchain-epoch/${epochId}`);
+        const data = await res.json();
+        return res.ok ? data : { error: data.error || 'Unavailable' };
+      } catch (err) {
+        return { error: err.message };
+      }
+    }
+
+    async function refreshSelectedEpochOnChain() {
+      if (!state.selectedEpoch) return null;
+      state.selectedEpochOnChain = await fetchOnChainEpoch(state.selectedEpoch.epochId);
+      renderDrawer();
+      return state.selectedEpochOnChain;
+    }
+
+    async function openEpochDrawer(epochId) {
+      state.selectedEpoch = findEpoch(epochId);
+      state.selectedEpochOnChain = null;
+      renderDrawer();
+      els.epochDrawerBackdrop.classList.add('show');
+      els.epochDrawer.classList.add('show');
+      els.epochDrawer.setAttribute('aria-hidden', 'false');
+      await refreshSelectedEpochOnChain();
+    }
+
+    function closeEpochDrawer() {
+      els.epochDrawerBackdrop.classList.remove('show');
+      els.epochDrawer.classList.remove('show');
+      els.epochDrawer.setAttribute('aria-hidden', 'true');
+    }
+
+    async function ensureWallet() {
+      if (!window.ethereum || !browserEthers) {
+        throw new Error('MetaMask or browser ethers is not available in this browser.');
+      }
+      await window.ethereum.request({ method: 'eth_requestAccounts' });
+      const provider = new browserEthers.BrowserProvider(window.ethereum);
+      try {
+        await window.ethereum.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: SEPOLIA_CHAIN_ID_HEX }] });
+      } catch (err) {
+        if (err?.code !== 4902) throw err;
+      }
+      const signer = await provider.getSigner();
+      state.wallet.provider = provider;
+      state.wallet.signer = signer;
+      state.wallet.address = await signer.getAddress();
+      els.walletConnectStatus.textContent = `Connected: ${state.wallet.address}`;
+      showToast('Wallet connected.');
+      return signer;
+    }
+
+    async function finalizeEpochFromWallet() {
+      if (!state.selectedEpoch) throw new Error('Select an epoch first.');
+      const onChain = await refreshSelectedEpochOnChain();
+      if (onChain?.error) throw new Error(`On-chain status unavailable: ${onChain.error}`);
+      if (onChain?.finalized) throw new Error(`Epoch ${state.selectedEpoch.epochId} is already finalized.`);
+      if (Number(onChain?.blocksUntilFinalizable || 0) > 0) {
+        throw new Error(`Epoch ${state.selectedEpoch.epochId} is not ready yet — ${onChain.blocksUntilFinalizable} blocks remaining.`);
+      }
+      const signer = state.wallet.signer || await ensureWallet();
+      const batch = new browserEthers.Contract(state.system.chain.contracts.batch, WALLET_BATCH_ABI, signer);
+      const tx = await batch.finalizeEpoch(state.selectedEpoch.epochId);
+      els.walletConnectStatus.textContent = `Finalize sent: ${tx.hash}`;
+      showToast('Finalize transaction submitted.');
+      await tx.wait();
+      showToast('Finalize transaction confirmed.');
+      await Promise.allSettled([loadSystemStatus(), loadEpochs()]);
+      await openEpochDrawer(state.selectedEpoch.epochId);
+    }
+
+    async function recordAttestationFromWallet() {
+      if (!state.selectedEpoch) throw new Error('Select an epoch first.');
+      const attestationHash = getAttestationHash(state.selectedEpoch);
+      if (!attestationHash) throw new Error('No attestation hash available for this epoch.');
+      const onChain = await refreshSelectedEpochOnChain();
+      if (onChain?.error) throw new Error(`On-chain status unavailable: ${onChain.error}`);
+      if (!onChain?.finalized) throw new Error(`Epoch ${state.selectedEpoch.epochId} is not finalized on-chain yet.`);
+      if (onChain?.storageAttested) throw new Error(`Epoch ${state.selectedEpoch.epochId} is already storage-attested on-chain.`);
+      const signer = state.wallet.signer || await ensureWallet();
+      const batch = new browserEthers.Contract(state.system.chain.contracts.batch, WALLET_BATCH_ABI, signer);
+      const tx = await batch.recordStorageAttestation(state.selectedEpoch.epochId, attestationHash);
+      els.walletConnectStatus.textContent = `Attestation tx sent: ${tx.hash}`;
+      showToast('Attestation transaction submitted.');
+      await tx.wait();
+      showToast('Attestation transaction confirmed.');
+      await Promise.allSettled([loadSystemStatus(), loadEpochs()]);
+      await openEpochDrawer(state.selectedEpoch.epochId);
+    }
+
+    function renderEpochs() {
+      const epochs = state.epochs || [];
+      els.epochStatus.textContent = `${epochs.length} epochs loaded from the randomness API.`;
+      if (epochs.length === 0) {
+        els.epochBody.innerHTML = '<tr><td class="sol-empty" colspan="9">No epochs available yet.</td></tr>';
+        renderAlerts();
+        return;
+      }
+
+      els.epochBody.innerHTML = epochs.map(ep => {
+        const finalized = finalizeLabel(ep);
+        const storage = storageSummary(ep);
+        const attestation = attestationSummary(ep);
+        const outputHash = ep?.leaves && ep.leaves.length > 0 ? ep.leaves[ep.leaves.length - 1].outputHash : '';
+        return `<tr>
+          <td>#${ep.epochId}</td>
+          <td>${ep.createdAt ? new Date(ep.createdAt).toLocaleString() : '—'}</td>
+          <td>${fmtNum(ep.leafCount)}</td>
+          <td>${rewardLabel(ep.totalReward)}</td>
+          <td><span class="badge ${finalized.kind}">${finalized.label}</span></td>
+          <td>
+            <div><span class="badge ${storage.kind}">${storage.label}</span></div>
+            <div class="helper" style="margin-top:6px;">${escapeHtml(storage.detail)}</div>
+          </td>
+          <td>
+            <div><span class="badge ${attestation.kind}">${attestation.label}</span></div>
+            <div class="helper" style="margin-top:6px;">${escapeHtml(attestation.detail)}</div>
+          </td>
+          <td class="sol-hash-cell" title="${escapeHtml(ep.merkleRoot || '')}">${escapeHtml(shortHash(ep.merkleRoot || '—', 14))}</td>
+          <td>
+            <div class="epoch-actions">
+              <button class="action-btn" onclick="window.dashboardActions.verifyStorage(${ep.epochId})">Verify storage</button>
+              <button class="action-btn" ${outputHash ? '' : 'disabled'} onclick="window.dashboardActions.loadProof('${escapeHtml(outputHash)}')">Latest proof</button>
+              <button class="action-btn" onclick="window.dashboardActions.openEpoch(${ep.epochId})">Details</button>
+            </div>
+          </td>
+        </tr>`;
+      }).join('');
+
+      renderAlerts();
+    }
+
+    async function loadSystemStatus() {
+      const res = await fetch('/api/system/status');
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to load system status');
+      state.system = data;
+      renderSystemStatus();
+    }
+
+    async function loadNetworkLatest() {
+      const res = await fetch('/api/network/randomness/latest');
+      const data = await res.json();
+      state.randomnessLatest = res.ok ? data : { error: data.error || 'No latest randomness available' };
+      renderLatestRandomness();
+    }
+
+    async function loadEpochs() {
+      const res = await fetch('/api/network/epochs?limit=50');
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to load epochs');
+      const baseEpochs = data.epochs || [];
+      const detailed = await Promise.all(baseEpochs.map(async (ep) => {
+        try {
+          const detailRes = await fetch(`/api/network/epochs/${ep.epochId}`);
+          const detail = await detailRes.json();
+          return detailRes.ok ? detail : ep;
+        } catch {
+          return ep;
+        }
+      }));
+      state.epochs = detailed;
+      renderEpochs();
+    }
+
+    async function loadProof(outputHash) {
+      const hash = (outputHash || els.proofOutputInput.value || '').trim();
+      if (!hash) {
+        state.proof = { error: 'Provide an output hash first.' };
+        renderProof();
+        return;
+      }
+      els.proofOutputInput.value = hash;
+      const res = await fetch(`/api/network/randomness/${encodeURIComponent(hash)}/proof`);
+      const data = await res.json();
+      state.proof = res.ok ? data : { error: data.error || 'Proof not found' };
+      renderProof();
+    }
+
+    async function verifyStorage(epochId) {
+      els.epochStatus.textContent = `Verifying storage for epoch ${epochId}…`;
+      const res = await fetch(`/api/network/epochs/${epochId}/verify-storage`, { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) {
+        els.epochStatus.textContent = `Storage verification failed for epoch ${epochId}: ${data.error || 'Unknown error'}`;
+        await loadEpochs();
+        return;
+      }
+      els.epochStatus.textContent = `Storage verification completed for epoch ${epochId}.`;
+      await loadEpochs();
     }
 
     function drawChart() {
@@ -658,12 +1681,73 @@
       console.error(err);
     });
 
+    window.dashboardActions = {
+      copyValue: (value, label) => copyText(value, label),
+      loadProof: (hash) => loadProof(hash).catch(err => {
+        state.proof = { error: err.message };
+        renderProof();
+      }),
+      verifyStorage: (epochId) => verifyStorage(epochId).catch(err => {
+        els.epochStatus.textContent = `Storage verification failed for epoch ${epochId}: ${err.message}`;
+      }),
+      openEpoch: (epochId) => openEpochDrawer(epochId).catch(err => showToast(err.message, true)),
+    };
+
+    els.refreshSystem.addEventListener('click', () => loadSystemStatus().catch(err => console.error(err)));
+    els.refreshRandomness.addEventListener('click', () => loadNetworkLatest().catch(err => {
+      state.randomnessLatest = { error: err.message };
+      renderLatestRandomness();
+    }));
+    els.refreshEpochs.addEventListener('click', () => loadEpochs().catch(err => {
+      els.epochStatus.textContent = `Failed to load epochs: ${err.message}`;
+    }));
+    els.refreshProof.addEventListener('click', () => loadProof().catch(err => {
+      state.proof = { error: err.message };
+      renderProof();
+    }));
+    els.copyOutputHash.addEventListener('click', () => copyText(state.proof?.outputHash || state.randomnessLatest?.outputHash, 'Output hash'));
+    els.copyProofArgs.addEventListener('click', () => copyText(getProofArgsJson(state.proof), 'Proof args'));
+    els.copyFullCall.addEventListener('click', () => copyText(getFullVerifyCall(state.proof), 'Full call'));
+    els.loadLatestProof.addEventListener('click', () => {
+      const hash = state.randomnessLatest?.outputHash;
+      loadProof(hash).catch(err => {
+        state.proof = { error: err.message };
+        renderProof();
+      });
+    });
+    els.bannerViewEpoch.addEventListener('click', () => {
+      if (state.alerts.stalledEpochId != null) window.dashboardActions.openEpoch(state.alerts.stalledEpochId);
+    });
+    els.bannerRetryStorage.addEventListener('click', () => {
+      if (state.alerts.storageFailedEpochId != null) window.dashboardActions.verifyStorage(state.alerts.storageFailedEpochId);
+    });
+    els.closeDrawer.addEventListener('click', closeEpochDrawer);
+    els.epochDrawerBackdrop.addEventListener('click', closeEpochDrawer);
+    els.drawerVerifyStorage.addEventListener('click', () => {
+      if (state.selectedEpoch) window.dashboardActions.verifyStorage(state.selectedEpoch.epochId);
+    });
+    els.copyDrawerAttestationHash.addEventListener('click', () => copyText(getAttestationHash(state.selectedEpoch), 'Attestation hash'));
+    els.connectWallet.addEventListener('click', () => ensureWallet().catch(err => showToast(err.message, true)));
+    els.walletFinalizeEpoch.addEventListener('click', () => finalizeEpochFromWallet().catch(err => showToast(err.message, true)));
+    els.walletRecordAttestation.addEventListener('click', () => recordAttestationFromWallet().catch(err => showToast(err.message, true)));
+
     // ── Persistent Solutions Table ──────────────────────────
-    const solState = { filter: 'all', page: 0, pageSize: 20, total: 0 };
+    const solState = { filter: 'all', scope: 'session', page: 0, pageSize: 20, total: 0 };
+
+    document.querySelectorAll('.sol-filter[data-scope]').forEach(f => {
+      f.addEventListener('click', () => {
+        document.querySelectorAll('.sol-filter[data-scope]').forEach(x => x.classList.remove('active'));
+        f.classList.add('active');
+        solState.scope = f.dataset.scope;
+        solState.page = 0;
+        loadSolutions();
+      });
+    });
 
     document.querySelectorAll('.sol-filter').forEach(f => {
+	      if (!f.dataset.filter) return;
       f.addEventListener('click', () => {
-        document.querySelectorAll('.sol-filter').forEach(x => x.classList.remove('active'));
+        document.querySelectorAll('.sol-filter[data-filter]').forEach(x => x.classList.remove('active'));
         f.classList.add('active');
         solState.filter = f.dataset.filter;
         solState.page = 0;
@@ -678,14 +1762,18 @@
       try {
         const skip = solState.page * solState.pageSize;
         const filterParam = solState.filter !== 'all' ? `&filter=${solState.filter}` : '';
-        const res = await fetch(`/api/solutions?limit=${solState.pageSize}&skip=${skip}${filterParam}`);
+	        const sinceParam = (solState.scope === 'session' && state.sessionStartMs)
+	          ? `&sinceMs=${Math.max(0, Math.floor(state.sessionStartMs))}`
+	          : '';
+	        const res = await fetch(`/api/solutions?limit=${solState.pageSize}&skip=${skip}${filterParam}${sinceParam}`);
         const data = await res.json();
         const solutions = data.solutions || [];
         const stats = data.stats || {};
 
         solState.total = stats.total || 0;
 
-        els.solStatus.textContent = `${stats.accepted || 0} accepted, ${stats.rejected || 0} failed submits — ${stats.total || 0} total stored`;
+          const scopeLabel = solState.scope === 'session' ? 'current session' : 'all history';
+          els.solStatus.textContent = `${stats.accepted || 0} accepted, ${stats.rejected || 0} failed submits — ${stats.total || 0} total stored (${scopeLabel})`;
 
         els.solPrev.disabled = solState.page === 0;
         els.solNext.disabled = solutions.length < solState.pageSize;
@@ -705,10 +1793,11 @@
           const reward = s.accepted ? `<span style="color:var(--gold);">${fmtTGBT(s.reward)} TGBT${s.estimated ? ' (est)' : ''}</span>` : '—';
           const hr = s.hashrate != null ? `${fmtNum(s.hashrate)} H/s` : '—';
           const phase = s.phase || '—';
+            const outputHash = s.outputHash || s.hash || null;
           const hash = s.accepted
             ? [
                 s.commitHash ? `<div title="${s.commitHash}"><span style="color:var(--muted);">commit:</span> ${s.commitHash.slice(0, 16)}…</div>` : '',
-                s.outputHash ? `<div title="${s.outputHash}"><span style="color:var(--muted);">output:</span> ${s.outputHash.slice(0, 16)}…</div>` : '',
+                  outputHash ? `<div title="${outputHash}"><span style="color:var(--muted);">output:</span> ${outputHash.slice(0, 16)}…</div>` : '',
                 (!s.commitHash && s.hash) ? `<div title="${s.hash}">${s.hash.slice(0, 16)}…</div>` : ''
               ].filter(Boolean).join('')
             : (s.hash ? s.hash.slice(0, 16) + '…' : '—');
@@ -720,7 +1809,7 @@
             <td>${reward}</td>
             <td>${hr}</td>
             <td>${phase}</td>
-            <td class="sol-hash-cell" title="${s.outputHash || s.commitHash || s.hash || ''}">${hash}</td>
+              <td class="sol-hash-cell" title="${outputHash || s.commitHash || s.hash || ''}">${hash}</td>
           </tr>`;
         }).join('');
       } catch (err) {
@@ -731,6 +1820,18 @@
     // Poll solutions every 10s (live updates)
     loadSolutions();
     setInterval(loadSolutions, 10000);
+
+    Promise.allSettled([
+      loadSystemStatus(),
+      loadNetworkLatest(),
+      loadEpochs(),
+    ]).catch(() => {});
+
+    setInterval(() => {
+      loadSystemStatus().catch(err => console.error('[system]', err.message));
+      loadNetworkLatest().catch(err => console.error('[randomness]', err.message));
+      loadEpochs().catch(err => console.error('[epochs]', err.message));
+    }, 15000);
   </script>
 </body>
 </html>

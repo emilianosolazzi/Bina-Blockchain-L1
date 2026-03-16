@@ -20,7 +20,8 @@ epoch.
 │  3. Builds Merkle tree of output hashes                     │
 │  4. POSTs epoch+leaves to Randomness API                    │
 │  5. Calls BatchMiningModule.commitEpochRoot() on-chain      │
-│  6. After challenge window → finalizeEpoch() to claim TGBT  │
+│  6. Before settlement: verify local epoch archive storage   │
+│  7. After challenge window → finalizeEpoch() to claim TGBT  │
 └──────────────────┬─────────────────────────────────────────┘
                    │
 ┌──────────────────▼─────────────────────────────────────────┐
@@ -30,6 +31,7 @@ epoch.
 │    GET /api/randomness/:hash/proof     Merkle proof          │
 │    GET /api/epochs                     epoch list            │
 │    GET /api/epochs/:id                 epoch detail           │
+│    POST /api/epochs/:id/verify-storage storage attestation   │
 │    GET /api/health                     service health         │
 └────────────────────────────────────────────────────────────┘
                    │
@@ -81,6 +83,9 @@ curl http://127.0.0.1:4271/api/randomness/0xABC.../proof
 
 # Epoch list
 curl http://127.0.0.1:4271/api/epochs
+
+# Produce a storage attestation before settlement
+curl -X POST http://127.0.0.1:4271/api/epochs/0/verify-storage
 ```
 
 ### 4. Verify on-chain
@@ -102,6 +107,8 @@ returned by the API.
 | `POOL_ID` | `0` | Mining pool ID |
 | `POLL_INTERVAL` | `30000` | Telemetry poll interval (ms) |
 | `EPOCH_STORE` | `./epoch-store/` | Local epoch storage directory |
+| `STORAGE_VERIFIER_PROVIDER` | `epoch-store-local` | Off-chain archive verifier provider label |
+| `STORAGE_VERIFY_TIMEOUT_MS` | `180000` | Timeout for Rust storage attestation CLI |
 
 ## Contract Deployment
 
