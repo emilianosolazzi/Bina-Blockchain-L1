@@ -4,8 +4,7 @@ pragma solidity ^0.8.28;
 import { BloomFilterLib } from "./BloomFilterLib.sol";
 import { OwnableUpgradeable } from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import { AccessControlUpgradeable } from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
-import { PausableUpgradeable } from "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
-import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+import { PausableUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 
 /**
  * @title FilterManager
@@ -15,10 +14,17 @@ import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/
 contract FilterManager is 
     OwnableUpgradeable, 
     AccessControlUpgradeable, 
-    PausableUpgradeable, 
-    ReentrancyGuardUpgradeable 
+    PausableUpgradeable 
 {
     using BloomFilterLib for BloomFilterLib.Filter;
+
+    uint256 private constant MAX_HASH_FUNCTIONS = 8;
+    uint256 private constant MIN_FILTER_BUCKETS = 128;
+    uint256 private constant MAX_FILTER_BUCKETS = 65536;
+    uint256 private constant HASH_COUNT_SCALE = 1000;
+    uint256 private constant HASH_COUNT_NUMERATOR = 693;
+    uint256 private constant NOT_ENTERED = 1;
+    uint256 private constant ENTERED = 2;
 
     // Role definitions for fine-grained access control
     bytes32 public constant SCALING_MANAGER_ROLE = keccak256("SCALING_MANAGER_ROLE");
@@ -26,6 +32,7 @@ contract FilterManager is
     bytes32 public constant CONSORTIUM_MEMBER_ROLE = keccak256("CONSORTIUM_MEMBER_ROLE");
     bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
     bytes32 public constant EMERGENCY_ROLE = keccak256("EMERGENCY_ROLE");
+    bytes32 public constant INSERTER_ROLE = keccak256("INSERTER_ROLE");
 
     // Migration states to track scaling operations
     enum MigrationState {
@@ -65,6 +72,11 @@ contract FilterManager is
         bool autoScalingEnabled;     // Whether to enable automatic scaling
     }
 
+    struct OutputEntry {
+        bytes32 hash;
+        uint256 timestamp;
+    }
+
     // Active filter ID (version)
     uint256 public activeFilterId;
     
@@ -85,12 +97,14 @@ contract FilterManager is
     
     // Scaling configuration
     ScalingConfig public scalingConfig;
+
+    uint256 private _reentrancyStatus;
     
     // Track outputs marked as appealed
     mapping(bytes32 => bool) private _appealedOutputs;
     
     // Output Tracker - for indexing and pruning
-    mapping(uint256 => bytes32) private _outputsIndex;
+    mapping(uint256 => OutputEntry) private _outputsIndex;
     uint256 private _nextOutputIndex;
     uint256 private _firstOutputIndex;
 
@@ -109,6 +123,13 @@ contract FilterManager is
     event FilterPaused(address indexed pauser);
     event FilterUnpaused(address indexed unpauser);
 
+    modifier nonReentrant() {
+        require(_reentrancyStatus != ENTERED, "FilterManager: Reentrant call");
+        _reentrancyStatus = ENTERED;
+        _;
+        _reentrancyStatus = NOT_ENTERED;
+    }
+
     /**
      * @notice Initializes the FilterManager with governance controls
      * @param admin Address that will have admin rights
@@ -118,25 +139,27 @@ contract FilterManager is
         address admin,
         address[] memory scalingManagers
     ) external initializer {
-        __Ownable_init();
+        __Ownable_init(admin);
         __AccessControl_init();
         __Pausable_init();
-        __ReentrancyGuard_init();
+
+        _reentrancyStatus = NOT_ENTERED;
         
         _nextFilterId = 1;
         _nextOutputIndex = 1;
         _firstOutputIndex = 1;
         
         // Setup roles
-        _setupRole(DEFAULT_ADMIN_ROLE, admin);
-        _setupRole(SCALING_MANAGER_ROLE, admin);
-        _setupRole(APPEAL_MANAGER_ROLE, admin);
-        _setupRole(PAUSER_ROLE, admin);
-        _setupRole(EMERGENCY_ROLE, admin);
+        _grantRole(DEFAULT_ADMIN_ROLE, admin);
+        _grantRole(SCALING_MANAGER_ROLE, admin);
+        _grantRole(APPEAL_MANAGER_ROLE, admin);
+        _grantRole(PAUSER_ROLE, admin);
+        _grantRole(EMERGENCY_ROLE, admin);
+        _grantRole(INSERTER_ROLE, admin);
         
         // Grant scaling manager role to additional addresses if provided
         for (uint i = 0; i < scalingManagers.length; i++) {
-            _setupRole(SCALING_MANAGER_ROLE, scalingManagers[i]);
+            _grantRole(SCALING_MANAGER_ROLE, scalingManagers[i]);
         }
         
         // Initialize default scaling config
@@ -181,14 +204,7 @@ contract FilterManager is
     ) external onlyRole(SCALING_MANAGER_ROLE) whenNotPaused returns (uint256 filterId) {
         filterId = _nextFilterId++;
 
-        BloomFilterLib.Filter memory newFilter = BloomFilterLib.createFilter(size, numHashes, salt);
-        _filters[filterId] = FilterInfo({
-            filter: newFilter,
-            createdAt: block.timestamp,
-            active: false,
-            batchesMigrated: 0,
-            totalEntries: 0
-        });
+        _initializeFilter(filterId, size, numHashes, salt);
 
         emit FilterCreated(filterId, size, numHashes, block.timestamp);
     }
@@ -221,7 +237,7 @@ contract FilterManager is
      * @notice Insert an entry into the active filter and track in output index
      * @param entry Entry to insert
      */
-    function insert(bytes32 entry) external onlyOwner whenNotPaused nonReentrant {
+    function insert(bytes32 entry) external onlyRole(INSERTER_ROLE) whenNotPaused nonReentrant {
         require(activeFilterId != 0, "FilterManager: No active filter");
         
         // Insert into active filter
@@ -229,7 +245,10 @@ contract FilterManager is
         _filters[activeFilterId].totalEntries++;
         
         // Track output for potential pruning
-        _outputsIndex[_nextOutputIndex++] = entry;
+        _outputsIndex[_nextOutputIndex++] = OutputEntry({
+            hash: entry,
+            timestamp: block.timestamp
+        });
         
         // Check if auto-scaling should be triggered
         if (scalingConfig.autoScalingEnabled) {
@@ -313,20 +332,8 @@ contract FilterManager is
         
         // Create new optimally sized filter
         newFilterId = _nextFilterId++;
-        
-        BloomFilterLib.Filter memory newFilter = BloomFilterLib.createFilter(
-            newSize, 
-            newNumHashes, 
-            newSalt
-        );
-        
-        _filters[newFilterId] = FilterInfo({
-            filter: newFilter,
-            createdAt: block.timestamp,
-            active: false,
-            batchesMigrated: 0,
-            totalEntries: 0
-        });
+
+        _initializeFilter(newFilterId, newSize, newNumHashes, newSalt);
         
         emit FilterCreated(newFilterId, newSize, newNumHashes, block.timestamp);
         
@@ -378,13 +385,14 @@ contract FilterManager is
             (maxGas == 0 || gasStart - gasleft() < maxGas) && 
             _activeMigration.batchesCompleted < _activeMigration.totalBatches
         ) {
-            uint256 batchStart = _filters[sourceId].batchesMigrated;
+            uint256 batchStart = _firstOutputIndex + _filters[sourceId].batchesMigrated;
             uint256 batchEnd = batchStart + scalingConfig.batchSize;
             uint256 entriesMigrated = 0;
             
             // Migrate this batch of entries from outputs index
             for (uint256 i = batchStart; i < batchEnd && i < _nextOutputIndex; i++) {
-                bytes32 entry = _outputsIndex[i];
+                OutputEntry storage indexedOutput = _outputsIndex[i];
+                bytes32 entry = indexedOutput.hash;
                 
                 // Only migrate if entry exists and is not appealed
                 if (entry != bytes32(0) && !_appealedOutputs[entry]) {
@@ -470,12 +478,11 @@ contract FilterManager is
     /**
      * @notice Report a false positive and register an appeal
      * @param entry Entry incorrectly identified as present
-     * @param proof Additional proof data
      * @return appealId Unique identifier for this appeal
      */
     function reportFalsePositive(
         bytes32 entry,
-        bytes calldata proof
+        bytes calldata /* proof */
     ) external whenNotPaused nonReentrant returns (bytes32 appealId) {
         require(activeFilterId != 0, "FilterManager: No active filter");
         require(this.mightContain(entry), "FilterManager: Not a false positive");
@@ -532,18 +539,16 @@ contract FilterManager is
             endIndex = _nextOutputIndex;
         }
         
-        uint256 gasStart = gasleft();
-        
         for (uint256 i = _firstOutputIndex; i < endIndex; i++) {
-            bytes32 entry = _outputsIndex[i];
+            OutputEntry storage indexedOutput = _outputsIndex[i];
+            bytes32 entry = indexedOutput.hash;
             
             // Skip already pruned or appealed entries
             if (entry == bytes32(0) || _appealedOutputs[entry]) {
                 continue;
             }
             
-            // Lookup the entry creation time (approximate using index)
-            uint256 entryTimestamp = _estimateOutputTimestamp(i);
+            uint256 entryTimestamp = indexedOutput.timestamp;
             
             // Only prune entries older than minAge and not appealed
             if (entryTimestamp < minTimestamp) {
@@ -756,42 +761,33 @@ contract FilterManager is
         uint256 expectedItems, 
         uint256 targetFPRbps
     ) internal pure returns (uint256 size, uint256 numHashes) {
-        // Calculate minimum bits needed for target FPR
+        require(expectedItems > 0, "FilterManager: Expected items must be positive");
+
         // m = -n * ln(p) / (ln(2)^2)
-        // where p is target FPR, n is expected items, m is bits needed
-        
-        // For 0.5% FPR and 1M items, need ~14.4M bits
-        // Scale to next power of 2 in terms of buckets (each bucket = 256 bits)
-        
-        uint256 minBits;
-        if (targetFPRbps <= 10) { // Very low FPR (≤0.1%)
-            minBits = expectedItems * 20; // Approximation for very low FPR
-        } else if (targetFPRbps <= 50) { // Low FPR (≤0.5%) 
-            minBits = expectedItems * 15; // ~14.4 bits per item for 0.5% FPR
-        } else if (targetFPRbps <= 100) { // Medium FPR (≤1%)
-            minBits = expectedItems * 10; // ~9.6 bits per item for 1% FPR
-        } else {
-            minBits = expectedItems * 8;  // More relaxed FPR
-        }
-        
+        // We implement this with a conservative lookup table of bits-per-item
+        // multipliers scaled by 1000 for the target false positive rate.
+        uint256 minBits = (expectedItems * _bitsPerItemMultiplier(targetFPRbps) + 999) / 1000;
+
         // Convert to buckets (each bucket = 256 bits)
         uint256 minBuckets = (minBits + 255) / 256;
         
         // Round up to next power of 2
-        size = 128; // Start with minimal size
-        while (size < minBuckets && size < 65536) { // Max size is 65536
+        size = MIN_FILTER_BUCKETS;
+        while (size < minBuckets && size < MAX_FILTER_BUCKETS) {
             size *= 2;
+        }
+        if (size > MAX_FILTER_BUCKETS) {
+            size = MAX_FILTER_BUCKETS;
         }
         
         // Calculate optimal number of hash functions
-        // k = (m/n) * ln(2)
-        // Approximation: ~0.7 * (m/n)
+        // k = (m / n) * ln(2)
         uint256 bitsPerItem = (size * 256) / expectedItems;
-        numHashes = (bitsPerItem * 7) / 10;
+        numHashes = (bitsPerItem * HASH_COUNT_NUMERATOR + (HASH_COUNT_SCALE - 1)) / HASH_COUNT_SCALE;
         
         // Bounds checking
         if (numHashes < 1) numHashes = 1;
-        if (numHashes > 8) numHashes = 8; // Max hash functions
+        if (numHashes > MAX_HASH_FUNCTIONS) numHashes = MAX_HASH_FUNCTIONS;
         
         return (size, numHashes);
     }
@@ -808,28 +804,6 @@ contract FilterManager is
         if (entriesPerBatch == 0) entriesPerBatch = 1;
         
         return (totalEntries + entriesPerBatch - 1) / entriesPerBatch;
-    }
-    
-    /**
-     * @notice Estimate timestamp for an output based on its index
-     * @dev This is an approximation assuming linear entry rate
-     * @param index Output index
-     * @return timestamp Estimated timestamp
-     */
-    function _estimateOutputTimestamp(uint256 index) internal view returns (uint256 timestamp) {
-        if (index >= _nextOutputIndex) return 0;
-        
-        // Simple linear approximation
-        uint256 firstIndex = _firstOutputIndex > 0 ? _firstOutputIndex : 1;
-        uint256 totalTime = block.timestamp - _filters[1].createdAt;
-        uint256 totalIndices = _nextOutputIndex - firstIndex;
-        
-        if (totalIndices == 0) return block.timestamp;
-        
-        uint256 timePerIndex = totalTime / totalIndices;
-        uint256 indexOffset = index - firstIndex;
-        
-        return _filters[1].createdAt + (indexOffset * timePerIndex);
     }
     
     /**
@@ -867,19 +841,7 @@ contract FilterManager is
             )));
             
             // Create new filter
-            BloomFilterLib.Filter memory newFilter = BloomFilterLib.createFilter(
-                newSize, 
-                newNumHashes, 
-                newSalt
-            );
-            
-            _filters[newFilterId] = FilterInfo({
-                filter: newFilter,
-                createdAt: block.timestamp,
-                active: false,
-                batchesMigrated: 0,
-                totalEntries: 0
-            });
+            _initializeFilter(newFilterId, newSize, newNumHashes, newSalt);
             
             emit FilterCreated(newFilterId, newSize, newNumHashes, block.timestamp);
             
@@ -897,5 +859,33 @@ contract FilterManager is
             
             emit ScalingStarted(activeFilterId, newFilterId, block.timestamp);
         }
+    }
+
+    function _initializeFilter(
+        uint256 filterId,
+        uint256 size,
+        uint256 numHashes,
+        uint256 salt
+    ) internal {
+        FilterInfo storage info = _filters[filterId];
+        BloomFilterLib.createFilter(info.filter, size, numHashes, salt);
+        info.createdAt = block.timestamp;
+        info.active = false;
+        info.batchesMigrated = 0;
+        info.totalEntries = 0;
+    }
+
+    function _bitsPerItemMultiplier(uint256 targetFPRbps) internal pure returns (uint256) {
+        require(targetFPRbps > 0 && targetFPRbps < 10000, "FilterManager: Invalid target FPR");
+
+        if (targetFPRbps <= 1) return 19171;   // 0.01%
+        if (targetFPRbps <= 5) return 15819;   // 0.05%
+        if (targetFPRbps <= 10) return 14378;  // 0.10%
+        if (targetFPRbps <= 25) return 12936;  // 0.25%
+        if (targetFPRbps <= 50) return 11028;  // 0.50%
+        if (targetFPRbps <= 100) return 9586;  // 1.00%
+        if (targetFPRbps <= 250) return 7683;  // 2.50%
+        if (targetFPRbps <= 500) return 6235;  // 5.00%
+        return 4793;                           // 10.00% and looser
     }
 }

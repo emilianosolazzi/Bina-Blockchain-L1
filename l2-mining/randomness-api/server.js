@@ -198,22 +198,22 @@ function handleLatestRandomness(_req, res) {
 }
 
 function handleOutputProof(req, res, outputHash) {
-	// Search all epochs for this output
-	for (const [epId, leaves] of Object.entries(epochLeaves)) {
+	const sortedEpochs = [...epochIndex].sort((a, b) => b.epochId - a.epochId);
+	for (const epMeta of sortedEpochs) {
+		const leaves = epochLeaves[epMeta.epochId] || [];
 		const leaf = leaves.find(l => l.outputHash === outputHash);
 		if (leaf) {
-			const epMeta = epochIndex.find(e => e.epochId === Number(epId));
 			return sendJson(res, 200, {
-				epochId:    Number(epId),
+				epochId:    epMeta.epochId,
 				leafIndex:  leaf.index,
 				outputHash: leaf.outputHash,
 				proof:      leaf.proof || [],
-				merkleRoot: epMeta ? epMeta.merkleRoot : null,
-				finalized:  epMeta ? epMeta.finalized : false,
+				merkleRoot: epMeta.merkleRoot || null,
+				finalized:  epMeta.finalized || false,
 				verifyOnChain: {
 					contract: 'BatchMiningModule',
 					method: 'verifyRandomnessLeaf(uint256 epochId, uint256 leafIndex, bytes32 outputHash, bytes32[] proof)',
-					args: [Number(epId), leaf.index, leaf.outputHash, leaf.proof || []],
+					args: [epMeta.epochId, leaf.index, leaf.outputHash, leaf.proof || []],
 				},
 			});
 		}
@@ -245,6 +245,8 @@ function handleEpochDetail(_req, res, epochId) {
 	const leaves = (epochLeaves[epochId] || []).map(l => ({
 		index:      l.index,
 		outputHash: l.outputHash,
+		signature:  l.signature || null,
+		proof:      l.proof || [],
 		proofSize:  (l.proof || []).length,
 	}));
 

@@ -9,7 +9,9 @@ const crypto = require('crypto');
 const ROOT = __dirname;
 const TELEMETRY_FILE = process.env.TELEMETRY_FILE
   ? path.resolve(process.cwd(), process.env.TELEMETRY_FILE)
-  : path.resolve(ROOT, '..', 'rust', 'miner-telemetry.jsonl');
+  : (process.env.LOCALAPPDATA
+    ? path.join(process.env.LOCALAPPDATA, 'entropy', 'TemporalGradientMiner', 'data', 'logs', 'telemetry.jsonl')
+    : path.resolve(ROOT, '..', 'rust', 'miner-telemetry.jsonl'));
 const HOST = process.env.HEARTBEAT_HOST || '127.0.0.1';
 const PORT = Number(process.env.HEARTBEAT_PORT || 4380);
 const POLL_INTERVAL_MS = Number(process.env.HEARTBEAT_POLL_INTERVAL_MS || 2000);
@@ -448,8 +450,12 @@ function handleRequest(req, res) {
   if (req.method === 'GET' && url.pathname === '/api/health') {
     return sendJson(res, 200, {
       ok: status.status !== 'error',
+      status: status.status,
+      message: status.message,
       service: status.service,
       generatedAt: status.generatedAt,
+      heartbeatOnline: status.heartbeat?.online ?? false,
+      telemetryFresh: status.heartbeat?.telemetryFresh ?? false,
       telemetryFile: TELEMETRY_FILE,
       pollIntervalMs: POLL_INTERVAL_MS,
     });

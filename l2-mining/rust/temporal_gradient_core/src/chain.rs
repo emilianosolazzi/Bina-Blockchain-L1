@@ -59,6 +59,7 @@ pub struct LiveMiningClient {
     pub contract_address: Address,
     pub pool_id: u8,
     pub block_time_millis: u64,
+    pub gas_price_multiplier: f64,
 }
 
 impl LiveMiningClient {
@@ -84,6 +85,7 @@ impl LiveMiningClient {
             contract_address,
             pool_id: config.pool_id,
             block_time_millis: config.block_time_millis.max(1_000),
+            gas_price_multiplier: config.gas_price_multiplier,
         }))
     }
 
@@ -176,7 +178,10 @@ impl LiveMiningClient {
             .estimate_gas()
             .await
             .context("Failed to estimate commitment gas")?;
-        let commit_tx = commit_tx.gas(apply_gas_buffer(commit_gas));
+        let commit_tx = commit_tx
+            .legacy()
+            .gas(apply_gas_buffer(commit_gas))
+            .gas_price(self.legacy_gas_price().await?);
         let pending_commit = commit_tx.send().await.context("Failed to send commitment")?;
         let commit_receipt = pending_commit
             .await?
@@ -317,7 +322,10 @@ impl LiveMiningClient {
             .estimate_gas()
             .await
             .context("Failed to estimate reveal gas")?;
-        let reveal_tx = reveal_tx.gas(apply_gas_buffer(reveal_gas));
+        let reveal_tx = reveal_tx
+            .legacy()
+            .gas(apply_gas_buffer(reveal_gas))
+            .gas_price(self.legacy_gas_price().await?);
         let pending_reveal = reveal_tx.send().await.context("Failed to send reveal")?;
         pending_reveal
             .await?
@@ -423,6 +431,18 @@ impl LiveMiningClient {
         millis.saturating_add(999).checked_div(1_000).unwrap_or(0)
     }
 
+    async fn legacy_gas_price(&self) -> Result<U256> {
+        let network_gas_price = self
+            .provider
+            .get_gas_price()
+            .await
+            .context("Failed to fetch gas price")?;
+        Ok(apply_gas_price_multiplier(
+            network_gas_price,
+            self.gas_price_multiplier,
+        ))
+    }
+
     fn block_sleep_duration(&self) -> Duration {
         Duration::from_millis(self.block_time_millis.max(1_000))
     }
@@ -481,6 +501,20 @@ fn apply_gas_buffer(estimated: U256) -> U256 {
         .saturating_mul(U256::from(130u64))
         .checked_div(U256::from(100u64))
         .unwrap_or(estimated)
+}
+
+fn apply_gas_price_multiplier(gas_price: U256, multiplier: f64) -> U256 {
+    let bounded = if multiplier.is_finite() && multiplier > 0.0 {
+        multiplier
+    } else {
+        1.0
+    };
+
+    let scaled = (bounded * 1000.0).round() as u64;
+    gas_price
+        .saturating_mul(U256::from(scaled))
+        .checked_div(U256::from(1000u64))
+        .unwrap_or(gas_price)
 }
 
 /// Returns the hex-formatted wallet address derived from the miner key file.

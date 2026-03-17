@@ -42,7 +42,7 @@ impl Default for MinerConfig {
             private_key_path: "keys/miner.key".to_string(),
             pool_id: 0,
             threads: 4,
-            batch_size: 32,
+            batch_size: 1024,
             gas_price_multiplier: 1.10,
             log_level: "INFO".to_string(),
             stats_interval_seconds: 5,

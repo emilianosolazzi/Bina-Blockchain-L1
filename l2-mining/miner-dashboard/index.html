@@ -987,6 +987,12 @@
       if (v == null || v === 0) return '0.00';
       return Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 }).format(v);
     }
+    function fmtEth(v) {
+      if (v == null || Number.isNaN(Number(v))) return '—';
+      const num = Number(v);
+      const maximumFractionDigits = Math.abs(num) < 0.01 ? 6 : 4;
+      return Intl.NumberFormat('en-US', { minimumFractionDigits: 0, maximumFractionDigits }).format(num);
+    }
     function fmtHashrate(v) { return v == null ? '—' : `${fmtNum(v)} H/s`; }
     function fmtDuration(sec) {
       if (sec == null) return '—';
@@ -1056,9 +1062,9 @@
       return { label: 'Recorded', kind: 'ok', detail: `${shortHash(oa.attestationHash, 10)} • ${tx}` };
     }
 
-    function rewardLabel(value) {
+    function rewardLabel(value, estimated = false) {
       const num = Number(value || 0);
-      return num > 0 ? `${fmtTGBT(num)} TGBT` : '—';
+      return num > 0 ? `${fmtTGBT(num)} TGBT${estimated ? ' (est)' : ''}` : '—';
     }
 
     function finalizeLabel(ep) {
@@ -1317,19 +1323,28 @@
 
       els.walletAddress.textContent = sys.chain?.walletAddress || '—';
       els.walletTgbt.textContent = `${fmtTGBT(Number(sys.chain?.token?.balance || 0))} ${sys.chain?.token?.symbol || 'TGBT'}`;
-      els.walletEth.textContent = `${fmtNum(Number(sys.chain?.ethBalance || 0))} ETH`;
+      els.walletEth.textContent = `${fmtEth(sys.chain?.ethBalance || 0)} ETH`;
       els.rpcStatus.textContent = sys.chain?.rpcUrl || '—';
 
-      const batchWiring = statusFromBool(sys.chain?.contracts?.batchWiredCorrectly, 'Correct', 'Mismatch');
+      const batchEnabled = !!sys.chain?.contracts?.batchEnabled;
+      const batchWiring = batchEnabled
+        ? statusFromBool(sys.chain?.contracts?.batchWiredCorrectly, 'Correct', 'Mismatch')
+        : { label: 'Not wired', kind: 'warn' };
       const tokenomicsWiring = statusFromBool(sys.chain?.contracts?.tokenomicsWiredCorrectly, 'Correct', 'Mismatch');
       setBadge(els.batchWireBadge, batchWiring.label, batchWiring.kind);
       setBadge(els.tokenomicsWireBadge, tokenomicsWiring.label, tokenomicsWiring.kind);
-      els.liveBatchAddress.textContent = sys.chain?.contracts?.coreBatchModule || '—';
+      els.liveBatchAddress.textContent = batchEnabled ? (sys.chain?.contracts?.coreBatchModule || '—') : 'No live batch module on this Core';
       els.liveTokenomicsAddress.textContent = sys.chain?.contracts?.coreTokenomicsModule || '—';
 
       els.nextEpochId.textContent = sys.chain?.nextEpochId ?? '—';
       const latestOnChain = sys.chain?.latestOnChainEpoch;
-      if (latestOnChain && !latestOnChain.error) {
+      if (!batchEnabled) {
+        els.latestOnChainEpoch.textContent = 'Disabled';
+        els.latestOnChainFinalized.textContent = 'No live batch mining on this Core';
+        els.latestOnChainFinalized.className = 'warn';
+        els.latestOnChainAttested.textContent = '—';
+        els.latestOnChainAttested.className = '';
+      } else if (latestOnChain && !latestOnChain.error) {
         els.latestOnChainEpoch.textContent = latestOnChain.epochId;
         const fin = latestOnChain.finalized ? 'Finalized' : 'Pending';
         const att = latestOnChain.storageAttested ? 'Recorded' : 'Pending';
@@ -1446,6 +1461,7 @@
         els.latestRandomnessLeaf.textContent = '—';
         els.latestRandomnessTime.textContent = '—';
         els.latestRandomnessSignature.textContent = '—';
+        els.loadLatestProof.disabled = true;
         return;
       }
 
@@ -1455,6 +1471,7 @@
       els.latestRandomnessTime.textContent = latest.timestamp ? new Date(latest.timestamp).toLocaleString() : '—';
       els.latestRandomnessSignature.textContent = latest.signature || 'No signature available';
       els.proofOutputInput.value = latest.outputHash || els.proofOutputInput.value;
+      els.loadLatestProof.disabled = !latest.outputHash || latest.epochId == null || latest.leafIndex == null;
     }
 
     function renderProof() {
@@ -1498,7 +1515,9 @@
       const attestationHash = getAttestationHash(ep);
       const isFinalized = onChain && !onChain.error ? !!onChain.finalized : !!ep.finalized;
       const isStorageAttested = onChain && !onChain.error ? !!onChain.storageAttested : !!ep?.onChainAttestation?.attestationHash;
-      const displayReward = onChain && !onChain.error ? onChain.totalReward : ep.totalReward;
+      const onChainReward = onChain && !onChain.error ? Number(onChain.totalReward || 0) : 0;
+      const displayReward = onChainReward > 0 ? onChainReward : ep.totalReward;
+      const rewardEstimated = onChainReward > 0 ? false : !!ep.rewardEstimated;
       const finalizeReady = onChain && !onChain.error
         ? !onChain.finalized && Number(onChain.blocksUntilFinalizable || 0) === 0
         : false;
@@ -1506,7 +1525,7 @@
       els.drawerEpochSubtitle.textContent = `${ep.createdAt ? new Date(ep.createdAt).toLocaleString() : 'Unknown creation time'} • ${fmtNum(ep.leafCount)} leaves`;
       els.drawerMerkleRoot.textContent = ep.merkleRoot || '—';
       els.drawerLeafCount.textContent = fmtNum(ep.leafCount);
-      els.drawerReward.textContent = rewardLabel(displayReward);
+      els.drawerReward.textContent = rewardLabel(displayReward, rewardEstimated);
       els.drawerFinalized.textContent = isFinalized ? 'Yes' : 'No';
       els.drawerFinalized.className = isFinalized ? 'ok' : 'warn';
       els.drawerStartBlock.textContent = onChain?.startBlock ?? '—';
@@ -1543,11 +1562,15 @@
         ? leaves.map(leaf => {
             const proofNodeCount = Array.isArray(leaf.proof) ? leaf.proof.length : Number(leaf.proofSize || 0);
             const proofArgs = JSON.stringify([ep.epochId, leaf.index, leaf.outputHash, leaf.proof || []]);
+              const signature = leaf.signature || null;
             return `<div class="leaf-item">
               <div class="leaf-meta"><span>Leaf #${leaf.index}</span><span>Proof nodes: ${proofNodeCount}</span></div>
               <div class="hash">${escapeHtml(leaf.outputHash)}</div>
+                <div class="helper" style="margin-top:8px;">Signature</div>
+                <div class="hash">${escapeHtml(signature || 'No signature available')}</div>
               <div class="copy-actions" style="margin-top:10px;">
                 <button class="copy-btn" onclick="window.dashboardActions.copyValue('${escapeHtml(leaf.outputHash)}', 'Output hash')">Copy hash</button>
+                  <button class="copy-btn" ${signature ? '' : 'disabled'} onclick="window.dashboardActions.copyValue('${escapeHtml(signature || '')}', 'Leaf signature')">Copy signature</button>
                 <button class="copy-btn" ${Array.isArray(leaf.proof) && leaf.proof.length ? '' : 'disabled'} onclick='window.dashboardActions.copyValue(${JSON.stringify(proofArgs)}, "Proof args")'>Copy args</button>
                 <button class="action-btn" onclick="window.dashboardActions.loadProof('${escapeHtml(leaf.outputHash)}')">Inspect proof</button>
               </div>
@@ -1649,7 +1672,9 @@
 
     function renderEpochs() {
       const epochs = state.epochs || [];
-      els.epochStatus.textContent = `${epochs.length} epochs loaded from the randomness API.`;
+      const sourceLabel = state.epochSource === 'on-chain-batch' ? 'on-chain batch data' : 'the randomness API';
+      const proofsLabel = state.epochProofsAvailable === false ? ' Proof lookup is unavailable on this deployment.' : '';
+      els.epochStatus.textContent = `${epochs.length} epochs loaded from ${sourceLabel}.${proofsLabel}`;
       if (epochs.length === 0) {
         els.epochBody.innerHTML = '<tr><td class="sol-empty" colspan="9">No epochs available yet.</td></tr>';
         renderAlerts();
@@ -1665,7 +1690,7 @@
           <td>#${ep.epochId}</td>
           <td>${ep.createdAt ? new Date(ep.createdAt).toLocaleString() : '—'}</td>
           <td>${fmtNum(ep.leafCount)}</td>
-          <td>${rewardLabel(ep.totalReward)}</td>
+          <td>${rewardLabel(ep.totalReward, ep.rewardEstimated)}</td>
           <td><span class="badge ${finalized.kind}">${finalized.label}</span></td>
           <td>
             <div><span class="badge ${storage.kind}">${storage.label}</span></div>
@@ -1719,6 +1744,8 @@
         }
       }));
       state.epochs = detailed;
+      state.epochSource = data.source || 'randomness-api';
+      state.epochProofsAvailable = data.proofsAvailable !== false;
       renderEpochs();
     }
 

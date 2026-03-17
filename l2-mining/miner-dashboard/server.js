@@ -10,14 +10,21 @@ const HOST = process.env.HOST || '127.0.0.1';
 const PORT = Number(process.env.PORT || 4173);
 const ROOT = __dirname;
 const INDEX = path.join(ROOT, 'index.html');
-const TELEMETRY_FILE = process.env.TELEMETRY_FILE || path.resolve(ROOT, '..', 'rust', 'miner-telemetry.jsonl');
+const TELEMETRY_FILE = process.env.TELEMETRY_FILE || (process.env.LOCALAPPDATA
+	? path.join(process.env.LOCALAPPDATA, 'entropy', 'TemporalGradientMiner', 'data', 'logs', 'telemetry.jsonl')
+	: path.resolve(ROOT, '..', 'rust', 'miner-telemetry.jsonl'));
 const RELAY_STATUS_FILE = process.env.RELAY_STATUS_FILE || path.join(path.dirname(TELEMETRY_FILE), `${path.parse(TELEMETRY_FILE).name}.relay-status.json`);
 const RANDOMNESS_API_URL = process.env.RANDOMNESS_API_URL || 'http://127.0.0.1:4271';
+const RANDOMNESS_API_FALLBACK_URL = process.env.RANDOMNESS_API_FALLBACK_URL || 'http://127.0.0.1:3100';
 const HEARTBEAT_API_URL = process.env.HEARTBEAT_API_URL || 'http://127.0.0.1:4380';
+const RANDOMNESS_HEALTH_PATH = process.env.RANDOMNESS_HEALTH_PATH || '/api/health';
+const RANDOMNESS_LATEST_PATH = process.env.RANDOMNESS_LATEST_PATH || '/api/randomness/latest';
+const RANDOMNESS_FALLBACK_HEALTH_PATH = process.env.RANDOMNESS_FALLBACK_HEALTH_PATH || '/healthz';
+const RANDOMNESS_FALLBACK_LATEST_PATH = process.env.RANDOMNESS_FALLBACK_LATEST_PATH || '/api/v1/latest';
 const RPC_URL = process.env.RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com';
-const CORE_ADDRESS = process.env.CORE_ADDRESS || '0x843fAc753610163776374Ab0261029BAEA0251b7';
+const CORE_ADDRESS = process.env.CORE_ADDRESS || '0xa1fB393D33819C4ef85f3457FCC339BF56f8AF1F';
 const TGBT_ADDRESS = process.env.TGBT_ADDRESS || '0x496598fDeab78fb2986e89d396249779595418E9';
-const TOKENOMICS_ADDRESS = process.env.TOKENOMICS_ADDRESS || '0xcf0a632A88D759f4A4ad0eA0317B5BE5A10638A5';
+const TOKENOMICS_ADDRESS = process.env.TOKENOMICS_ADDRESS || '0x305393D146e958cbDFda5830506e468984259F28';
 const BATCH_ADDRESS = process.env.BATCH_ADDRESS || '0xd52467e0C442c0817665fdB11f86FC47dC56ef3E';
 const WALLET_ADDRESS = process.env.WALLET_ADDRESS || '0x3058bd411b9ec0dF6C7d0b04914C9bd2934b7fb3';
 const CHALLENGE_WINDOW = Number(process.env.CHALLENGE_WINDOW || 100);
@@ -60,6 +67,16 @@ function shortError(err) {
 	return err.message || String(err);
 }
 
+function median(values) {
+	if (!Array.isArray(values) || values.length === 0) return 0;
+	const sorted = values.filter(v => Number.isFinite(Number(v))).map(Number).sort((a, b) => a - b);
+	if (sorted.length === 0) return 0;
+	const mid = Math.floor(sorted.length / 2);
+	return sorted.length % 2 === 0
+		? (sorted[mid - 1] + sorted[mid]) / 2
+		: sorted[mid];
+}
+
 function requestJson(targetUrl, options = {}) {
 	return new Promise((resolve, reject) => {
 		const parsed = new URL(targetUrl);
@@ -93,6 +110,56 @@ function requestJson(targetUrl, options = {}) {
 		}
 		req.end();
 	});
+}
+
+async function fetchRandomnessHealth() {
+	const primary = await requestJson(`${RANDOMNESS_API_URL}${RANDOMNESS_HEALTH_PATH}`, { timeoutMs: 4000 }).catch(err => ({
+		status: 503,
+		json: { error: shortError(err) },
+	}));
+	if (primary.status >= 200 && primary.status < 300) {
+		return primary;
+	}
+	const fallback = await requestJson(`${RANDOMNESS_API_FALLBACK_URL}${RANDOMNESS_FALLBACK_HEALTH_PATH}`, { timeoutMs: 4000 }).catch(err => ({
+		status: 503,
+		json: { error: shortError(err) },
+	}));
+	if (fallback.status >= 200 && fallback.status < 300) {
+		return {
+			...fallback,
+			json: {
+				...(fallback.json || {}),
+				source: 'beacon-api',
+			},
+		};
+	}
+	return primary;
+}
+
+async function fetchLatestRandomness() {
+	const primary = await requestJson(`${RANDOMNESS_API_URL}${RANDOMNESS_LATEST_PATH}`, { timeoutMs: 4000 }).catch(err => ({
+		status: 503,
+		json: { error: shortError(err) },
+	}));
+	if (primary.status >= 200 && primary.status < 300) {
+		return primary;
+	}
+	return requestJson(`${RANDOMNESS_API_FALLBACK_URL}${RANDOMNESS_FALLBACK_LATEST_PATH}`, { timeoutMs: 4000 }).catch(err => ({
+		status: 503,
+		json: { error: shortError(err) },
+	}));
+}
+
+async function requestPrimaryRandomnessApi(targetPath, options = {}) {
+	return requestJson(`${RANDOMNESS_API_URL}${targetPath}`, {
+		method: options.method || 'GET',
+		body: options.body ? JSON.stringify(options.body) : null,
+		headers: options.body ? { 'Content-Type': 'application/json' } : {},
+		timeoutMs: options.timeoutMs || 10000,
+	}).catch(err => ({
+		status: 503,
+		json: { error: shortError(err) },
+	}));
 }
 
 function readRelayStatus() {
@@ -147,13 +214,9 @@ function readRelayStatus() {
 async function getSystemStatus() {
 	const core = new ethers.Contract(CORE_ADDRESS, CORE_ABI, provider);
 	const tgbt = new ethers.Contract(TGBT_ADDRESS, TGBT_ABI, provider);
-	const batch = new ethers.Contract(BATCH_ADDRESS, BATCH_ABI, provider);
 
-	const [randomnessApi, heartbeatApi, ethBalance, tokenBalance, tokenDecimals, tokenSymbol, coreBatchModule, coreTokenomicsModule, nextEpochId, currentBlock, network] = await Promise.all([
-		requestJson(`${RANDOMNESS_API_URL}/api/health`, { timeoutMs: 4000 }).catch(err => ({
-			status: 503,
-			json: { error: shortError(err) },
-		})),
+	const [randomnessApi, heartbeatApi, ethBalance, tokenBalance, tokenDecimals, tokenSymbol, coreBatchModule, coreTokenomicsModule, currentBlock, network] = await Promise.all([
+		fetchRandomnessHealth(),
 		requestJson(`${HEARTBEAT_API_URL}/api/health`, { timeoutMs: 4000 }).catch(err => ({
 			status: 503,
 			json: { error: shortError(err) },
@@ -162,16 +225,25 @@ async function getSystemStatus() {
 		tgbt.balanceOf(WALLET_ADDRESS),
 		tgbt.decimals(),
 		tgbt.symbol(),
-		core.moduleAddress(MODULE_IDS.BATCH_MINING_MODULE),
-		core.moduleAddress(MODULE_IDS.TOKENOMICS_MODULE),
-		batch.currentEpochId(),
+		core.moduleAddress(MODULE_IDS.BATCH_MINING_MODULE).catch(() => ethers.ZeroAddress),
+		core.moduleAddress(MODULE_IDS.TOKENOMICS_MODULE).catch(() => ethers.ZeroAddress),
 		provider.getBlockNumber(),
 		provider.getNetwork(),
 	]);
 
+	const liveBatchAddress = toChecksumOrNull(coreBatchModule);
+	const batchWiredCorrectly = liveBatchAddress?.toLowerCase() === BATCH_ADDRESS.toLowerCase();
+	const batchEnabled = !!liveBatchAddress && liveBatchAddress !== ethers.ZeroAddress && batchWiredCorrectly;
+	let nextEpochId = 0;
+
 	let latestOnChainEpoch = null;
-	if (Number(nextEpochId) > 0) {
+	if (batchEnabled) {
 		try {
+			const batch = new ethers.Contract(BATCH_ADDRESS, BATCH_ABI, provider);
+			nextEpochId = Number(await batch.currentEpochId().catch(() => 0n));
+			if (Number(nextEpochId) <= 0) {
+				latestOnChainEpoch = null;
+			} else {
 			const epochId = Number(nextEpochId) - 1;
 			const info = await batch.getEpochInfo(epochId);
 			latestOnChainEpoch = {
@@ -189,6 +261,7 @@ async function getSystemStatus() {
 				blocksUntilFinalizable: Math.max(0, Number(info.startBlock) + CHALLENGE_WINDOW - Number(currentBlock)),
 				blocksPastChallenge: Math.max(0, Number(currentBlock) - (Number(info.startBlock) + CHALLENGE_WINDOW)),
 			};
+			}
 		} catch (err) {
 			latestOnChainEpoch = { error: shortError(err) };
 		}
@@ -231,9 +304,10 @@ async function getSystemStatus() {
 				core: CORE_ADDRESS,
 				tokenomics: TOKENOMICS_ADDRESS,
 				batch: BATCH_ADDRESS,
-				coreBatchModule: toChecksumOrNull(coreBatchModule),
+				coreBatchModule: liveBatchAddress,
 				coreTokenomicsModule: toChecksumOrNull(coreTokenomicsModule),
-				batchWiredCorrectly: toChecksumOrNull(coreBatchModule)?.toLowerCase() === BATCH_ADDRESS.toLowerCase(),
+				batchWiredCorrectly,
+				batchEnabled,
 				tokenomicsWiredCorrectly: toChecksumOrNull(coreTokenomicsModule)?.toLowerCase() === TOKENOMICS_ADDRESS.toLowerCase(),
 			},
 			nextEpochId: Number(nextEpochId),
@@ -358,10 +432,7 @@ async function getRelayProfile() {
 	const [system, heartbeatStatus, latestRandomness] = await Promise.all([
 		getSystemStatus(),
 		getHeartbeatStatus(),
-		requestJson(`${RANDOMNESS_API_URL}/api/randomness/latest`, { timeoutMs: 4000 }).catch(err => ({
-			status: 503,
-			json: { error: shortError(err) },
-		})),
+		fetchLatestRandomness(),
 	]);
 
 	const latest = latestRandomness.status >= 200 && latestRandomness.status < 300 ? latestRandomness.json : null;
@@ -439,6 +510,139 @@ async function getOnChainEpoch(epochId) {
 		challengeWindow: CHALLENGE_WINDOW,
 		blocksUntilFinalizable: Math.max(0, Number(info.startBlock) + CHALLENGE_WINDOW - Number(currentBlock)),
 		blocksPastChallenge: Math.max(0, Number(currentBlock) - (Number(info.startBlock) + CHALLENGE_WINDOW)),
+	};
+}
+
+async function listOnChainEpochs(limit = 50) {
+	const batch = new ethers.Contract(BATCH_ADDRESS, BATCH_ABI, provider);
+	const currentEpochId = Number(await batch.currentEpochId().catch(() => 0n));
+	if (currentEpochId <= 0) {
+		return [];
+	}
+
+	const endEpochId = currentEpochId - 1;
+	const startEpochId = Math.max(0, endEpochId - Math.max(1, limit) + 1);
+	const epochIds = [];
+	for (let epochId = endEpochId; epochId >= startEpochId; epochId -= 1) {
+		epochIds.push(epochId);
+	}
+
+	const epochs = await Promise.all(epochIds.map(async (epochId) => {
+		try {
+			const epoch = await getOnChainEpoch(epochId);
+			return {
+				...epoch,
+				createdAt: null,
+				leaves: [],
+				storageVerification: null,
+				onChainAttestation: epoch.attestationHash && !/^0x0+$/.test(epoch.attestationHash)
+					? { attestationHash: epoch.attestationHash, txHash: null }
+					: null,
+			};
+		} catch {
+			return null;
+		}
+	}));
+
+	return epochs.filter(Boolean);
+}
+
+async function getCompatibleLatestRandomness() {
+	const response = await fetchLatestRandomness();
+	if (!(response.status >= 200 && response.status < 300)) {
+		return { status: response.status, json: response.json };
+	}
+
+	const payload = response.json || {};
+	return {
+		status: 200,
+		json: {
+			outputHash: payload.output || payload.outputHash || null,
+			epochId: payload.epochId ?? null,
+			leafIndex: payload.leafIndex ?? null,
+			timestamp: payload.timestamp ?? null,
+			signature: payload.signature ?? null,
+			source: payload.source ?? null,
+			blockNumber: payload.blockNumber ?? null,
+		},
+	};
+}
+
+async function getRewardLookup() {
+	if (!store) {
+		return { byOutputHash: new Map(), defaultReward: EST_TGBT_PER_SOLUTION };
+	}
+
+	const solutions = await store.getSolutions({ limit: 100000, skip: 0 });
+	const byOutputHash = new Map();
+	const recentRewards = [];
+	for (const solution of solutions) {
+		if (!solution?.accepted) continue;
+		const reward = Number(solution.reward || 0);
+		if (!(reward > 0)) continue;
+		if (solution.outputHash && !byOutputHash.has(solution.outputHash)) {
+			byOutputHash.set(solution.outputHash, reward);
+		}
+		if (recentRewards.length < 200) {
+			recentRewards.push(reward);
+		}
+	}
+
+	return {
+		byOutputHash,
+		defaultReward: median(recentRewards) || EST_TGBT_PER_SOLUTION,
+	};
+}
+
+function enrichEpochReward(epoch, rewardLookup) {
+	const originalReward = Number(epoch?.totalReward || 0);
+	if (originalReward > 0) {
+		return {
+			...epoch,
+			totalReward: originalReward,
+			rewardEstimated: false,
+		};
+	}
+
+	const leaves = Array.isArray(epoch?.leaves) ? epoch.leaves : [];
+	let derivedReward = 0;
+	for (const leaf of leaves) {
+		const reward = rewardLookup.byOutputHash.get(leaf?.outputHash);
+		if (reward > 0) {
+			derivedReward += reward;
+		}
+	}
+
+	if (!(derivedReward > 0)) {
+		const leafCount = Number(epoch?.leafCount || leaves.length || 0);
+		if (leafCount > 0) {
+			derivedReward = leafCount * rewardLookup.defaultReward;
+		}
+	}
+
+	return {
+		...epoch,
+		totalReward: derivedReward > 0 ? derivedReward : 0,
+		rewardEstimated: derivedReward > 0,
+	};
+}
+
+function enrichEpochSummaryReward(epoch, rewardLookup) {
+	const originalReward = Number(epoch?.totalReward || 0);
+	if (originalReward > 0) {
+		return {
+			...epoch,
+			totalReward: originalReward,
+			rewardEstimated: false,
+		};
+	}
+
+	const leafCount = Number(epoch?.leafCount || 0);
+	const derivedReward = leafCount > 0 ? leafCount * rewardLookup.defaultReward : 0;
+	return {
+		...epoch,
+		totalReward: derivedReward,
+		rewardEstimated: derivedReward > 0,
 	};
 }
 
@@ -689,35 +893,89 @@ const server = http.createServer(async (req, res) => {
 	}
 
 	if (url.pathname === '/api/network/health' && req.method === 'GET') {
-		await proxyRandomnessApi(req, res, '/api/health');
+		const health = await fetchRandomnessHealth();
+		sendJson(res, health.status, health.json ?? {});
 		return;
 	}
 
 	if (url.pathname === '/api/network/randomness/latest' && req.method === 'GET') {
-		await proxyRandomnessApi(req, res, '/api/randomness/latest');
+		try {
+			const latest = await getCompatibleLatestRandomness();
+			sendJson(res, latest.status, latest.json ?? {});
+		} catch (err) {
+			sendJson(res, 500, { error: shortError(err) });
+		}
 		return;
 	}
 
 	const proofProxyMatch = url.pathname.match(/^\/api\/network\/randomness\/([0-9a-fA-Fx]+)\/proof$/);
 	if (proofProxyMatch && req.method === 'GET') {
-		await proxyRandomnessApi(req, res, `/api/randomness/${proofProxyMatch[1]}/proof`);
+		const response = await requestPrimaryRandomnessApi(`/api/randomness/${encodeURIComponent(proofProxyMatch[1])}/proof`);
+		sendJson(res, response.status, response.json ?? {
+			error: 'Proof lookup is unavailable on the current API deployment.',
+			outputHash: proofProxyMatch[1],
+		});
 		return;
 	}
 
 	if (url.pathname === '/api/network/epochs' && req.method === 'GET') {
-		await proxyRandomnessApi(req, res, `/api/epochs${url.search || ''}`);
+		try {
+			const limit = Math.max(1, Math.min(100, Number(url.searchParams.get('limit') || 50)));
+			const legacy = await requestPrimaryRandomnessApi(`/api/epochs?limit=${limit}`);
+			if (legacy.status >= 200 && legacy.status < 300) {
+				const rewardLookup = await getRewardLookup();
+				sendJson(res, 200, {
+					...(legacy.json || {}),
+					epochs: (legacy.json?.epochs || []).map(epoch => enrichEpochSummaryReward(epoch, rewardLookup)),
+					source: 'randomness-api',
+					proofsAvailable: true,
+				});
+				return;
+			}
+			const epochs = await listOnChainEpochs(limit);
+			sendJson(res, 200, {
+				epochs,
+				source: 'on-chain-batch',
+				proofsAvailable: false,
+			});
+		} catch (err) {
+			sendJson(res, 500, { error: shortError(err) });
+		}
 		return;
 	}
 
 	const epochProxyMatch = url.pathname.match(/^\/api\/network\/epochs\/(\d+)$/);
 	if (epochProxyMatch && req.method === 'GET') {
-		await proxyRandomnessApi(req, res, `/api/epochs/${epochProxyMatch[1]}`);
+		try {
+			const legacy = await requestPrimaryRandomnessApi(`/api/epochs/${epochProxyMatch[1]}`);
+			if (legacy.status >= 200 && legacy.status < 300) {
+				const rewardLookup = await getRewardLookup();
+				sendJson(res, 200, enrichEpochReward(legacy.json ?? {}, rewardLookup));
+				return;
+			}
+			const epoch = await getOnChainEpoch(Number(epochProxyMatch[1]));
+			sendJson(res, 200, {
+				...epoch,
+				createdAt: null,
+				leaves: [],
+				storageVerification: null,
+				onChainAttestation: epoch.attestationHash && !/^0x0+$/.test(epoch.attestationHash)
+					? { attestationHash: epoch.attestationHash, txHash: null }
+					: null,
+			});
+		} catch (err) {
+			sendJson(res, 404, { error: shortError(err) });
+		}
 		return;
 	}
 
 	const verifyStorageMatch = url.pathname.match(/^\/api\/network\/epochs\/(\d+)\/verify-storage$/);
 	if (verifyStorageMatch && req.method === 'POST') {
-		await proxyRandomnessApi(req, res, `/api/epochs/${verifyStorageMatch[1]}/verify-storage`, 'POST');
+		const response = await requestPrimaryRandomnessApi(`/api/epochs/${verifyStorageMatch[1]}/verify-storage`, { method: 'POST' });
+		sendJson(res, response.status, response.json ?? {
+			error: 'Storage verification is unavailable on the current API deployment.',
+			epochId: Number(verifyStorageMatch[1]),
+		});
 		return;
 	}
 

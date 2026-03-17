@@ -2,6 +2,7 @@
 // Run: node db/migrate.js
 // Creates the required PostgreSQL tables for the beacon API.
 
+import 'dotenv/config';
 import pg from 'pg';
 const { Pool } = pg;
 

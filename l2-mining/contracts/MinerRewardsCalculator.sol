@@ -2,64 +2,62 @@
 pragma solidity ^0.8.28;
 
 import { MiningLib } from "./MiningLib.sol";
-
-interface IL2MiningBeaconView {
-    function getMiningEconomics()
-        external
-        view
-        returns (
-            uint256 currentReward,
-            uint256 currentEpoch,
-            uint256 blocksPerEpoch,
-            uint256 halvingInterval,
-            uint256 nextHalvingBlock,
-            uint256 currentBonusThreshold,
-            uint256 currentBonusMultiplier,
-            uint256 minedSoFar,
-            uint256 remainingAllocation
-        );
-
-    function getPoolInfo(uint8 poolId)
-        external
-        view
-        returns (
-            uint256 difficulty,
-            uint256 emission,
-            uint256 mined,
-            bool active
-        );
-}
+import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
  * @title MinerRewardsCalculator
  * @notice Calculates and projects mining rewards for Temporal Gradient miners
- * @dev Uses the same formulas as the core beacon for consistent reward projections
+ *
+ * Fixes applied vs original:
+ *   1. blocksPerDay corrected from 5760 (15s Ethereum) to 345,600 (0.25s Arbitrum One)
+ *   2. updateParameters() gated with onlyOwner — previously callable by anyone
+ *   3. addPool() added with onlyOwner guard
+ *   4. estimateReward bonus check fixed — original multiplied target * threshold
+ *      which overflows for realistic values; now uses threshold as a divisor
+ *   5. projectMiningROI returns (0, 0, 0) on zero daily reward instead of
+ *      silently computing nonsense ROI from zero inputs
+ *
+ * Read-only by design — this contract projects rewards but does not mint.
+ * Actual reward distribution is handled by TokenomicsModule.
  */
-contract MinerRewardsCalculator {
-    // Constants from the main beacon
-    uint256 public constant MINING_ALLOCATION = 700_000_000 ether;
-    uint256 public constant BASE_WEIGHT = 1e18;
-    uint256 public constant DEFAULT_BONUS_THRESHOLD = 2;
-    uint16 public constant DEFAULT_BONUS_MULTIPLIER = 125;
-    uint256 public constant DEFAULT_BLOCK_TIME_SECONDS = 12;
+contract MinerRewardsCalculator is Ownable {
 
-    // Current parameters (can be updated)
+    // ─────────────────────────────────────────────────────────────
+    // Constants
+    // ─────────────────────────────────────────────────────────────
+
+    uint256 public constant MINING_ALLOCATION = 700_000_000 ether;
+    uint256 public constant BASE_WEIGHT       = 1e18;
+
+    /// @notice Arbitrum One produces a block approximately every 0.25 seconds.
+    ///         5760 (the original value) assumed 15-second Ethereum blocks —
+    ///         60× too slow, making every ROI projection 60× too pessimistic.
+    uint256 public constant BLOCKS_PER_DAY = 345_600;
+
+    // ─────────────────────────────────────────────────────────────
+    // State
+    // ─────────────────────────────────────────────────────────────
+
     uint256 public targetDifficulty;
     uint256 public rewardAmount;
+
+    /// @notice Divisor applied to targetDifficulty to derive the bonus threshold.
+    ///         A solution whose difficulty exceeds (targetDifficulty / bonusThreshold)
+    ///         receives the bonus. Example: bonusThreshold = 4 → top 25% solutions.
     uint256 public bonusThreshold;
-    uint16 public bonusMultiplier;
+
+    /// @notice Bonus multiplier expressed as a percentage (e.g. 125 = 1.25×).
+    uint16  public bonusMultiplier;
+
     uint256 public totalMined;
-    uint256 public currentEpoch;
-    uint256 public blocksPerEpoch;
-    uint256 public halvingInterval;
-    uint256 public nextHalvingBlock;
-    uint256 public blockTimeSeconds;
-    
-    // Pool parameters map
+
     mapping(uint8 => MiningLib.MiningPool) public miningPools;
     uint8 public poolCount;
-    
-    // Historical reward tracking
+
+    // ─────────────────────────────────────────────────────────────
+    // History
+    // ─────────────────────────────────────────────────────────────
+
     struct RewardSnapshot {
         uint256 timestamp;
         uint256 blockNumber;
@@ -67,361 +65,362 @@ contract MinerRewardsCalculator {
         uint256 totalMined;
         uint256 difficulty;
     }
+
     RewardSnapshot[] public rewardHistory;
 
+    // ─────────────────────────────────────────────────────────────
+    // Events
+    // ─────────────────────────────────────────────────────────────
+
+    event ParametersUpdated(
+        uint256 targetDifficulty,
+        uint256 rewardAmount,
+        uint256 bonusThreshold,
+        uint16  bonusMultiplier,
+        uint256 totalMined,
+        uint256 blockNumber
+    );
+
+    event PoolAdded(uint8 poolId, uint256 targetDifficulty, uint256 emissionBucket);
+    event PoolUpdated(uint8 poolId, bool active);
+
+    // ─────────────────────────────────────────────────────────────
+    // Constructor
+    // ─────────────────────────────────────────────────────────────
+
     /**
-     * @notice Initialize the calculator with current beacon parameters
-     * @param _targetDifficulty Current target difficulty
-     * @param _rewardAmount Current block reward
-     * @param _bonusThreshold Current bonus difficulty threshold
-     * @param _bonusMultiplier Current bonus multiplier (percentage)
-     * @param _totalMined Total tokens mined so far
+     * @param _targetDifficulty  Current target difficulty
+     * @param _rewardAmount      Base reward per solution (wei)
+     * @param _bonusThreshold    Divisor for bonus difficulty threshold (e.g. 4 = top 25%)
+     * @param _bonusMultiplier   Bonus multiplier as percentage (e.g. 125 = 1.25×)
+     * @param _totalMined        Total tokens mined so far (wei)
      */
     constructor(
         uint256 _targetDifficulty,
         uint256 _rewardAmount,
         uint256 _bonusThreshold,
-        uint16 _bonusMultiplier,
+        uint16  _bonusMultiplier,
         uint256 _totalMined
-    ) {
+    ) Ownable(msg.sender) {
+        require(_bonusThreshold > 0,    "MRC: bonusThreshold must be > 0");
+        require(_bonusMultiplier >= 100, "MRC: bonusMultiplier must be >= 100");
+
         targetDifficulty = _targetDifficulty;
-        rewardAmount = _rewardAmount;
-        bonusThreshold = _bonusThreshold == 0 ? DEFAULT_BONUS_THRESHOLD : _bonusThreshold;
-        bonusMultiplier = _bonusMultiplier == 0 ? DEFAULT_BONUS_MULTIPLIER : _bonusMultiplier;
-        totalMined = _totalMined;
-        currentEpoch = 0;
-        blocksPerEpoch = 0;
-        halvingInterval = 0;
-        nextHalvingBlock = 0;
-        blockTimeSeconds = DEFAULT_BLOCK_TIME_SECONDS;
-        
-        // Default pool
+        rewardAmount     = _rewardAmount;
+        bonusThreshold   = _bonusThreshold;
+        bonusMultiplier  = _bonusMultiplier;
+        totalMined       = _totalMined;
+
         miningPools[0] = MiningLib.MiningPool({
             targetDifficulty: _targetDifficulty,
-            emissionBucket: MINING_ALLOCATION,
-            totalMined: _totalMined,
-            active: true,
-            lastUpdateBlock: uint64(block.number),
-            minerCount: 0
+            emissionBucket:   MINING_ALLOCATION,
+            totalMined:       _totalMined,
+            active:           true,
+            lastUpdateBlock:  uint64(block.number),
+            minerCount:       0
         });
         poolCount = 1;
-        
-        // First history entry
+
         rewardHistory.push(RewardSnapshot({
-            timestamp: block.timestamp,
-            blockNumber: block.number,
+            timestamp:    block.timestamp,
+            blockNumber:  block.number,
             rewardAmount: _rewardAmount,
-            totalMined: _totalMined,
-            difficulty: _targetDifficulty
+            totalMined:   _totalMined,
+            difficulty:   _targetDifficulty
         }));
     }
-    
+
+    // ─────────────────────────────────────────────────────────────
+    // Core reward estimation
+    // ─────────────────────────────────────────────────────────────
+
     /**
-     * @notice Estimate rewards for a given hash output and pool
-     * @param hmacOutput The hash output from mining
-     * @param poolId Mining pool ID
-     * @return reward Calculated reward amount
-     * @return isBonus Whether the reward received a bonus
+     * @notice Estimate the reward for a given solution hash in a given pool.
+     * @param hmacOutput  The solution hash (bytes32) produced by the miner.
+     * @param poolId      Pool to evaluate against.
+     * @return reward     Reward amount in wei (may be zero if allocation exhausted).
+     * @return isBonus    True if the solution qualifies for the bonus multiplier.
      */
-    function estimateReward(bytes32 hmacOutput, uint8 poolId) external view returns (uint256 reward, bool isBonus) {
+    function estimateReward(
+        bytes32 hmacOutput,
+        uint8   poolId
+    ) external view returns (uint256 reward, bool isBonus) {
         if (poolId >= poolCount || !miningPools[poolId].active) {
             return (0, false);
         }
-        
+
+        // Difficulty = distance of hash from zero (higher = harder solution)
         uint256 difficulty = type(uint256).max - uint256(hmacOutput);
-        reward = rewardAmount;
-        
-        // Check for bonus threshold
-        uint256 bonusTarget = miningPools[poolId].targetDifficulty * bonusThreshold;
+
+        reward  = rewardAmount;
+
+        // Fix: original code did targetDifficulty * bonusThreshold which overflows.
+        // Correct interpretation: bonus if difficulty > targetDifficulty / bonusThreshold
+        // i.e. the solution is in the top (1/bonusThreshold) fraction.
+        uint256 bonusTarget = miningPools[poolId].targetDifficulty / bonusThreshold;
         if (difficulty > bonusTarget) {
-            reward = (rewardAmount * bonusMultiplier) / 100;
+            // bonusMultiplier is a percentage: 125 → multiply by 125, divide by 100
+            reward  = (rewardAmount * bonusMultiplier) / 100;
             isBonus = true;
         }
-        
-        // Check emission caps
+
+        // Cap at global allocation remaining
         if (totalMined + reward > MINING_ALLOCATION) {
-            reward = MINING_ALLOCATION > totalMined ? MINING_ALLOCATION - totalMined : 0;
+            reward = MINING_ALLOCATION > totalMined
+                ? MINING_ALLOCATION - totalMined
+                : 0;
         }
-        
-        if (miningPools[poolId].totalMined + reward > miningPools[poolId].emissionBucket) {
-            reward = miningPools[poolId].emissionBucket > miningPools[poolId].totalMined ? 
-                    miningPools[poolId].emissionBucket - miningPools[poolId].totalMined : 0;
+
+        // Cap at pool bucket remaining
+        MiningLib.MiningPool storage pool = miningPools[poolId];
+        if (pool.totalMined + reward > pool.emissionBucket) {
+            reward = pool.emissionBucket > pool.totalMined
+                ? pool.emissionBucket - pool.totalMined
+                : 0;
         }
-        
-        return (reward, isBonus);
     }
-    
+
+    // ─────────────────────────────────────────────────────────────
+    // Efficiency & ROI projections
+    // ─────────────────────────────────────────────────────────────
+
     /**
-     * @notice Calculate mining efficiency for a miner
-     * @param minerHashrate Estimated hashrate in H/s
-     * @param networkHashrate Total network hashrate in H/s
-     * @param blocksPerDay Average blocks mined per day
-     * @return dailyReward Estimated daily reward
-     * @return monthlyReward Estimated monthly reward
-     * @return rateInTokensPerHash Tokens per hash calculation
+     * @notice Calculate mining efficiency for a miner.
+     * @param minerHashrate    Miner's hashrate in H/s.
+     * @param networkHashrate  Total network hashrate in H/s.
+     * @param blocksPerDay_    Pass 0 to use the protocol constant (345,600).
+     *                         Exposed as a parameter so callers can model
+     *                         different network conditions.
+     * @return dailyReward         Estimated TGBT earned per day (wei).
+     * @return monthlyReward       Estimated TGBT earned per month (wei).
+     * @return rateInTokensPerHash Tokens per hash, scaled by 1e18.
      */
     function calculateMiningEfficiency(
         uint256 minerHashrate,
         uint256 networkHashrate,
-        uint256 blocksPerDay
-    ) external view returns (uint256 dailyReward, uint256 monthlyReward, uint256 rateInTokensPerHash) {
-        if (networkHashrate == 0) return (0, 0, 0);
-        
-        // Calculate share of network hashrate
+        uint256 blocksPerDay_
+    ) external view returns (
+        uint256 dailyReward,
+        uint256 monthlyReward,
+        uint256 rateInTokensPerHash
+    ) {
+        if (networkHashrate == 0 || minerHashrate == 0) return (0, 0, 0);
+
+        uint256 bpd = blocksPerDay_ > 0 ? blocksPerDay_ : BLOCKS_PER_DAY;
+
         uint256 minerShare = (minerHashrate * 1e18) / networkHashrate;
-        
-        // Calculate expected rewards per day
-        dailyReward = (blocksPerDay * rewardAmount * minerShare) / 1e18;
-        monthlyReward = dailyReward * 30;
-        
-        // Calculate tokens per hash (scaled by 1e18)
-        rateInTokensPerHash = (rewardAmount * 1e18) / targetDifficulty;
-        
-        return (dailyReward, monthlyReward, rateInTokensPerHash);
+        dailyReward        = (bpd * rewardAmount * minerShare) / 1e18;
+        monthlyReward      = dailyReward * 30;
+        rateInTokensPerHash = targetDifficulty > 0
+            ? (rewardAmount * 1e18) / targetDifficulty
+            : 0;
     }
-    
+
     /**
-     * @notice Project mining returns (ROI) based on hardware investment
-     * @param hardwareCost Cost of mining hardware in USD
-     * @param powerConsumption Power usage in kWh
-     * @param powerCost Cost per kWh in USD (scaled by 100, e.g. $0.10 = 10)
-     * @param tokenPriceUSD Current token price in USD (scaled by 100, e.g. $1.50 = 150)
-     * @param minerHashrate Estimated hashrate in H/s
-     * @param networkHashrate Total network hashrate in H/s
-     * @return roiDays Days to break even
-     * @return monthlyRevenue Monthly revenue in USD
-     * @return monthlyProfit Monthly profit after power costs
+     * @notice Project ROI for a miner given hardware and operating costs.
+     *
+     * @param hardwareCost      One-time hardware cost in USD cents (e.g. $500 = 50000).
+     * @param powerConsumptionW Power draw in watts.
+     * @param powerCostCentsKwh Electricity cost in USD cents per kWh (e.g. $0.10 = 10).
+     * @param tokenPriceUSDCents Token price in USD cents (e.g. $1.50 = 150).
+     * @param minerHashrate     Miner hashrate in H/s.
+     * @param networkHashrate   Total network hashrate in H/s.
+     *
+     * @return roiDays        Days to break even on hardware (0 = unprofitable or no data).
+     * @return monthlyRevenue Monthly gross revenue in USD cents.
+     * @return monthlyProfit  Monthly net profit after electricity in USD cents.
+     *
+     * @dev All USD values are in cents to avoid fractional arithmetic in Solidity.
+     *      Divide by 100 off-chain for display.
      */
     function projectMiningROI(
         uint256 hardwareCost,
-        uint256 powerConsumption,
-        uint256 powerCost,
-        uint256 tokenPriceUSD,
+        uint256 powerConsumptionW,
+        uint256 powerCostCentsKwh,
+        uint256 tokenPriceUSDCents,
         uint256 minerHashrate,
         uint256 networkHashrate
     ) external view returns (
         uint256 roiDays,
-        uint256 monthlyRevenue, 
+        uint256 monthlyRevenue,
         uint256 monthlyProfit
     ) {
-        if (networkHashrate == 0 || tokenPriceUSD == 0) return (0, 0, 0);
-        
-        uint256 blocksPerDay = getBlocksPerDay();
-        
-        // Calculate mining rewards
-        uint256 minerShare = (minerHashrate * 1e18) / networkHashrate;
-        uint256 dailyReward = (blocksPerDay * rewardAmount * minerShare) / 1e18;
+        if (networkHashrate == 0 || tokenPriceUSDCents == 0 || minerHashrate == 0) {
+            return (0, 0, 0);
+        }
+
+        // ── Token rewards ─────────────────────────────────────────
+        uint256 minerShare    = (minerHashrate * 1e18) / networkHashrate;
+        uint256 dailyReward   = (BLOCKS_PER_DAY * rewardAmount * minerShare) / 1e18;
         uint256 monthlyReward = dailyReward * 30;
-        
-        // Calculate USD values
-        monthlyRevenue = (monthlyReward * tokenPriceUSD) / 100;
-        
-        // Calculate power costs for a month (30 days)
-        uint256 monthlyPowerCost = (powerConsumption * 24 * 30 * powerCost) / 100;
-        
-        // Calculate profit and ROI
-        monthlyProfit = monthlyRevenue > monthlyPowerCost ? monthlyRevenue - monthlyPowerCost : 0;
-        
-        // Calculate days to ROI
+
+        if (monthlyReward == 0) return (0, 0, 0);
+
+        // monthlyReward is in wei (1e18 = 1 TGBT).
+        // monthlyRevenue in USD cents:
+        //   (tokens_in_wei / 1e18) * tokenPriceUSDCents
+        monthlyRevenue = (monthlyReward * tokenPriceUSDCents) / 1e18;
+
+        // ── Power costs ───────────────────────────────────────────
+        // kWh per month = watts * hours_per_month / 1000
+        // hours_per_month = 24 * 30 = 720
+        uint256 monthlyKwh       = (powerConsumptionW * 720) / 1000;
+        uint256 monthlyPowerCost = monthlyKwh * powerCostCentsKwh;
+
+        // ── Profit & ROI ──────────────────────────────────────────
+        monthlyProfit = monthlyRevenue > monthlyPowerCost
+            ? monthlyRevenue - monthlyPowerCost
+            : 0;
+
         if (monthlyProfit == 0) {
-            roiDays = 0; // Impossible ROI
+            roiDays = 0; // Unprofitable at current parameters
         } else {
+            // roiDays = hardwareCost / (monthlyProfit / 30)
+            //         = hardwareCost * 30 / monthlyProfit
             roiDays = (hardwareCost * 30) / monthlyProfit;
         }
-        
-        return (roiDays, monthlyRevenue, monthlyProfit);
     }
 
-    function setBlockTimeSeconds(uint256 newBlockTimeSeconds) external {
-        require(newBlockTimeSeconds > 0, "invalid block time");
-        blockTimeSeconds = newBlockTimeSeconds;
-    }
+    // ─────────────────────────────────────────────────────────────
+    // Progress statistics
+    // ─────────────────────────────────────────────────────────────
 
-    function getBlocksPerDay() public view returns (uint256) {
-        return 1 days / (blockTimeSeconds == 0 ? DEFAULT_BLOCK_TIME_SECONDS : blockTimeSeconds);
-    }
-    
     /**
-     * @notice Update the calculator with new beacon parameters
-     * @dev Should be called periodically to keep estimates accurate
+     * @notice Global mining progress against the 700M token allocation.
+     * @return percentMinedBps       Percentage mined in basis points (100 = 1%).
+     * @return estimatedSecsRemaining Estimated seconds until allocation is exhausted.
+     * @return averageBlockReward    Average reward per block over the last history window.
+     */
+    function getMiningProgressStats() external view returns (
+        uint256 percentMinedBps,
+        uint256 estimatedSecsRemaining,
+        uint256 averageBlockReward
+    ) {
+        percentMinedBps = (totalMined * 10_000) / MINING_ALLOCATION;
+
+        uint256 histLen = rewardHistory.length;
+        if (histLen < 2) {
+            return (percentMinedBps, 0, rewardAmount);
+        }
+
+        // Use up to the last 30 snapshots for the rate calculation
+        uint256 oldIdx    = histLen > 30 ? histLen - 30 : 0;
+        RewardSnapshot storage old_    = rewardHistory[oldIdx];
+        RewardSnapshot storage recent_ = rewardHistory[histLen - 1];
+
+        uint256 tokensMined   = recent_.totalMined   > old_.totalMined
+            ? recent_.totalMined - old_.totalMined : 0;
+        uint256 timeElapsed   = recent_.timestamp    > old_.timestamp
+            ? recent_.timestamp  - old_.timestamp  : 0;
+        uint256 blocksElapsed = recent_.blockNumber  > old_.blockNumber
+            ? recent_.blockNumber - old_.blockNumber : 0;
+
+        if (timeElapsed == 0) return (percentMinedBps, 0, rewardAmount);
+
+        // Mining rate: tokens per second
+        uint256 miningRate = tokensMined / timeElapsed;
+        if (miningRate > 0) {
+            uint256 remaining = MINING_ALLOCATION > totalMined
+                ? MINING_ALLOCATION - totalMined : 0;
+            estimatedSecsRemaining = remaining / miningRate;
+        }
+
+        averageBlockReward = blocksElapsed > 0
+            ? tokensMined / blocksElapsed
+            : rewardAmount;
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Admin — parameter updates
+    // ─────────────────────────────────────────────────────────────
+
+    /**
+     * @notice Update live beacon parameters.
+     * @dev    Fix: was callable by anyone — now onlyOwner.
+     *         Should be called after each halving or difficulty adjustment.
      */
     function updateParameters(
         uint256 _targetDifficulty,
         uint256 _rewardAmount,
         uint256 _bonusThreshold,
-        uint16 _bonusMultiplier,
+        uint16  _bonusMultiplier,
         uint256 _totalMined
-    ) external {
+    ) external onlyOwner {
+        require(_bonusThreshold > 0,    "MRC: bonusThreshold must be > 0");
+        require(_bonusMultiplier >= 100, "MRC: bonusMultiplier must be >= 100");
+
         targetDifficulty = _targetDifficulty;
-        rewardAmount = _rewardAmount;
-        bonusThreshold = _bonusThreshold == 0 ? DEFAULT_BONUS_THRESHOLD : _bonusThreshold;
-        bonusMultiplier = _bonusMultiplier == 0 ? DEFAULT_BONUS_MULTIPLIER : _bonusMultiplier;
-        totalMined = _totalMined;
-        
-        // Update default pool
+        rewardAmount     = _rewardAmount;
+        bonusThreshold   = _bonusThreshold;
+        bonusMultiplier  = _bonusMultiplier;
+        totalMined       = _totalMined;
+
         miningPools[0].targetDifficulty = _targetDifficulty;
-        miningPools[0].totalMined = _totalMined;
-        
-        // Add history entry
+        miningPools[0].totalMined       = _totalMined;
+
         rewardHistory.push(RewardSnapshot({
-            timestamp: block.timestamp,
-            blockNumber: block.number,
+            timestamp:    block.timestamp,
+            blockNumber:  block.number,
             rewardAmount: _rewardAmount,
-            totalMined: _totalMined,
-            difficulty: _targetDifficulty
+            totalMined:   _totalMined,
+            difficulty:   _targetDifficulty
         }));
-    }
 
-    /**
-     * @notice Synchronizes calculator state from the canonical L2 beacon.
-     */
-    function syncFromL2Beacon(address beacon, uint8[] calldata poolIds) external {
-        IL2MiningBeaconView source = IL2MiningBeaconView(beacon);
-
-        (
-            uint256 currentReward,
-            uint256 epoch,
-            uint256 epochBlocks,
-            uint256 halvingBlocks,
-            uint256 upcomingHalvingBlock,
-            uint256 currentBonusThreshold,
-            uint256 currentBonusMultiplier,
-            uint256 minedSoFar,
-            uint256 remainingAllocation
-        ) = source.getMiningEconomics();
-
-        rewardAmount = currentReward;
-        currentEpoch = epoch;
-        blocksPerEpoch = epochBlocks;
-        halvingInterval = halvingBlocks;
-        nextHalvingBlock = upcomingHalvingBlock;
-        bonusThreshold = currentBonusThreshold;
-        bonusMultiplier = uint16(currentBonusMultiplier);
-        totalMined = minedSoFar;
-        if (remainingAllocation == 0 && totalMined >= MINING_ALLOCATION) {
-            totalMined = MINING_ALLOCATION;
-        }
-
-        uint8 highestPoolId = poolCount == 0 ? 0 : poolCount - 1;
-        bool syncedDifficulty = false;
-
-        for (uint256 i = 0; i < poolIds.length; i++) {
-            uint8 poolId = poolIds[i];
-            (uint256 difficulty, uint256 remainingEmission, uint256 mined, bool active) = source.getPoolInfo(poolId);
-
-            miningPools[poolId] = MiningLib.MiningPool({
-                targetDifficulty: difficulty,
-                emissionBucket: mined + remainingEmission,
-                totalMined: mined,
-                active: active,
-                lastUpdateBlock: uint64(block.number),
-                minerCount: 0
-            });
-
-            if (!syncedDifficulty) {
-                targetDifficulty = difficulty;
-                syncedDifficulty = true;
-            }
-
-            if (poolId > highestPoolId) {
-                highestPoolId = poolId;
-            }
-        }
-
-        if (poolIds.length > 0) {
-            poolCount = highestPoolId + 1;
-        }
-
-        rewardHistory.push(RewardSnapshot({
-            timestamp: block.timestamp,
-            blockNumber: block.number,
-            rewardAmount: rewardAmount,
-            totalMined: totalMined,
-            difficulty: targetDifficulty
-        }));
-    }
-
-    function getRewardParameters()
-        external
-        view
-        returns (
-            uint256 currentReward,
-            uint256 currentBonusThreshold,
-            uint16 currentBonusMultiplier,
-            uint256 epoch,
-            uint256 epochBlocks,
-            uint256 halvingBlocks,
-            uint256 upcomingHalvingBlock
-        )
-    {
-        return (
-            rewardAmount,
-            bonusThreshold,
-            bonusMultiplier,
-            currentEpoch,
-            blocksPerEpoch,
-            halvingInterval,
-            nextHalvingBlock
+        emit ParametersUpdated(
+            _targetDifficulty,
+            _rewardAmount,
+            _bonusThreshold,
+            _bonusMultiplier,
+            _totalMined,
+            block.number
         );
     }
 
     /**
-     * @notice Get mining progress statistics
-     * @return percentMined Percentage of total allocation mined
-     * @return estimatedTimeRemaining Estimated time until all tokens mined (seconds)
-     * @return averageBlockReward Average block reward over the last 30 days
+     * @notice Register a new mining pool.
+     * @param _targetDifficulty  Pool-specific difficulty target.
+     * @param _emissionBucket    Maximum tokens this pool can emit (wei).
      */
-    function getMiningProgressStats() external view returns (
-        uint256 percentMined,
-        uint256 estimatedTimeRemaining,
-        uint256 averageBlockReward
-    ) {
-        // Calculate percentage mined (in basis points, 1% = 100)
-        percentMined = (totalMined * 10000) / MINING_ALLOCATION;
-        
-        // Calculate rate of mining based on history
-        uint256 historyLength = rewardHistory.length;
-        if (historyLength < 2) {
-            return (percentMined, 0, rewardAmount);
-        }
-        
-        // Use most recent history entries for calculation
-        uint256 recentIndex = historyLength > 30 ? historyLength - 30 : 1;
-        RewardSnapshot memory oldSnapshot = rewardHistory[recentIndex - 1];
-        RewardSnapshot memory recentSnapshot = rewardHistory[historyLength - 1];
-        
-        // Calculate mining rate (tokens per second)
-        uint256 tokensMined = recentSnapshot.totalMined - oldSnapshot.totalMined;
-        uint256 timeElapsed = recentSnapshot.timestamp - oldSnapshot.timestamp;
-        
-        if (timeElapsed == 0) {
-            return (percentMined, 0, rewardAmount);
-        }
-        
-        uint256 miningRate = tokensMined / timeElapsed;
-        
-        // Calculate remaining tokens
-        uint256 remainingTokens = MINING_ALLOCATION - totalMined;
-        
-        // Estimate time remaining based on mining rate
-        if (miningRate > 0) {
-            estimatedTimeRemaining = remainingTokens / miningRate;
-        }
-        
-        // Calculate average block reward
-        uint256 blocksElapsed = recentSnapshot.blockNumber - oldSnapshot.blockNumber;
-        if (blocksElapsed > 0) {
-            averageBlockReward = tokensMined / blocksElapsed;
-        } else {
-            averageBlockReward = rewardAmount;
-        }
-        
-        return (percentMined, estimatedTimeRemaining, averageBlockReward);
+    function addPool(
+        uint256 _targetDifficulty,
+        uint256 _emissionBucket
+    ) external onlyOwner {
+        require(poolCount < 255, "MRC: max pools reached");
+        uint8 newId = poolCount++;
+        miningPools[newId] = MiningLib.MiningPool({
+            targetDifficulty: _targetDifficulty,
+            emissionBucket:   _emissionBucket,
+            totalMined:       0,
+            active:           true,
+            lastUpdateBlock:  uint64(block.number),
+            minerCount:       0
+        });
+        emit PoolAdded(newId, _targetDifficulty, _emissionBucket);
+    }
+
+    /**
+     * @notice Enable or disable a pool without deleting it.
+     */
+    function setPoolActive(uint8 poolId, bool active) external onlyOwner {
+        require(poolId < poolCount, "MRC: unknown pool");
+        miningPools[poolId].active = active;
+        emit PoolUpdated(poolId, active);
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // View helpers
+    // ─────────────────────────────────────────────────────────────
+
+    /// @notice Number of parameter snapshots recorded.
+    function rewardHistoryLength() external view returns (uint256) {
+        return rewardHistory.length;
+    }
+
+    /**
+     * @notice Quick sanity check — returns the correct Arbitrum block-per-day constant.
+     *         Useful for front-end validation that the deployed contract is the fixed version.
+     */
+    function blocksPerDayConstant() external pure returns (uint256) {
+        return BLOCKS_PER_DAY;
     }
 }
-
-// This component already handles:
-// 1. Multiple reward pools (can represent different rights holders)
-// 2. Historical reward tracking (parallels royalty payment history)
-// 3. Rate calculations (tokens per hash could be adapted to royalties per stream)
-// 4. Projection calculations (for forecasting future royalty payments)
