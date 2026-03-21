@@ -647,12 +647,145 @@
     }
     .stale-block-entry .sb-meta { color: var(--muted); }
 
+    /* ── Toggle Switch ── */
+    .toggle-wrap {
+      display: inline-flex; align-items: center; gap: 10px;
+      cursor: pointer; user-select: none;
+    }
+    .toggle-wrap .toggle-label {
+      font-size: 12px; font-weight: 600; color: var(--muted);
+      text-transform: uppercase; letter-spacing: .06em;
+      transition: color .25s;
+    }
+    .toggle-wrap.active .toggle-label { color: var(--gold); }
+    .toggle-track {
+      position: relative;
+      width: 44px; height: 24px;
+      border-radius: 999px;
+      background: rgba(15,23,42,.85);
+      border: 1px solid var(--border);
+      transition: background .25s, border-color .25s;
+      flex-shrink: 0;
+    }
+    .toggle-track::after {
+      content: '';
+      position: absolute;
+      top: 3px; left: 3px;
+      width: 16px; height: 16px;
+      border-radius: 50%;
+      background: var(--muted);
+      transition: transform .25s cubic-bezier(.4,.0,.2,1), background .25s;
+    }
+    .toggle-wrap.active .toggle-track {
+      background: rgba(251,191,36,.15);
+      border-color: rgba(251,191,36,.4);
+    }
+    .toggle-wrap.active .toggle-track::after {
+      transform: translateX(20px);
+      background: var(--gold);
+    }
+
+    /* ── Card inactive state ── */
+    .entropy-source-card.inactive {
+      opacity: .38;
+      filter: saturate(.2);
+      pointer-events: none;
+      transition: opacity .4s, filter .4s;
+    }
+    .entropy-source-card {
+      transition: opacity .4s, filter .4s, transform .2s, box-shadow .2s;
+    }
+    .entropy-source-card:hover:not(.inactive) {
+      transform: translateY(-2px);
+      box-shadow: 0 8px 24px rgba(0,0,0,.25);
+    }
+
+    /* ── Stale log collapse ── */
+    .stale-section-collapsible {
+      overflow: hidden;
+      max-height: 600px;
+      transition: max-height .4s ease, opacity .3s;
+      opacity: 1;
+    }
+    .stale-section-collapsible.collapsed {
+      max-height: 0;
+      opacity: 0;
+    }
+
+    /* ── Mixer label inactive ── */
+    .mixer-label.stale.off {
+      opacity: .3;
+      filter: saturate(0);
+      text-decoration: line-through;
+    }
+
+    /* ── UX polish ── */
+    .card {
+      transition: transform .2s, box-shadow .2s;
+    }
+    .card:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 8px 24px rgba(0,0,0,.2);
+    }
+    .status-card {
+      transition: transform .2s, box-shadow .2s;
+    }
+    .status-card:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 8px 24px rgba(0,0,0,.2);
+    }
+    .action-btn {
+      transition: all .2s ease;
+    }
+    .action-btn:active:not(:disabled) {
+      transform: scale(.96);
+    }
+    .panel {
+      transition: box-shadow .3s;
+    }
+    .panel:hover {
+      box-shadow: 0 20px 50px rgba(0,0,0,.32);
+    }
+    .hero {
+      transition: box-shadow .3s;
+    }
+    .hero:hover {
+      box-shadow: 0 20px 50px rgba(0,0,0,.32);
+    }
+
+    /* ── Settings control bar ── */
+    .settings-control {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 12px 16px;
+      background: rgba(15,23,42,.65);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      margin-bottom: 16px;
+    }
+    .settings-control .settings-icon {
+      font-size: 16px;
+      color: var(--muted);
+    }
+    .settings-divider {
+      width: 1px; height: 28px;
+      background: var(--border);
+    }
+    .stale-status-text {
+      font-size: 12px;
+      color: var(--muted);
+      transition: color .25s;
+    }
+    .stale-status-text.on { color: var(--gold); }
+
     @media (max-width: 980px) {
       .card { grid-column: span 6; }
       .left, .right { grid-column: span 12; }
       .reward-hero { gap: 20px; }
       .status-card { grid-column: span 6; }
       .entropy-source-card { grid-column: span 12 !important; }
+      .settings-control { flex-wrap: wrap; }
     }
     @media (max-width: 640px) {
       .card { grid-column: span 12; }
@@ -663,6 +796,7 @@
       .reward-sep { display: none; }
       .status-card { grid-column: span 12; }
       .entropy-source-card { grid-column: span 12 !important; }
+      .settings-control { gap: 10px; }
     }
   </style>
 </head>
@@ -809,6 +943,20 @@
         </div>
         <p class="helper" style="margin:4px 0 16px;">Three independent entropy streams are harvested and mixed into every beacon output. Currently only <strong>PoW Mining</strong> mints TGBT on Sepolia (via BatchMiningModule → TokenomicsModule). Stale Block rewards are calculated on-chain but <em>claimReward()</em> does not yet mint. UTXO anchoring contributes entropy only.</p>
 
+        <!-- ── Node Operator Controls ── -->
+        <div class="settings-control">
+          <span class="settings-icon">⚙️</span>
+          <span style="font-size:13px;font-weight:600;color:var(--text);">Node Settings</span>
+          <div class="settings-divider"></div>
+          <div class="toggle-wrap" id="staleMiningToggle" title="Enable or disable stale block mining. Requires Bitcoin API access (mempool.space or local node).">
+            <span class="toggle-label">Stale Mining</span>
+            <div class="toggle-track"></div>
+          </div>
+          <span class="stale-status-text" id="staleMiningStatus">Off — no Bitcoin API polling</span>
+          <div class="settings-divider"></div>
+          <span class="helper" style="flex:1;">Stale block mining is optional — enable it if you run a Bitcoin node or have mempool API access. <strong>Feature-flagged</strong> in the Rust crate (<code style="font-size:11px;">--features stale-mining</code>).</span>
+        </div>
+
         <!-- ── Three Entropy Source Cards ── -->
         <div class="system-grid">
 
@@ -861,10 +1009,15 @@
           </div>
 
           <!-- Stale Block Harvesting -->
-          <div class="entropy-source-card stale-source" style="grid-column: span 4;">
+          <div class="entropy-source-card stale-source" id="staleSourceCard" style="grid-column: span 4;">
             <div class="source-header">
-              <h3 class="source-title" style="color:var(--gold);">🔗 Stale Block Harvesting</h3>
-              <span class="badge ok" id="staleStatus">Active</span>
+              <div style="display:flex;align-items:center;gap:10px;">
+                <h3 class="source-title" style="color:var(--gold);">🔗 Stale Block Harvesting</h3>
+                <span class="badge ok" id="staleStatus">Active</span>
+              </div>
+              <div class="toggle-wrap" id="staleCardToggle" title="Toggle stale block mining on/off">
+                <div class="toggle-track"></div>
+              </div>
             </div>
             <div class="source-metrics">
               <div class="source-metric-row"><span>Orphan blocks found</span><span class="val" id="epStaleCount">—</span></div>
@@ -958,7 +1111,7 @@
         </div>
 
         <!-- ── Recent Stale Blocks Log ── -->
-        <div style="margin-top:16px;">
+        <div class="stale-section-collapsible" id="staleLogSection" style="margin-top:16px;">
           <div style="font-size:13px;color:var(--gold);font-weight:600;margin-bottom:8px;">Recent Stale Blocks Harvested</div>
           <div class="stale-block-log" id="epStaleLog">
             <div class="helper">Monitoring Bitcoin network for orphaned blocks…</div>
@@ -2404,15 +2557,18 @@
       // ── Pipeline status ──
       const powActive = ep.pow.hashrate > 0 || ep.pow.nonces > 0;
       const utxoActive = ep.utxo.anchored > 0;
-      const staleActive = ep.stale.count > 0;
+      const staleActive = staleMiningEnabled && ep.stale.count > 0;
+      const staleDisabled = !staleMiningEnabled;
       const sourcesUp = [powActive, utxoActive, staleActive].filter(Boolean).length;
       const statusEl = els.entropyPipelineStatus;
-      if (sourcesUp === 3) {
+      const maxSources = staleMiningEnabled ? 3 : 2;
+      if (sourcesUp === maxSources && maxSources === 3) {
         statusEl.className = 'badge ok';
         statusEl.innerHTML = '<span class="live-dot"></span>All sources active';
       } else if (sourcesUp > 0) {
         statusEl.className = 'badge warn';
-        statusEl.innerHTML = `<span class="live-dot gold"></span>${sourcesUp}/3 active` + (sourcesUp === 1 ? ' (PoW only — Sepolia)' : '');
+        const disabledNote = staleDisabled ? ' (stale off)' : '';
+        statusEl.innerHTML = `<span class="live-dot gold"></span>${sourcesUp}/${maxSources} active` + (sourcesUp === 1 ? ' (PoW only — Sepolia)' : '') + disabledNote;
       } else {
         statusEl.className = 'badge fail';
         statusEl.textContent = 'No sources';
@@ -2447,16 +2603,19 @@
       setBadge(els.utxoStatus, utxoActive ? 'Active' : 'Offline', utxoActive ? 'ok' : 'fail');
 
       // ── Stale Block card (entropy only — claimReward TODO) ──
-      els.epStaleCount.textContent = fmtNum(ep.stale.count);
-      els.epStaleForkDepth.textContent = ep.stale.forkDepth > 0 ? `${ep.stale.forkDepth} blocks` : '—';
-      els.epStaleZeroBits.textContent = ep.stale.zeroBits > 0 ? `${ep.stale.zeroBits} bits` : '—';
-      els.epStaleXorStatus.textContent = ep.stale.count > 0 ? `${ep.stale.count} blocks XOR'd` : 'No blocks';
-      els.epStaleTipHeight.textContent = fmtNum(ep.btcTipHeight);
-      els.epStaleHash.textContent = ep.stale.xorPool;
-      els.epStaleQuality.style.width = `${ep.stale.quality}%`;
-      els.epStaleQualityLabel.textContent = `${ep.stale.quality}/100`;
-      els.epStaleTgbt.textContent = staleActive ? `${fmtTGBT(ep.tgbt.stale)} TGBT` : '0.000 TGBT (no mint)';
-      setBadge(els.staleStatus, staleActive ? 'Active' : 'Offline', staleActive ? 'ok' : 'fail');
+      els.epStaleCount.textContent = staleDisabled ? 'Disabled' : fmtNum(ep.stale.count);
+      els.epStaleForkDepth.textContent = staleDisabled ? '—' : (ep.stale.forkDepth > 0 ? `${ep.stale.forkDepth} blocks` : '—');
+      els.epStaleZeroBits.textContent = staleDisabled ? '—' : (ep.stale.zeroBits > 0 ? `${ep.stale.zeroBits} bits` : '—');
+      els.epStaleXorStatus.textContent = staleDisabled ? 'Disabled' : (ep.stale.count > 0 ? `${ep.stale.count} blocks XOR'd` : 'No blocks');
+      els.epStaleTipHeight.textContent = staleDisabled ? '—' : fmtNum(ep.btcTipHeight);
+      els.epStaleHash.textContent = staleDisabled ? 'Stale mining disabled — enable via toggle above' : ep.stale.xorPool;
+      els.epStaleQuality.style.width = staleDisabled ? '0%' : `${ep.stale.quality}%`;
+      els.epStaleQualityLabel.textContent = staleDisabled ? 'Off' : `${ep.stale.quality}/100`;
+      els.epStaleTgbt.textContent = staleDisabled ? 'Disabled' : (staleActive ? `${fmtTGBT(ep.tgbt.stale)} TGBT` : '0.000 TGBT (no mint)');
+      setBadge(els.staleStatus, staleDisabled ? 'Disabled' : (staleActive ? 'Active' : 'Offline'), staleDisabled ? 'warn' : (staleActive ? 'ok' : 'fail'));
+
+      // Keep card inactive class in sync
+      if (els.staleSourceCard) els.staleSourceCard.classList.toggle('inactive', staleDisabled);
 
       // ── Combined output ──
       els.epCombinedHash.textContent = ep.combined.hash;
@@ -2469,7 +2628,7 @@
       // ── TGBT breakdown (honest: only PoW mints, others pending) ──
       els.epBreakdownPow.textContent = `${fmtTGBT(ep.tgbt.pow)} TGBT` + (ep.tgbt.powOnChain ? ' ✓' : ' (est)');
       els.epBreakdownUtxo.textContent = utxoActive ? `${fmtTGBT(ep.tgbt.utxo)} TGBT` : '0.000 TGBT — no contract';
-      els.epBreakdownStale.textContent = staleActive ? `${fmtTGBT(ep.tgbt.stale)} TGBT` : '0.000 TGBT — pending';
+      els.epBreakdownStale.textContent = staleDisabled ? 'Disabled' : (staleActive ? `${fmtTGBT(ep.tgbt.stale)} TGBT` : '0.000 TGBT — pending');
       els.epBreakdownTotal.textContent = `${fmtTGBT(ep.tgbt.total)} TGBT` + (ep.tgbt.total > 0 ? ' (PoW only)' : '');
 
       // ── Stale block log ──
@@ -2496,6 +2655,82 @@
       initEntropyPipeline();
       setInterval(tickEntropyPipeline, 3000);
     }, 1500);
+
+    // ── Stale Mining Toggle ──────────────────────────────────
+    const STALE_MINING_KEY = 'tgbt-stale-mining-enabled';
+    let staleMiningEnabled = localStorage.getItem(STALE_MINING_KEY) === 'true';
+
+    function syncStaleToggleUI() {
+      const headerToggle = els.staleMiningToggle;
+      const cardToggle = els.staleCardToggle;
+      const staleCard = els.staleSourceCard;
+      const staleLog = els.staleLogSection;
+      const statusText = els.staleMiningStatus;
+      const mixerStaleLabel = document.querySelector('.mixer-label.stale');
+
+      // Toggle visual state
+      [headerToggle, cardToggle].forEach(t => {
+        if (t) t.classList.toggle('active', staleMiningEnabled);
+      });
+
+      // Card grayed-out state
+      if (staleCard) staleCard.classList.toggle('inactive', !staleMiningEnabled);
+
+      // Stale log section collapse
+      if (staleLog) staleLog.classList.toggle('collapsed', !staleMiningEnabled);
+
+      // Mixer pipeline label
+      if (mixerStaleLabel) mixerStaleLabel.classList.toggle('off', !staleMiningEnabled);
+
+      // Status text
+      if (statusText) {
+        if (staleMiningEnabled) {
+          statusText.textContent = 'On — polling Bitcoin network for orphan blocks';
+          statusText.classList.add('on');
+        } else {
+          statusText.textContent = 'Off — no Bitcoin API polling';
+          statusText.classList.remove('on');
+        }
+      }
+
+      // Update entropyState so rendering reflects the toggle
+      if (!staleMiningEnabled) {
+        entropyState.stale.status = 'disabled';
+      } else {
+        entropyState.stale.status = entropyState.stale.count > 0 ? 'active' : 'offline';
+      }
+    }
+
+    function toggleStaleMining() {
+      staleMiningEnabled = !staleMiningEnabled;
+      localStorage.setItem(STALE_MINING_KEY, staleMiningEnabled ? 'true' : 'false');
+      syncStaleToggleUI();
+
+      // Notify the backend (best-effort, won't fail if API doesn't exist yet)
+      fetch('/api/config/stale-mining', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: staleMiningEnabled }),
+      }).catch(() => {});
+
+      if (staleMiningEnabled) {
+        showToast('Stale block mining enabled — the miner will poll for Bitcoin orphan blocks.');
+      } else {
+        showToast('Stale block mining disabled — no Bitcoin API activity.');
+      }
+
+      if (entropyState.initialized) renderEntropyPipeline();
+    }
+
+    // Bind both toggles (settings bar + card header)
+    els.staleMiningToggle.addEventListener('click', toggleStaleMining);
+    els.staleCardToggle.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleStaleMining();
+    });
+
+    // Initialize toggle state on page load
+    syncStaleToggleUI();
 
     els.refreshEntropy.addEventListener('click', () => {
       if (entropyState.initialized) tickEntropyPipeline();
