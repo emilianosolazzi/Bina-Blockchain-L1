@@ -28,3 +28,7 @@ path = "src/bin/temporal-gradient-miner.rs"
 [[bin]]
 name = "tg-storage-attestation"
 path = "src/bin/tg-storage-attestation.rs"
+
+[[bin]]
+name = "tg-bitcoin-anchor"
+path = "src/bin/tg-bitcoin-anchor.rs"

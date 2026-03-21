@@ -13,49 +13,29 @@ contract TokenomicsModule is ModuleBase, ITokenomicsModule {
 
     bytes32 public constant MODULE_MINING = keccak256("MINING_MODULE");
     bytes32 public constant MODULE_BATCH_MINING = keccak256("BATCH_MINING_MODULE");
-    bytes32 public constant SLASHER_ROLE = keccak256("SLASHER_ROLE");
-    bytes32 public constant BURNER_ROLE = keccak256("BURNER_ROLE");
 
     uint256 public constant TOTAL_SUPPLY_CAP = 2_000_000_000 ether;
     uint256 public constant MINING_ALLOCATION = 700_000_000 ether;
     uint256 public constant MAX_BONUS_MULTIPLIER = 500;
     uint256 public constant DEFAULT_BONUS_THRESHOLD = 2;
     uint16 public constant DEFAULT_BONUS_MULTIPLIER = 125;
-    uint256 public constant DEFAULT_BLOCK_TIME_SECONDS = 12;
-
-    bytes32 public constant RULE_VIOLATION = keccak256("RULE_VIOLATION");
-    bytes32 public constant MALICIOUS_BEHAVIOR = keccak256("MALICIOUS");
-    bytes32 public constant INACTIVITY = keccak256("INACTIVITY");
-    bytes32 public constant MISSED_ENTROPY = keccak256("MISSED_ENTROPY");
-
-    uint8 public constant VIOLATION_TYPE_RULE = 1;
-    uint8 public constant VIOLATION_TYPE_MALICIOUS = 2;
-    uint8 public constant BURN_TYPE_INACTIVITY = 1;
-    uint8 public constant BURN_TYPE_MISSED = 2;
 
     ITGBT public tgbtToken;
     TokenomicsLib.EpochState internal epochState;
     uint256 public totalMined;
     uint256 public bonusThreshold;
     uint16 public bonusMultiplier;
-    uint256 public blockTimeSeconds;
 
     mapping(address => uint256) public lastActivityBlock;
     mapping(address => uint256) public missedContributions;
 
-    event TokenUpdated(address newToken);
-    event AutoSlashed(address indexed account, uint8 violationType, uint8 severity, uint256 amount);
-    event AutoBurned(address indexed account, uint8 burnType, uint256 parameter, uint256 amount);
     event ExceptionalSolution(address indexed miner, uint256 difficulty, uint256 threshold, uint256 multiplier);
+    event MissedContributionRecorded(address indexed account, uint256 totalMissedContributions);
 
     error OnlyMiningModule();
     error ZeroToken();
     error InvalidMultiplier();
     error InvalidThreshold();
-    error InvalidBlockTime();
-    error InvalidSeverity();
-    error InvalidViolationType();
-    error UnauthorizedRole(bytes32 role, address caller);
 
     function initialize(
         address coreAddress,
@@ -71,16 +51,13 @@ contract TokenomicsModule is ModuleBase, ITokenomicsModule {
         if (tokenAddress == address(0)) revert ZeroToken();
 
         tgbtToken = ITGBT(tokenAddress);
-        epochState.currentEpoch = 0;
-        epochState.blocksPerEpoch = blocksPerEpoch;
-        epochState.epochStartBlock = block.number;
-        epochState.lastHalvingBlock = block.number;
-        epochState.halvingInterval = halvingInterval;
-        epochState.rewardAmount = initialReward;
+        TokenomicsLib.initializeEpochState(epochState, initialReward, blocksPerEpoch, halvingInterval);
         totalMined = 0;
         bonusThreshold = initialBonusThreshold == 0 ? DEFAULT_BONUS_THRESHOLD : initialBonusThreshold;
         bonusMultiplier = initialBonusMultiplier == 0 ? DEFAULT_BONUS_MULTIPLIER : initialBonusMultiplier;
-        blockTimeSeconds = DEFAULT_BLOCK_TIME_SECONDS;
+
+        if (bonusThreshold == 0) revert InvalidThreshold();
+        if (bonusMultiplier == 0 || bonusMultiplier > MAX_BONUS_MULTIPLIER) revert InvalidMultiplier();
     }
 
     function onBlockMined(
@@ -101,120 +78,9 @@ contract TokenomicsModule is ModuleBase, ITokenomicsModule {
         }
     }
 
-    function onManualSlash(address account, uint256 amount, bytes32 reason) external onlyCoreOrModule whenSystemActive {
-        if (amount == 0) {
-            return;
-        }
-        tgbtToken.slash(account, amount, reason);
-        _updateActivity(account);
-    }
-
-    function setTGBTToken(address newToken) external onlyGovernance {
-        if (newToken == address(0)) revert ZeroToken();
-        tgbtToken = ITGBT(newToken);
-        emit TokenUpdated(newToken);
-    }
-
-    function setBonusParameters(uint16 multiplier, uint256 threshold) external onlyGovernance {
-        if (multiplier == 0 || multiplier > MAX_BONUS_MULTIPLIER) revert InvalidMultiplier();
-        if (threshold == 0) revert InvalidThreshold();
-
-        bonusMultiplier = multiplier;
-        bonusThreshold = threshold;
-    }
-
-    function setEpochBlocks(uint256 newBlocksPerEpoch) external onlyGovernance {
-        TokenomicsLib.setEpochBlocks(epochState, newBlocksPerEpoch);
-    }
-
-    function setBlockTimeSeconds(uint256 newBlockTimeSeconds) external onlyGovernance {
-        if (newBlockTimeSeconds == 0) revert InvalidBlockTime();
-        blockTimeSeconds = newBlockTimeSeconds;
-    }
-
-    function setHalvingInterval(uint256 newHalvingInterval) external onlyGovernance {
-        TokenomicsLib.setHalvingInterval(epochState, newHalvingInterval);
-    }
-
-    function autoSlash(address account, uint8 violationType, uint8 severity)
-        external
-        whenSystemActive
-        returns (uint256)
-    {
-        _requireRole(SLASHER_ROLE);
-        if (severity == 0 || severity > 100) revert InvalidSeverity();
-
-        bytes32 reason;
-        uint256 baseAmount;
-
-        if (violationType == VIOLATION_TYPE_RULE) {
-            baseAmount = 100 ether;
-            reason = RULE_VIOLATION;
-        } else if (violationType == VIOLATION_TYPE_MALICIOUS) {
-            baseAmount = 1000 ether;
-            reason = MALICIOUS_BEHAVIOR;
-        } else {
-            revert InvalidViolationType();
-        }
-
-        uint256 amountToSlash = (baseAmount * severity) / 100;
-        uint256 balance = tgbtToken.balanceOf(account);
-        uint256 actualAmount = amountToSlash > balance ? balance : amountToSlash;
-
-        if (actualAmount > 0) {
-            tgbtToken.slash(account, actualAmount, reason);
-            emit AutoSlashed(account, violationType, severity, actualAmount);
-            _updateActivity(account);
-        }
-
-        return actualAmount;
-    }
-
-    function checkInactivity(address account) external whenSystemActive {
-        _requireRole(BURNER_ROLE);
-
-        if (lastActivityBlock[account] == 0) {
-            return;
-        }
-
-        uint256 inactiveBlocks = block.number - lastActivityBlock[account];
-        uint256 inactiveDays = (inactiveBlocks * blockTimeSeconds) / 1 days;
-
-        if (inactiveDays <= 30) return;
-
-        uint256 burnPercent = ((inactiveDays - 30) / 30) + 1;
-        if (burnPercent > 10) burnPercent = 10;
-
-        uint256 balance = tgbtToken.balanceOf(account);
-        uint256 burnAmount = (balance * burnPercent) / 100;
-
-        if (burnAmount > 0) {
-            tgbtToken.burnFromBeacon(account, burnAmount, INACTIVITY);
-            emit AutoBurned(account, BURN_TYPE_INACTIVITY, inactiveDays, burnAmount);
-        }
-
-        _updateActivity(account);
-    }
-
-    function recordMissedContribution(address contributor) external whenSystemActive {
-        _requireRole(BURNER_ROLE);
-
+    function recordMissedContribution(address contributor) external onlyCoreOrModule whenSystemActive {
         missedContributions[contributor]++;
-
-        if (missedContributions[contributor] >= 3) {
-            uint256 missedCount = missedContributions[contributor];
-            uint256 burnAmount = 5 ether * missedCount;
-            uint256 balance = tgbtToken.balanceOf(contributor);
-            uint256 actualBurn = burnAmount > balance ? balance : burnAmount;
-
-            if (actualBurn > 0) {
-                tgbtToken.burnFromBeacon(contributor, actualBurn, MISSED_ENTROPY);
-                emit AutoBurned(contributor, BURN_TYPE_MISSED, missedCount, actualBurn);
-                _updateActivity(contributor);
-            }
-
-            missedContributions[contributor] = 0;
-        }
+        emit MissedContributionRecorded(contributor, missedContributions[contributor]);
     }
 
     function resetMissedContributions(address account) external onlyGovernance {
@@ -236,12 +102,14 @@ contract TokenomicsModule is ModuleBase, ITokenomicsModule {
             uint256 remainingAllocation
         )
     {
+            (currentReward, currentEpoch, , nextHalvingBlock) = TokenomicsLib.previewEpochState(epochState);
+
         return (
-            epochState.rewardAmount,
-            epochState.currentEpoch,
+                currentReward,
+                currentEpoch,
             epochState.blocksPerEpoch,
             epochState.halvingInterval,
-            epochState.lastHalvingBlock + epochState.halvingInterval,
+                nextHalvingBlock,
             bonusThreshold,
             bonusMultiplier,
             totalMined,
@@ -308,10 +176,6 @@ contract TokenomicsModule is ModuleBase, ITokenomicsModule {
 
     function _updateActivity(address account) internal {
         lastActivityBlock[account] = block.number;
-    }
-
-    function _requireRole(bytes32 role) internal view {
-        if (!core.hasRole(role, msg.sender)) revert UnauthorizedRole(role, msg.sender);
     }
 
     modifier onlyAuthorizedMiningModule() {

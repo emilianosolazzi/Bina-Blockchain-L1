@@ -36,8 +36,7 @@ contract DeployLocalModularMiningStackScript is Script {
         MockProtocolToken rewardToken = new MockProtocolToken("Reward Token", "RWD");
         MockProtocolToken stakeToken = new MockProtocolToken("Stake Token", "STK");
 
-        TemporalGradientCore core = new TemporalGradientCore();
-        core.initialize(admin, bytes32(0));
+        TemporalGradientCore core = new TemporalGradientCore(admin, bytes32(0));
 
         MiningModule miningModule = new MiningModule();
         miningModule.initialize(address(core), address(stakeToken), initialDifficulty, initialEmission);

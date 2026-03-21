@@ -40,6 +40,24 @@ const epochIndex = [];      // [ { epochId, merkleRoot, leafCount, finalized, cr
 const epochLeaves = {};     // epochId → [ { index, outputHash, proof: bytes32[] } ]
 let latestOutput = null;    // { outputHash, epochId, leafIndex, timestamp, signature }
 
+function projectEpochSummary(data) {
+	return {
+		epochId:    data.epochId,
+		merkleRoot: data.merkleRoot,
+		leafCount:  data.leafCount,
+		finalized:  data.finalized || false,
+		createdAt:  data.createdAt || new Date().toISOString(),
+		poolId:     data.poolId || 0,
+		operator:   data.operator || null,
+		totalReward: data.totalReward || 0,
+		ipfs_cid: data.ipfs_cid || null,
+		storageReference: data.storageReference || null,
+		storageVerification: data.storageVerification || null,
+		onChainAttestation: data.onChainAttestation || null,
+		bitcoinAnchor: data.bitcoinAnchor || null,
+	};
+}
+
 /**
  * Load all epoch JSON files from disk into memory.
  */
@@ -48,18 +66,7 @@ function loadEpochStore() {
 	for (const file of files) {
 		try {
 			const data = JSON.parse(fs.readFileSync(path.join(EPOCH_STORE_DIR, file), 'utf8'));
-			epochIndex.push({
-				epochId:    data.epochId,
-				merkleRoot: data.merkleRoot,
-				leafCount:  data.leafCount,
-				finalized:  data.finalized || false,
-				createdAt:  data.createdAt || new Date().toISOString(),
-				poolId:     data.poolId || 0,
-				operator:   data.operator || null,
-				totalReward: data.totalReward || 0,
-				storageVerification: data.storageVerification || null,
-				onChainAttestation: data.onChainAttestation || null,
-			});
+			epochIndex.push(projectEpochSummary(data));
 			epochLeaves[data.epochId] = data.leaves || [];
 
 			// Track latest output
@@ -94,20 +101,9 @@ function saveEpoch(epochData) {
 	// Update in-memory index
 	const existing = epochIndex.find(e => e.epochId === epochData.epochId);
 	if (existing) {
-		Object.assign(existing, epochData);
+		Object.assign(existing, projectEpochSummary(epochData));
 	} else {
-		epochIndex.push({
-			epochId:    epochData.epochId,
-			merkleRoot: epochData.merkleRoot,
-			leafCount:  epochData.leafCount,
-			finalized:  epochData.finalized || false,
-			createdAt:  epochData.createdAt,
-			poolId:     epochData.poolId || 0,
-			operator:   epochData.operator || null,
-			totalReward: epochData.totalReward || 0,
-			storageVerification: epochData.storageVerification || null,
-			onChainAttestation: epochData.onChainAttestation || null,
-		});
+		epochIndex.push(projectEpochSummary(epochData));
 	}
 	epochLeaves[epochData.epochId] = epochData.leaves || [];
 
@@ -278,8 +274,11 @@ async function handleCreateEpoch(req, res) {
 
 		body.createdAt = body.createdAt || new Date().toISOString();
 		body.leafCount = body.leaves.length;
+		body.ipfs_cid = body.ipfs_cid || null;
+		body.storageReference = body.storageReference || null;
 		body.storageVerification = body.storageVerification || null;
 		body.onChainAttestation = body.onChainAttestation || null;
+		body.bitcoinAnchor = body.bitcoinAnchor || null;
 
 		// Sign each leaf if we have a key
 		if (MINER_PRIVATE_KEY) {
@@ -321,6 +320,36 @@ async function handleRecordOnChainAttestation(req, res, epochId) {
 			ok: true,
 			epochId,
 			onChainAttestation: updated.onChainAttestation,
+		});
+	} catch (err) {
+		sendJson(res, 400, { error: err.message, epochId });
+	}
+}
+
+async function handleRecordBitcoinAnchor(req, res, epochId) {
+	const ep = epochIndex.find(e => e.epochId === epochId);
+	if (!ep) return sendJson(res, 404, { error: 'Epoch not found' });
+
+	try {
+		const body = await readBody(req);
+		if (!body.anchorId) {
+			return sendJson(res, 400, { error: 'Missing anchorId' });
+		}
+
+		const updated = updateEpoch(epochId, {
+			bitcoinAnchor: {
+				anchorId: body.anchorId,
+				anchoredAt: body.anchoredAt || new Date().toISOString(),
+				storageReference: body.storageReference || null,
+				preference: body.preference || 'op_return',
+				anchor: body.anchor || null,
+			},
+		});
+
+		sendJson(res, 200, {
+			ok: true,
+			epochId,
+			bitcoinAnchor: updated.bitcoinAnchor,
 		});
 	} catch (err) {
 		sendJson(res, 400, { error: err.message, epochId });
@@ -389,6 +418,10 @@ const server = http.createServer((req, res) => {
 		const onChainMatch = p.match(/^\/api\/epochs\/(\d+)\/attestation-onchain$/);
 		if (req.method === 'POST' && onChainMatch) {
 			return handleRecordOnChainAttestation(req, res, Number(onChainMatch[1]));
+		}
+		const bitcoinAnchorMatch = p.match(/^\/api\/epochs\/(\d+)\/bitcoin-anchor$/);
+		if (req.method === 'POST' && bitcoinAnchorMatch) {
+			return handleRecordBitcoinAnchor(req, res, Number(bitcoinAnchorMatch[1]));
 		}
 		// POST /api/epochs — epoch-builder pushes a new epoch
 		if (req.method === 'POST' && p === '/api/epochs') {

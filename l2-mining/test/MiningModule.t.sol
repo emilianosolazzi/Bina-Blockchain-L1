@@ -2,7 +2,6 @@
 pragma solidity ^0.8.28;
 
 import { Test } from "forge-std/Test.sol";
-import { ERC1967Proxy } from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import { TemporalGradientCore } from "../contracts/TemporalGradientCore.sol";
 import { RateLimitModule } from "../contracts/modules/RateLimitModule.sol";
 import { MiningModule } from "../contracts/modules/MiningModule.sol";
@@ -56,12 +55,7 @@ contract MiningModuleTest is Test {
         vm.warp(1_704_067_200 + 1_000);
         vm.roll(100);
 
-        TemporalGradientCore coreImplementation = new TemporalGradientCore();
-        ERC1967Proxy coreProxy = new ERC1967Proxy(
-            address(coreImplementation),
-            abi.encodeCall(TemporalGradientCore.initialize, (address(this), bytes32(uint256(1))))
-        );
-        core = TemporalGradientCore(address(coreProxy));
+        core = new TemporalGradientCore(address(this), bytes32(uint256(1)));
 
         stakeToken = new MockProtocolToken("Stake Token", "STK");
 
@@ -318,7 +312,7 @@ contract MiningModuleTest is Test {
         );
     }
 
-    function testBloomFilterIntegrationRejectsDuplicateOutput() public {
+    function testExactOutputTrackingRejectsDuplicateOutput() public {
         RevealFixture memory fixture = _buildFixture(minerPk, miner, core.outputHistoryAt(0), 0, bytes32("secret-g"), 11);
 
         vm.prank(miner);

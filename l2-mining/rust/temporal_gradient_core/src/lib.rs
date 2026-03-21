@@ -1,3 +1,4 @@
+pub mod bitcoin_dead_utxo_anchor;
 pub mod chain;
 pub mod config;
 pub mod cpu;
@@ -13,7 +14,9 @@ pub mod storage_verification;
 pub mod telemetry;
 pub mod tg_output_filter;
 pub mod tg_relay_transport;
+pub mod utxo_fetcher;
 
+pub use bitcoin_dead_utxo_anchor::{DeadUTXOAnchor, DeadUTXOAnchorDB, DeadUTXOType};
 pub use chain::{wallet_address_from_config, LiveChallenge, LiveMiningClient, LiveSubmission};
 pub use config::{load_or_create_config, default_config_json, MinerConfig};
 pub use cpu::{detect_cpu_safely, get_cpu_temperature, has_cpu_feature, mask_cpu_identity, CpuFeature, CpuIdentity, MaskingConfig};
@@ -38,3 +41,4 @@ pub use tg_relay_transport::{
     relay_connect, relay_connect_pinned, ReliableRelayChannel, RelayChannel, SecureTransport,
     TransportConfig, TransportError, TransportStats, TransportStatsSnapshot,
 };
+pub use utxo_fetcher::{UTXOFetcher, UTXOInfo, UTXOQuery, UTXOSearchQuery};

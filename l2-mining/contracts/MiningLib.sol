@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import { BloomFilterLib } from "./BloomFilterLib.sol";
 import { ECDSA } from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 import { CoreUtilsLib } from "./CoreUtilsLib.sol";
@@ -9,22 +8,16 @@ import { CoreUtilsLib } from "./CoreUtilsLib.sol";
 /**
  * @title MiningLib
  * @notice Library for mining-related functionality in the Temporal Gradient Beacon
- * @dev Combines commit–reveal mining with quantum resistance and adaptive difficulty
+ * @dev Combines commit-reveal validation, iterative entropy mixing, and difficulty checks.
+ *      This library contains no privileged override path.
  */
 library MiningLib {
     using ECDSA for bytes32;
-    using BloomFilterLib for BloomFilterLib.Filter;
     using Math for uint256;
 
     // === Constants ===
-    // Mining constants
-    uint256 private constant BASE_WEIGHT = 1e18;          // Normalized base (18 decimals)
-    uint256 private constant MAX_WEIGHT = 2e18;           // 2x base weight
-    uint256 private constant MIN_WEIGHT = 5e17;          // 0.5x base weight
-    uint256 private constant WEIGHT_PRECISION = 1e18;    // Precision for calculations
-    
     // Hash parameters 
-    uint16 private constant QR_HASH_ITERATIONS = 3;      // Gas optimized iterations
+    uint16 private constant QR_HASH_ITERATIONS = 3;      // Bounded iteration count
     uint8 private constant QR_HASH_ROTATION = 7;         // Prime number rotation
     uint8 private constant MIN_ENTROPY_BITS = 128;      // Minimum security bits
     
@@ -221,16 +214,10 @@ library MiningLib {
     function _validateDifficultyAndUniqueness(
         bytes32 hmacOutput,
         uint256 baseDifficulty,
-        address sender,
-        BloomFilterLib.Filter storage bloomFilter,
-        mapping(bytes32 => uint256) storage usedOutputs,
-        function(address) view returns (uint256) difficultyWeightFn
+        mapping(bytes32 => uint256) storage usedOutputs
     ) internal view {
-        uint256 weight = difficultyWeightFn(sender).max(BASE_WEIGHT / 2).min(MAX_WEIGHT);
-        uint256 effective = Math.mulDiv(baseDifficulty, weight, BASE_WEIGHT);
-
-        if (uint256(hmacOutput) >= effective) revert SolutionTooEasy(SEVERITY_MEDIUM, ERROR_CATEGORY_STATE);
-        if (usedOutputs[hmacOutput] != 0 || bloomFilter.mightContain(hmacOutput))
+        if (uint256(hmacOutput) >= baseDifficulty) revert SolutionTooEasy(SEVERITY_MEDIUM, ERROR_CATEGORY_STATE);
+        if (usedOutputs[hmacOutput] != 0)
             revert OutputAlreadyUsed(SEVERITY_MEDIUM, ERROR_CATEGORY_STATE);
     }
 
@@ -242,10 +229,8 @@ library MiningLib {
     function processMiningReveal(
         RevealParams memory params,
         uint256 baseDifficulty,
-        BloomFilterLib.Filter storage bloomFilter,
         mapping(bytes32 => uint256) storage usedOutputs,
-        function(bytes memory) view returns (bytes32) hashFunction,
-        function(address) view returns (uint256) difficultyWeightFn
+        function(bytes memory) view returns (bytes32) hashFunction
     ) internal view returns (bytes32) {
         if (params.miner == address(0)) revert ZeroAddress(SEVERITY_HIGH, ERROR_CATEGORY_ACCESS);
 
@@ -265,12 +250,12 @@ library MiningLib {
 
         bytes32 hmacOutput = hashFunction(abi.encodePacked(params.signature, entropyHash, params.secretValue));
 
-        _validateDifficultyAndUniqueness(hmacOutput, baseDifficulty, params.miner, bloomFilter, usedOutputs, difficultyWeightFn);
+        _validateDifficultyAndUniqueness(hmacOutput, baseDifficulty, usedOutputs);
 
         return hmacOutput;
     }
 
-    function quantumResistantHash(bytes memory input) internal pure returns (bytes32) {
+    function iterativeEntropyHash(bytes memory input) internal pure returns (bytes32) {
         bytes32 h = keccak256(input);
         for (uint256 i = 0; i < QR_HASH_ITERATIONS; i++) {
             h = keccak256(abi.encodePacked(h ^ bytes32(i + 1)));
@@ -279,12 +264,12 @@ library MiningLib {
         return h;
     }
 
-    /// @notice Calculate mining reward, may emit ExceptionalSolution
+    /// @notice Calculate the rule-based protocol payout for a valid solution.
     function calculateMiningReward(
         bytes32 hmacOutput,
         uint256 baseReward,
-        uint256 bonusThreshold,
-        uint256 bonusMultiplier,
+        uint256 difficultyThresholdFactor,
+        uint256 payoutMultiplier,
         uint256 totalMined,
         uint256 globalCap,
         MiningPool storage pool
@@ -292,10 +277,10 @@ library MiningLib {
         uint256 difficulty = type(uint256).max - uint256(hmacOutput);
         reward = baseReward;
 
-        uint256 bonusTarget = pool.targetDifficulty * bonusThreshold;
-        if (difficulty > bonusTarget) {
-            reward = (baseReward * bonusMultiplier) / 100;
-            emit ExceptionalSolution(msg.sender, difficulty, bonusTarget, bonusMultiplier);
+        uint256 thresholdTarget = pool.targetDifficulty * difficultyThresholdFactor;
+        if (difficulty > thresholdTarget) {
+            reward = (baseReward * payoutMultiplier) / 100;
+            emit ExceptionalSolution(msg.sender, difficulty, thresholdTarget, payoutMultiplier);
         }
 
         if (totalMined + reward > globalCap) {
@@ -334,12 +319,12 @@ library MiningLib {
         return (msgHash.recover(signature) == signer);
     }
 
-    /// @notice Quantum resistant hash function that doesn't use block.timestamp
-    /// @dev Uses multiple iterations and bit rotation for quantum resistance
+    /// @notice Iterative entropy-mixing hash helper that does not depend solely on block.timestamp.
+    /// @dev Uses repeated keccak rounds and bit rotation for bounded on-chain mixing.
     /// @param input The input bytes to hash
     /// @param extraEntropy Additional entropy to mix in (e.g., block number rather than timestamp)
-    /// @return The quantum resistant hash
-    function quantumResistantHashWithEntropy(
+    /// @return The mixed hash output
+    function iterativeEntropyHashWithSalt(
         bytes memory input, 
         bytes32 extraEntropy
     ) internal pure returns (bytes32) {
@@ -347,7 +332,7 @@ library MiningLib {
         
         bytes32 h = keccak256(input);
         for (uint256 i = 0; i < QR_HASH_ITERATIONS; i++) {
-            // Use extraEntropy instead of block.timestamp for more predictable behavior
+            // Use extraEntropy instead of relying on timestamp alone.
             h = keccak256(abi.encodePacked(h ^ bytes32(i + 1), extraEntropy));
             h = bytes32((uint256(h) << QR_HASH_ROTATION) | (uint256(h) >> (256 - QR_HASH_ROTATION)));
         }
@@ -355,7 +340,7 @@ library MiningLib {
     }
 
     /// @notice Automatically select a random number using accumulated entropy
-    /// @dev Uses output history and quantum resistance with rejection sampling to avoid modulo bias
+    /// @dev Uses output history and iterative entropy mixing with rejection sampling to avoid modulo bias
     /// @param outputs Array of entropy outputs from history to use as seed
     /// @param min Minimum value (inclusive)
     /// @param max Maximum value (inclusive)
@@ -402,8 +387,8 @@ library MiningLib {
             block.timestamp // Still include timestamp but not as sole source
         );
         
-        // Apply quantum-resistant hash function with additional entropy
-        bytes32 resistant = quantumResistantHashWithEntropy(combinedEntropy, blockBasedEntropy);
+        // Apply iterative hash mixing with additional entropy.
+        bytes32 resistant = iterativeEntropyHashWithSalt(combinedEntropy, blockBasedEntropy);
         
         // Rejection sampling to avoid modulo bias
         uint256 generated;
@@ -465,7 +450,7 @@ library MiningLib {
         return values;
     }
 
-    // New: Enhanced signature validation with malleability checks
+    // Enhanced signature validation with malleability checks
     function enhancedValidateSignature(
         bytes32 msgHash,
         bytes memory signature,
@@ -491,7 +476,7 @@ library MiningLib {
         return (msgHash.recover(signature) == signer);
     }
 
-    // New: Improved deterministic random number generation without bias
+    // Improved deterministic random number generation without bias
     function improvedAutoPickRandom(
         bytes32[] memory outputs,
         uint256 min,
@@ -552,8 +537,8 @@ library MiningLib {
         return y;
     }
 
-    // New: Optimized quantum resistant hashing with configurable security level
-    function optimizedQuantumResistantHashWithEntropy(
+    // Adaptive iterative hashing with configurable round count
+    function adaptiveIterativeHashWithSalt(
         bytes memory input, 
         bytes32 extraEntropy,
         bool highSecurity
@@ -570,41 +555,7 @@ library MiningLib {
         return h;
     }
 
-    // New: Bloom filter maintenance function
-    function pruneBloomFilter(
-        BloomFilterLib.Filter storage filter,
-        uint256 /* maxEntries */,
-        uint256 targetFillRatioBps
-    ) internal {
-        // This implementation depends on BloomFilterLib capabilities
-        // For most bloom filters, you'd need to create a new one and migrate
-        // Rather than actually remove items (which isn't possible in bloom filters)
-        
-        // Check if filter needs scaling down
-        (uint256 size, , uint256 insertCount, uint256 fillRatioBps, ) = 
-            BloomFilterLib.getFilterMetrics(filter);
-            
-        if (fillRatioBps > targetFillRatioBps) {
-            // Create a new filter with parameters optimized for current load
-            uint256 newSize = size;
-            // Find optimal size that's a power of 2
-            while (newSize > 128 && fillRatioBps > targetFillRatioBps) {
-                newSize = newSize * 2;
-                fillRatioBps = fillRatioBps / 2; // Approximation
-            }
-            
-            // Recalculate optimal number of hash functions
-            uint256 optimalHashes = BloomFilterLib.calculateOptimalHashCount(
-                newSize * 256, insertCount, targetFillRatioBps
-            );
-            
-            // Reset filter with new parameters - implementation depends on BloomFilterLib
-            bytes32 newSalt = keccak256(abi.encodePacked(block.timestamp, block.prevrandao, address(this)));
-            BloomFilterLib.resetFilter(filter, newSize, optimalHashes, uint256(newSalt));
-        }
-    }
-
-    // Modified: Replace autoPickRandom with the improved version in autoPickMultipleRandom
+    // Use the improved random selection path in batched generation.
     function autoPickMultipleRandom(
         bytes32[] memory outputs,
         uint256 min,
@@ -626,101 +577,11 @@ library MiningLib {
         return values;
     }
 
-    // === Remaining Issues and Recommendations ===
     /**
-     * @dev After reviewing the implementation, here are recommended improvements:
-     *
-     * 1. Random Number Generation:
-     *    - The rejection sampling implementation could be more gas efficient
-     *    - Replace the while(true) loop with a deterministic approach using multiple hash rounds:
-     *
-     *    function improvedAutoPickRandom(
-     *        bytes32[] memory outputs,
-     *        uint256 min,
-     *        uint256 max,
-     *        uint256 nonce,
-     *        mapping(address => mapping(uint256 => bool)) storage usedNonces
-     *    ) internal view returns (uint256 randomValue) {
-     *        // Input validation
-     *        if (min > max) revert InvalidRange(SEVERITY_HIGH, ERROR_CATEGORY_INPUT, min, max);
-     *        if (outputs.length == 0) revert MalformedInput(SEVERITY_HIGH, ERROR_CATEGORY_INPUT, "Empty outputs");
-     *        if (usedNonces[msg.sender][nonce]) revert NonceAlreadyUsed(SEVERITY_HIGH, ERROR_CATEGORY_INPUT, nonce);
-     *
-     *        uint256 range = max - min + 1;
-     *        uint256 bitsNeeded = log2Ceiling(range);
-     *        uint256 iterations = (bitsNeeded + 255) / 256; // Round up
-     *        
-     *        bytes32 seed = keccak256(abi.encodePacked(outputs, block.prevrandao, block.number, msg.sender, nonce));
-     *        
-     *        uint256 result = 0;
-     *        for (uint256 i = 0; i < iterations; i++) {
-     *            seed = keccak256(abi.encodePacked(seed, i));
-     *            result = (result << min(i * 256, 255)) | uint256(seed);
-     *        }
-     *        
-     *        randomValue = min + (result % range);
-     *        return randomValue;
-     *    }
-     *
-     * 2. Entropy Sources:
-     *    - Still relies on potentially manipulable block.prevrandao
-     *    - Consider incorporating historical block hashes (previous 256 blocks) or oracle-based entropy
-     *
-     * 3. Signature Validation:
-     *    - Add explicit checks for signature malleability:
-     *
-     *    function enhancedValidateSignature(
-     *        bytes32 msgHash,
-     *        bytes memory signature,
-     *        address signer
-     *    ) internal pure returns (bool valid) {
-     *        if (signature.length != 65) revert InvalidSignatureLength();
-     *        bytes32 r;
-     *        bytes32 s;
-     *        uint8 v;
-     *        assembly {
-     *            r := mload(add(signature, 32))
-     *            s := mload(add(signature, 64))
-     *            v := byte(0, mload(add(signature, 96)))
-     *        }
-     *        if (uint256(s) > 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0) {
-     *            revert HighSSignature();
-     *        }
-     *        return (msgHash.recover(signature) == signer);
-     *    }
-     *
-     * 4. Gas Optimization:
-     *    - The quantum resistant hash function performs multiple keccak256 operations
-     *    - Consider adding a security level parameter:
-     *
-     *    function optimizedQuantumResistantHashWithEntropy(
-     *        bytes memory input, 
-     *        bytes32 extraEntropy,
-     *        bool highSecurity
-     *    ) internal pure returns (bytes32) {
-     *        uint256 iterations = highSecurity ? QR_HASH_ITERATIONS : 1;
-     *        // Continue with optimized implementation...
-     *    }
-     *
-     * 5. Timestamp Validation:
-     *    - Make hardcoded timestamp (1704067200) configurable via initialization parameter
-     *
-     * 6. Error Handling Consistency:
-     *    - Update remaining basic errors to use the enhanced categorization system:
-     *      error InvalidCommitment(uint8 severity, uint8 category);
-     *      error InvalidSignature(uint8 severity, uint8 category);
-     *
-     * 7. Front-running Protection:
-     *    - Add small delay before reward distribution to mitigate potential front-running
-     *
-     * 8. Replay Protection:
-     *    - Include chainId and contract address in signed messages:
-     *      bytes32 entropyHash = keccak256(abi.encodePacked(
-     *          previousOutput, temporalSeed, nonce, sender, timeBasedEntropy,
-     *          secretValue, block.chainid, address(this)));
-     *
-     * 9. Denial of Service:
-     *    - Implement bloom filter pruning or sliding window mechanism
-     *    - Consider automatic scaling based on network load
+     * @dev Implementation notes:
+     * - entropy helpers are bounded and deterministic within normal EVM constraints;
+     * - payout calculations depend only on caller-supplied protocol inputs;
+     * - this library does not introduce admin-only branches or privileged overrides; and
+     * - duplicate output checks should remain exact and auditable.
      */
 }

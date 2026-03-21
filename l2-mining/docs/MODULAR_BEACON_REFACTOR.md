@@ -46,7 +46,6 @@ TemporalGradientCore
 MiningModule
   ├── commitments
   ├── pools
-  ├── bloom filter
   ├── uniqueness tracking
   └── mining reveal path
 
@@ -60,7 +59,7 @@ TokenomicsModule
   ├── epochs
   ├── halving schedule
   ├── reward minting
-  ├── slash/burn hooks
+  ├── reputation/accounting hooks
   └── mining economics views
 
 RateLimitModule

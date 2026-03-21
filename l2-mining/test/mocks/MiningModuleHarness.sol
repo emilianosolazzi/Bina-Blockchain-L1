@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import { BloomFilterLib } from "../../contracts/BloomFilterLib.sol";
 import { MiningLib } from "../../contracts/MiningLib.sol";
 import { MiningModule } from "../../contracts/modules/MiningModule.sol";
 
@@ -51,17 +50,14 @@ contract MiningModuleHarness is MiningModule {
                 poolId: poolId
             }),
             miningPools[poolId].targetDifficulty,
-            bloomFilter,
             usedOutputs,
-            _deterministicHash,
-            _difficultyWeight
+            _deterministicHash
         );
 
         commitment.revealedValue = hmacOutput;
         commitment.flags.revealed = true;
         lastMinerBlock[msg.sender] = uint64(block.number);
         usedOutputs[hmacOutput] = block.number;
-        BloomFilterLib.updateFilter(bloomFilter, hmacOutput);
 
         MiningLib.MiningPool storage pool = miningPools[poolId];
         uint256 reward = _tokenomics().onBlockMined(

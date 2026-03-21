@@ -16,7 +16,6 @@ This folder isolates the files needed for the Temporal Gradient L2 mining path.
   - GovernanceLib.sol
   - TokenomicsLib.sol
   - RateTypes.sol
-  - BloomFilterLib.sol
   - CoreUtilsLib.sol
   - StorageLib.sol
   - RandomnessLib.sol
@@ -27,9 +26,10 @@ This folder isolates the files needed for the Temporal Gradient L2 mining path.
   - temporal_gradient_core/
   - memory.rs
   - cpu.rs
-  - nist_pqc.rs
   - Cargo.toml
   - package/
+- archive/
+  - deprecated-rust/
 - js/
   - RateMonitor.js
   - RateAnalyzer.ts
@@ -62,10 +62,11 @@ Excluded for now:
 1. This is an isolated mining subset created for focused work.
 2. The original project files were left in place for safety.
 3. The Rust miner and Solidity beacon are now aligned on the 8-byte temporal seed format.
-4. Difficulty weighting in the beacon is still placeholder logic and should be finalized.
+4. Difficulty checks in the beacon now use the fixed pool target directly, with no per-miner weighting hook.
 5. The packaged Rust runtime now lives in `rust/temporal_gradient_core` + `rust/package`.
-6. The old `rust/Mining.rs` file is no longer used and has been removed.
+6. The old `rust/Mining.rs` and `rust/nist_pqc.rs` files are archived under `archive/deprecated-rust/`.
 7. For the active production/runtime file map, see [PRODUCTION_FILES.md](PRODUCTION_FILES.md).
+8. Bloom-filter based uniqueness tracking has been removed from the active on-chain path; mining now relies on exact `usedOutputs` checks.
 
 ## Integration tests
 
@@ -73,9 +74,7 @@ Foundry-based mining integration tests now live in:
 
 - [test/MiningModule.t.sol](test/MiningModule.t.sol)
 - [test/RandomnessModule.t.sol](test/RandomnessModule.t.sol)
-- [test/TemporalGradientL2BeaconMining.t.sol](test/TemporalGradientL2BeaconMining.t.sol)
 - [test/TokenomicsModule.t.sol](test/TokenomicsModule.t.sol)
-- [test/mocks/TemporalGradientL2BeaconMiningHarness.sol](test/mocks/TemporalGradientL2BeaconMiningHarness.sol)
 - [test/mocks/MiningModuleHarness.sol](test/mocks/MiningModuleHarness.sol)
 - [test/mocks/RandomnessModuleHarness.sol](test/mocks/RandomnessModuleHarness.sol)
 - [test/mocks/MockProtocolToken.sol](test/mocks/MockProtocolToken.sol)

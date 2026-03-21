@@ -411,6 +411,24 @@ async fn run_live_runtime(
     .await?;
 
     while !shutdown.is_cancelled() {
+        // ── Pre-check: wait out any stale on-chain commitment before searching ──
+        match live_client.has_pending_commitment().await {
+            Ok(true) => {
+                tracing::info!("Stale on-chain commitment detected — waiting for clearance before searching");
+                if let Err(err) = live_client.wait_for_commitment_clearance_public(&phase_tracker).await {
+                    tracing::warn!("Clearance wait failed: {err:#}");
+                    time::sleep(Duration::from_secs(5)).await;
+                    continue;
+                }
+                tracing::info!("Commitment cleared — resuming mining");
+            }
+            Ok(false) => {} // no pending commitment, proceed normally
+            Err(err) => {
+                tracing::warn!("Failed to check commitment status: {err:#}");
+                // Don't block — proceed and let submit_solution handle it
+            }
+        }
+
         phase_tracker.set(MiningPhase::Searching, None);
 
         let challenge = match live_client.current_challenge().await {

@@ -24,12 +24,7 @@ contract RandomnessModuleTest is Test {
         vm.warp(1_704_067_200 + 1_000);
         vm.roll(100);
 
-        TemporalGradientCore coreImplementation = new TemporalGradientCore();
-        ERC1967Proxy coreProxy = new ERC1967Proxy(
-            address(coreImplementation),
-            abi.encodeCall(TemporalGradientCore.initialize, (address(this), bytes32(uint256(1))))
-        );
-        core = TemporalGradientCore(address(coreProxy));
+        core = new TemporalGradientCore(address(this), bytes32(uint256(1)));
 
         token = new MockProtocolToken("Temporal Gradient Token", "TGBT");
 

@@ -1,6 +1,6 @@
 use crate::pqc::{apply_pqc_enhancement, PqcMode};
 use blake3;
-use k256::ecdsa::{signature::Signer as _, Signature, SigningKey};
+use k256::ecdsa::SigningKey;
 use rand::{rngs::OsRng, RngCore};
 use sha2::Digest;
 use sha3::Keccak256;
@@ -43,7 +43,7 @@ pub fn contract_hash_message(message: &[u8]) -> [u8; 32] {
 
 pub fn miner_address_from_signing_key(key: &SigningKey) -> [u8; 20] {
     let point = key.verifying_key().to_encoded_point(false);
-    let hash = Keccak256::digest(point.as_bytes());
+    let hash = Keccak256::digest(&point.as_bytes()[1..]);
     let mut out = [0u8; 20];
     out.copy_from_slice(&hash[12..32]);
     out
@@ -94,16 +94,31 @@ fn rotate_256_left(input: [u8; 32], bits: u32) -> [u8; 32] {
 }
 
 pub fn quantum_resistant_hash(
-    signature: &Signature,
+    signature: &[u8],
     entropy_hash: &[u8; 32],
     secret: &[u8; 32],
     pqc_mode: PqcMode,
 ) -> [u8; 32] {
-    let packed = [signature.to_der().as_bytes(), entropy_hash, secret].concat();
+    let packed = [signature, entropy_hash, secret].concat();
     let qr = quantum_resistant_hash_inner(&packed);
-    let pqc = apply_pqc_enhancement(&packed, pqc_mode);
-    let hybrid = [qr.as_slice(), pqc.as_slice()].concat();
-    contract_hash_message(&hybrid)
+    match pqc_mode {
+        PqcMode::ClassicalCompatible => qr,
+        PqcMode::Enhanced => {
+            let pqc = apply_pqc_enhancement(&packed, pqc_mode);
+            let hybrid = [qr.as_slice(), pqc.as_slice()].concat();
+            contract_hash_message(&hybrid)
+        }
+    }
+}
+
+fn sign_recoverable_hash(signing_key: &SigningKey, digest: &[u8; 32]) -> Vec<u8> {
+    let (signature, recovery_id) = signing_key
+        .sign_prehash_recoverable(digest)
+        .expect("32-byte digest must be signable");
+    let mut out = Vec::with_capacity(65);
+    out.extend_from_slice(&signature.to_bytes());
+    out.push(27 + recovery_id.to_byte());
+    out
 }
 
 pub fn build_commitment_payload(
@@ -114,7 +129,7 @@ pub fn build_commitment_payload(
     pqc_mode: PqcMode,
 ) -> CommitmentPayload {
     let entropy_hash = create_entropy_hash(material);
-    let signature: Signature = signing_key.sign(&entropy_hash);
+    let signature = sign_recoverable_hash(signing_key, &entropy_hash);
     let solution_hash = quantum_resistant_hash(&signature, &entropy_hash, &material.secret_value, pqc_mode);
 
     let commit_hash = contract_hash_message(
@@ -122,7 +137,7 @@ pub fn build_commitment_payload(
             material.previous_output.as_slice(),
             material.temporal_seed.as_slice(),
             &material.nonce.to_be_bytes(),
-            signature.to_der().as_bytes(),
+            signature.as_slice(),
             material.secret_value.as_slice(),
             material.miner_address.as_slice(),
         ]
@@ -137,7 +152,7 @@ pub fn build_commitment_payload(
             deadline,
         },
         entropy_hash,
-        signature: signature.to_der().as_bytes().to_vec(),
+        signature,
         solution_hash,
         secret_value: material.secret_value,
         temporal_seed: material.temporal_seed,
@@ -171,10 +186,72 @@ pub fn has_leading_zero_bits(hash: &[u8; 32], zero_bits: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ethers::{
+        signers::{LocalWallet, Signer},
+        types::{H256, Signature as EtherSignature},
+    };
 
     #[test]
     fn detects_leading_zero_bits() {
         let hash = [0u8; 32];
         assert!(has_leading_zero_bits(&hash, 12));
+    }
+
+    #[test]
+    fn miner_address_matches_wallet_address() {
+        let signing_key = SigningKey::random(&mut OsRng);
+        let wallet: LocalWallet = signing_key.clone().into();
+
+        assert_eq!(miner_address_from_signing_key(&signing_key), wallet.address().0);
+    }
+
+    #[test]
+    fn classical_payload_matches_contract_style_signature_and_hashing() {
+        let signing_key = SigningKey::random(&mut OsRng);
+        let wallet: LocalWallet = signing_key.clone().into();
+        let material = MiningMaterial {
+            previous_output: [0x11; 32],
+            temporal_seed: [0, 1, 2, 3, 4, 5, 6, 7],
+            nonce: 42,
+            miner_address: wallet.address().0,
+            time_based_entropy: [0x22; 32],
+            secret_value: [0x33; 32],
+        };
+
+        let payload = build_commitment_payload(
+            &signing_key,
+            &material,
+            0,
+            300,
+            PqcMode::ClassicalCompatible,
+        );
+
+        assert_eq!(payload.signature.len(), 65);
+        let recovered = EtherSignature::try_from(payload.signature.as_slice())
+            .unwrap()
+            .recover(H256::from(payload.entropy_hash))
+            .unwrap();
+        assert_eq!(recovered, wallet.address());
+
+        let expected_commit = contract_hash_message(
+            &[
+                material.previous_output.as_slice(),
+                material.temporal_seed.as_slice(),
+                &material.nonce.to_be_bytes(),
+                payload.signature.as_slice(),
+                material.secret_value.as_slice(),
+                material.miner_address.as_slice(),
+            ]
+            .concat(),
+        );
+        assert_eq!(payload.commitment.commit_hash, expected_commit);
+
+        let packed = [
+            payload.signature.as_slice(),
+            payload.entropy_hash.as_slice(),
+            material.secret_value.as_slice(),
+        ]
+        .concat();
+        assert_eq!(payload.solution_hash, quantum_resistant_hash_inner(&packed));
     }
 }

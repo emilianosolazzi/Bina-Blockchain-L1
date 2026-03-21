@@ -40,16 +40,4 @@ contract MockProtocolToken {
         balanceOf[to] += amount;
         return true;
     }
-
-    function slash(address account, uint256 amount, bytes32) external {
-        uint256 actual = amount > balanceOf[account] ? balanceOf[account] : amount;
-        balanceOf[account] -= actual;
-        totalSupply -= actual;
-    }
-
-    function burnFromBeacon(address account, uint256 amount, bytes32) external {
-        uint256 actual = amount > balanceOf[account] ? balanceOf[account] : amount;
-        balanceOf[account] -= actual;
-        totalSupply -= actual;
-    }
 }

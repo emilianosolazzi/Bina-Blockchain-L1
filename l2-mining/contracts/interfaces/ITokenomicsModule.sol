@@ -10,5 +10,4 @@ interface ITokenomicsModule {
         uint256 poolTotalMined,
         uint256 poolEmissionBucket
     ) external returns (uint256 reward);
-    function onManualSlash(address account, uint256 amount, bytes32 reason) external;
 }

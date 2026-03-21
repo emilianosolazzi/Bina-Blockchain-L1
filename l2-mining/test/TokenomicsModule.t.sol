@@ -19,12 +19,7 @@ contract TokenomicsModuleTest is Test {
     address internal outsider = vm.addr(0xCAFE);
 
     function setUp() public {
-        TemporalGradientCore coreImplementation = new TemporalGradientCore();
-        ERC1967Proxy coreProxy = new ERC1967Proxy(
-            address(coreImplementation),
-            abi.encodeCall(TemporalGradientCore.initialize, (address(this), bytes32(uint256(1))))
-        );
-        core = TemporalGradientCore(address(coreProxy));
+        core = new TemporalGradientCore(address(this), bytes32(uint256(1)));
 
         token = new MockProtocolToken("Temporal Gradient Token", "TGBT");
 
@@ -37,8 +32,6 @@ contract TokenomicsModuleTest is Test {
 
         core.setModule(TOKENOMICS_MODULE, address(tokenomics));
         core.setModule(MINING_MODULE, address(this));
-        core.grantRole(tokenomics.SLASHER_ROLE(), address(this));
-        core.grantRole(tokenomics.BURNER_ROLE(), address(this));
     }
 
     function testOnBlockMinedMintsBaseReward() public {
@@ -135,63 +128,127 @@ contract TokenomicsModuleTest is Test {
         assertEq(nextHalvingBlock, 20_001);
     }
 
-    function testManualSlashDelegatesToTokenSlash() public {
-        token.mint(miner, 25 ether);
+    function testMiningEconomicsPreviewTracksL2BlockScheduleBeforeNextMine() public {
+        vm.roll(block.number + 10_000);
 
-        vm.prank(address(core));
-        tokenomics.onManualSlash(miner, 10 ether, keccak256("MANUAL_TEST"));
+        (
+            uint256 currentReward,
+            uint256 currentEpoch,
+            uint256 blocksPerEpoch,
+            uint256 halvingInterval,
+            uint256 nextHalvingBlock,
+            uint256 currentBonusThreshold,
+            uint256 currentBonusMultiplier,
+            uint256 minedSoFar,
+            uint256 remainingAllocation
+        ) = tokenomics.getMiningEconomics();
 
-        assertEq(token.balanceOf(miner), 15 ether);
+        assertEq(currentReward, 6.5 ether);
+        assertEq(currentEpoch, 10);
+        assertEq(blocksPerEpoch, 1_000);
+        assertEq(halvingInterval, 10_000);
+        assertEq(nextHalvingBlock, 20_001);
+        assertEq(currentBonusThreshold, 2);
+        assertEq(currentBonusMultiplier, 125);
+        assertEq(minedSoFar, 0);
+        assertEq(remainingAllocation, tokenomics.MINING_ALLOCATION());
     }
 
-    function testPenaltyHooksSlashAndBurn() public {
+    function testEpochAnchoringDoesNotDriftWhenUpdatesOccurLate() public {
+        vm.roll(block.number + 1_550);
+
+        tokenomics.onBlockMined(
+            miner,
+            bytes32(type(uint256).max - 1_500),
+            0,
+            1_000,
+            0,
+            tokenomics.MINING_ALLOCATION()
+        );
+
+        uint256 currentEpoch;
+        uint256 nextHalvingBlock;
+        {
+            (
+                ,
+                currentEpoch,
+                ,
+                ,
+                nextHalvingBlock,
+                ,
+                ,
+                ,
+                
+            ) = tokenomics.getMiningEconomics();
+        }
+
+        assertEq(currentEpoch, 1);
+        assertEq(nextHalvingBlock, 10_001);
+
+        vm.roll(2_001);
+
+        uint256 previewReward;
+        uint256 previewEpoch;
+        {
+            (
+                previewReward,
+                previewEpoch,
+                ,
+                ,
+                ,
+                ,
+                ,
+                ,
+                
+            ) = tokenomics.getMiningEconomics();
+        }
+
+        assertEq(previewReward, 10 ether);
+        assertEq(previewEpoch, 2);
+    }
+
+    function testLegacyEmissionControlSelectorsAreUnavailable() public {
+        (bool setTokenOk, ) = address(tokenomics).call(abi.encodeWithSignature("setTGBTToken(address)", address(token)));
+        (bool setBonusOk, ) = address(tokenomics).call(abi.encodeWithSignature("setBonusParameters(uint16,uint256)", 150, 2));
+        (bool setEpochOk, ) = address(tokenomics).call(abi.encodeWithSignature("setEpochBlocks(uint256)", 2_000));
+        (bool setHalvingOk, ) = address(tokenomics).call(abi.encodeWithSignature("setHalvingInterval(uint256)", 20_000));
+
+        assertFalse(setTokenOk);
+        assertFalse(setBonusOk);
+        assertFalse(setEpochOk);
+        assertFalse(setHalvingOk);
+    }
+
+    function testRecordMissedContributionTracksReputationOnly() public {
         token.mint(miner, 100 ether);
 
-        uint256 slashed = tokenomics.autoSlash(miner, tokenomics.VIOLATION_TYPE_RULE(), 50);
-        assertEq(slashed, 50 ether);
-        assertEq(token.balanceOf(miner), 50 ether);
-
         tokenomics.recordMissedContribution(miner);
         tokenomics.recordMissedContribution(miner);
         tokenomics.recordMissedContribution(miner);
-
-        assertEq(token.balanceOf(miner), 35 ether);
-
-        (uint256 lastActivity, uint256 missedContributionCount) = tokenomics.getAccountPenaltyState(miner);
-        assertEq(lastActivity, block.number);
-        assertEq(missedContributionCount, 0);
-    }
-
-    function testInactivityBurnAppliesAfterThirtyDays() public {
-        bytes32 output = bytes32(type(uint256).max - 1_500);
-        tokenomics.onBlockMined(miner, output, 0, 1_000, 0, tokenomics.MINING_ALLOCATION());
-        token.mint(miner, 90 ether);
-
-        vm.roll(block.number + 180_000);
-        tokenomics.checkInactivity(miner);
-
-        assertEq(token.balanceOf(miner), 99 ether);
-
-        (uint256 lastActivity, ) = tokenomics.getAccountPenaltyState(miner);
-        assertEq(lastActivity, block.number);
-    }
-
-    function testCheckInactivityRequiresBurnerRole() public {
-        core.revokeRole(tokenomics.BURNER_ROLE(), address(this));
-
-        vm.expectRevert(abi.encodeWithSelector(TokenomicsModule.UnauthorizedRole.selector, tokenomics.BURNER_ROLE(), address(this)));
-        tokenomics.checkInactivity(miner);
-    }
-
-    function testCheckInactivitySkipsUntrackedAccounts() public {
-        token.mint(miner, 100 ether);
-
-        vm.roll(block.number + 180_000);
-        tokenomics.checkInactivity(miner);
 
         assertEq(token.balanceOf(miner), 100 ether);
 
-        (uint256 lastActivity, ) = tokenomics.getAccountPenaltyState(miner);
+        (uint256 lastActivity, uint256 missedContributionCount) = tokenomics.getAccountPenaltyState(miner);
         assertEq(lastActivity, 0);
+        assertEq(missedContributionCount, 3);
+    }
+
+    function testMinedActivityAndMissedContributionsCanCoexist() public {
+        bytes32 output = bytes32(type(uint256).max - 1_500);
+        tokenomics.onBlockMined(miner, output, 0, 1_000, 0, tokenomics.MINING_ALLOCATION());
+        tokenomics.recordMissedContribution(miner);
+
+        (uint256 lastActivity, ) = tokenomics.getAccountPenaltyState(miner);
+        assertEq(lastActivity, block.number);
+    }
+
+    function testResetMissedContributionsClearsReputationCounter() public {
+        tokenomics.recordMissedContribution(miner);
+        tokenomics.recordMissedContribution(miner);
+
+        tokenomics.resetMissedContributions(miner);
+
+        (, uint256 missedContributionCount) = tokenomics.getAccountPenaltyState(miner);
+        assertEq(missedContributionCount, 0);
     }
 }

@@ -5,7 +5,6 @@ import { ECDSA } from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import { EIP712 } from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { ModuleBase } from "./ModuleBase.sol";
-import { BloomFilterLib } from "../BloomFilterLib.sol";
 import { CoreUtilsLib } from "../CoreUtilsLib.sol";
 import { MiningLib } from "../MiningLib.sol";
 import { IRateLimitModule } from "../interfaces/IRateLimitModule.sol";
@@ -13,7 +12,6 @@ import { ITokenomicsModule } from "../interfaces/ITokenomicsModule.sol";
 
 contract MiningModule is ModuleBase, EIP712("TemporalGradientBeacon", "1") {
     using ECDSA for bytes32;
-    using BloomFilterLib for BloomFilterLib.Filter;
 
     bytes32 public constant MODULE_RATE_LIMIT = keccak256("RATE_LIMIT_MODULE");
     bytes32 public constant MODULE_TOKENOMICS = keccak256("TOKENOMICS_MODULE");
@@ -21,7 +19,6 @@ contract MiningModule is ModuleBase, EIP712("TemporalGradientBeacon", "1") {
     uint256 public constant MIN_DIFFICULTY = 1000;
     uint256 public constant MAX_DIFFICULTY = 2**245;
     uint256 public constant REQUIRED_TSTAKE_AMOUNT = 100 ether;
-    uint256 private constant DEFAULT_DIFFICULTY_WEIGHT = 1e18;
     uint256 private constant DEFAULT_SUBMISSION_COST = 1;
     uint256 private constant DEFAULT_REVEAL_COST = 2;
     uint256 private constant MAX_BATCH = 20;
@@ -40,7 +37,6 @@ contract MiningModule is ModuleBase, EIP712("TemporalGradientBeacon", "1") {
     mapping(address => MiningLib.Commitment) public minerCommitments;
     mapping(uint8 => MiningLib.MiningPool) public miningPools;
     mapping(bytes32 => uint256) public usedOutputs;
-    BloomFilterLib.Filter public bloomFilter;
 
     event CommitmentSubmitted(address indexed miner, bytes32 commitHash, uint8 poolId);
     event CommitmentRevealed(address indexed miner, bytes32 revealedValue, uint8 poolId);
@@ -76,7 +72,6 @@ contract MiningModule is ModuleBase, EIP712("TemporalGradientBeacon", "1") {
             minerCount: 0
         });
 
-        BloomFilterLib.createFilter(bloomFilter, 256, 4, block.timestamp);
         emit MiningPoolCreated(0, initialDifficulty, initialEmission);
     }
 
@@ -169,17 +164,14 @@ contract MiningModule is ModuleBase, EIP712("TemporalGradientBeacon", "1") {
                 poolId: poolId
             }),
             miningPools[poolId].targetDifficulty,
-            bloomFilter,
             usedOutputs,
-            MiningLib.quantumResistantHash,
-            _difficultyWeight
+            MiningLib.iterativeEntropyHash
         );
 
         commitment.revealedValue = hmacOutput;
         commitment.flags.revealed = true;
         lastMinerBlock[msg.sender] = uint64(block.number);
         usedOutputs[hmacOutput] = block.number;
-        BloomFilterLib.updateFilter(bloomFilter, hmacOutput);
 
         MiningLib.MiningPool storage pool = miningPools[poolId];
         uint256 reward = _tokenomics().onBlockMined(
@@ -309,10 +301,6 @@ contract MiningModule is ModuleBase, EIP712("TemporalGradientBeacon", "1") {
             }
         }
         return false;
-    }
-
-    function _difficultyWeight(address) internal pure returns (uint256) {
-        return DEFAULT_DIFFICULTY_WEIGHT;
     }
 
     function _rateLimit() internal view returns (IRateLimitModule) {

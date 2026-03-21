@@ -18,11 +18,14 @@
  *   RANDOMNESS_API     Randomness API base URL
  *   MINER_PRIVATE_KEY  hex private key (no 0x prefix ok)
  *   POOL_ID            mining pool id (default: 0)
+ *   PINATA_JWT         optional Pinata JWT for pinJSONToIPFS
+ *   WEB3_STORAGE_TOKEN optional web3.storage bearer token fallback
  */
 
 const fs = require('fs');
 const path = require('path');
 const { ethers } = require('ethers');
+const { anchorEpochMerkleRoot } = require('./bitcoin-anchor');
 
 // ── Load .env file ──────────────────────────────────────
 const envFile = path.resolve(__dirname, '.env');
@@ -44,6 +47,8 @@ const RANDOMNESS_API = process.env.RANDOMNESS_API || 'http://127.0.0.1:4271';
 const POOL_ID = Number(process.env.POOL_ID || 0);
 const MINER_PRIVATE_KEY = process.env.MINER_PRIVATE_KEY;
 const EPOCH_STATE_FILE = path.resolve(__dirname, 'epoch-state.json');
+const PINATA_JWT = process.env.PINATA_JWT || '';
+const WEB3_STORAGE_TOKEN = process.env.WEB3_STORAGE_TOKEN || process.env.WEB3_STORAGE_API_TOKEN || '';
 
 // ── ABI fragment for BatchMiningModule ──────────────────
 const BATCH_ABI = [
@@ -299,6 +304,109 @@ async function persistOnChainAttestationToApi(epochId, attestationHash, receipt,
 	return json;
 }
 
+async function uploadEpochToIpfs(epochRecord) {
+	const payload = JSON.stringify(epochRecord, null, 2);
+	const filename = `epoch-${epochRecord.epochId}.json`;
+
+	if (PINATA_JWT) {
+		const resp = await fetch('https://api.pinata.cloud/pinning/pinJSONToIPFS', {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				'Authorization': `Bearer ${PINATA_JWT}`,
+			},
+			body: JSON.stringify({
+				pinataMetadata: { name: filename },
+				pinataContent: epochRecord,
+			}),
+		});
+		const json = await resp.json();
+		if (!resp.ok) {
+			throw new Error(json.error?.details || json.error || json.message || 'Pinata upload failed');
+		}
+		return json.IpfsHash || json.cid || null;
+	}
+
+	if (WEB3_STORAGE_TOKEN) {
+		const resp = await fetch('https://api.web3.storage/upload', {
+			method: 'POST',
+			headers: {
+				'Authorization': `Bearer ${WEB3_STORAGE_TOKEN}`,
+				'Content-Type': 'application/json',
+				'X-NAME': filename,
+			},
+			body: payload,
+		});
+		const json = await resp.json();
+		if (!resp.ok) {
+			throw new Error(json.message || json.error || 'web3.storage upload failed');
+		}
+		return json.cid || json.value?.cid || null;
+	}
+
+	return null;
+}
+
+async function persistBitcoinAnchorToApi(epochId, anchorReport) {
+	const payload = {
+		anchorId: anchorReport.anchor_id,
+		anchoredAt: new Date().toISOString(),
+		storageReference: anchorReport.storage_reference || null,
+		preference: anchorReport.preference || 'op_return',
+		anchor: anchorReport.anchor || null,
+	};
+
+	const resp = await fetch(`${RANDOMNESS_API}/api/epochs/${epochId}/bitcoin-anchor`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(payload),
+	});
+
+	const json = await resp.json();
+	if (!resp.ok) {
+		throw new Error(json.error || `failed to persist Bitcoin anchor for epoch ${epochId}`);
+	}
+
+	return json;
+}
+
+function normalizeStorageReference(ref) {
+	if (!ref || typeof ref !== 'string') return null;
+	const trimmed = ref.trim();
+	if (!trimmed) return null;
+	if (trimmed.startsWith('ipfs://')) return trimmed;
+	if (/^(Qm[1-9A-HJ-NP-Za-km-z]{44}|bafy[1-9A-HJ-NP-Za-km-z]+)/.test(trimmed)) {
+		return `ipfs://${trimmed}`;
+	}
+	return trimmed;
+}
+
+function resolveEpochStorageReference(epochDetail, verification) {
+	const explicit = normalizeStorageReference(
+		epochDetail?.storageReference || epochDetail?.ipfsCid || epochDetail?.ipfs_cid || epochDetail?.cid
+	);
+	if (explicit) return explicit;
+
+	const attestation = verification?.report?.settlement_gate?.attestation;
+	const providerId = String(attestation?.provider_id || verification?.report?.provider || '').toLowerCase();
+	const fileId = normalizeStorageReference(attestation?.file_id || verification?.report?.verification_result?.file_id || null);
+	if (fileId && (providerId.includes('ipfs') || fileId.startsWith('ipfs://'))) {
+		return fileId.startsWith('ipfs://') ? fileId : `ipfs://${fileId}`;
+	}
+
+	return fileId;
+}
+
+function getEpochRecord(epochId) {
+	const epochFile = path.resolve(__dirname, 'epoch-store', `epoch-${epochId}.json`);
+	if (!fs.existsSync(epochFile)) return null;
+	try {
+		return JSON.parse(fs.readFileSync(epochFile, 'utf8'));
+	} catch {
+		return null;
+	}
+}
+
 // ── Main loop ───────────────────────────────────────────
 
 async function processEpoch() {
@@ -326,6 +434,9 @@ async function processEpoch() {
 			poolId: POOL_ID,
 			finalized: false,
 			createdAt: new Date().toISOString(),
+			ipfs_cid: null,
+			storageReference: null,
+			bitcoinAnchor: null,
 			leaves: batch.map((leaf, i) => ({
 				index:      i,
 				outputHash: leaf.outputHash,
@@ -334,6 +445,17 @@ async function processEpoch() {
 				nonce:      leaf.nonce,
 			})),
 		};
+
+		try {
+			const cid = await uploadEpochToIpfs(epochData);
+			if (cid) {
+				epochData.ipfs_cid = cid;
+				epochData.storageReference = `ipfs://${cid}`;
+				console.log(`[EpochBuilder] Pinned epoch ${epochId} to IPFS (${cid})`);
+			}
+		} catch (err) {
+			console.error(`[EpochBuilder] IPFS pin failed for epoch ${epochId}:`, err.message);
+		}
 
 		// Push to Randomness API
 		await pushEpochToApi(epochData);
@@ -380,7 +502,8 @@ async function finalizePendingEpochs() {
 		try {
 			const info = await contract.getEpochInfo(epId);
 			if (info.merkleRoot === ethers.constants.HashZero) continue;
-			if (info.finalized && info.storageAttested) continue;
+			const epochRecord = getEpochRecord(epId);
+			if (info.finalized && info.storageAttested && epochRecord?.bitcoinAnchor?.anchorId) continue;
 
 			const readyBlock = Number(info.startBlock) + CHALLENGE_WINDOW;
 			if (currentBlock >= readyBlock) {
@@ -394,6 +517,13 @@ async function finalizePendingEpochs() {
 				if (!info.storageAttested) {
 					const attestationReceipt = await recordStorageAttestationOnChain(wallet, epId, verification.attestationHash);
 					await persistOnChainAttestationToApi(epId, verification.attestationHash, attestationReceipt, wallet);
+				}
+
+				if (!epochRecord?.bitcoinAnchor?.anchorId) {
+					const storageReference = resolveEpochStorageReference(epochRecord, verification);
+					const anchorReport = await anchorEpochMerkleRoot(epId, info.merkleRoot, storageReference);
+					await persistBitcoinAnchorToApi(epId, anchorReport);
+					console.log(`[EpochBuilder] ✓ Epoch ${epId} Bitcoin-anchored via ${anchorReport.anchor_id}`);
 				}
 			} else {
 				console.log(`[EpochBuilder] Epoch ${epId} waiting for block ${readyBlock} (current: ${currentBlock})`);

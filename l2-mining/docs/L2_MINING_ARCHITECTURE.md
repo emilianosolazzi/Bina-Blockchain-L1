@@ -13,10 +13,10 @@
    - previous output exists in history
    - rate limits
    - difficulty target
-   - output uniqueness
+   - exact output uniqueness
 7. Beacon updates:
    - output history
-   - bloom filter
+   - `usedOutputs`
    - epoch reward state
    - miner reward balances
 8. Events are emitted for off-chain monitoring.
@@ -66,13 +66,9 @@
 - per-user config and log layout
 - launch + doctor workflows
 
-### Mining.rs
-- challenge polling
-- EIP-712 commitment creation
-- local nonce search
-- commit/reveal submission
-- receipt parsing
-- legacy reference implementation kept for comparison while the packaged runtime mirrors the same live flow
+### archive/deprecated-rust/Mining.rs
+- archived legacy reference implementation
+- not part of the active Cargo workspace runtime path
 
 ### memory.rs
 - secure key handling
@@ -80,8 +76,9 @@
 ### cpu.rs
 - optional hardware/thermal helpers
 
-### nist_pqc.rs
-- optional PQ support layer
+### archive/deprecated-rust/nist_pqc.rs
+- archived standalone PQC reference code
+- superseded by `rust/temporal_gradient_core/src/pqc.rs` for the active runtime path
 
 ## JS responsibilities
 
@@ -92,13 +89,13 @@
 
 ## Current blockers
 
-1. Difficulty weighting is still placeholder logic in Solidity.
+1. Difficulty evaluation in Solidity now uses the fixed pool target directly, with no per-miner weighting hook or privileged override path.
 2. The modular contracts compile, but module-isolated tests still need expansion.
 3. The package bootstrap creates config/data folders, but a portable install step is still needed to place the standalone miner binary into the per-user bin directory.
 
 ## Immediate next steps
 
 1. Freeze L2 mining protocol inputs.
-2. Finalize difficulty weighting in Solidity.
+2. Keep the fixed pool-target difficulty path and avoid reintroducing discretionary per-miner weighting.
 3. Finish portable packaging so the installer can place the miner executable in the expected per-user bin path.
 4. Add a full integrated modular-system test that wires core + mining + randomness + tokenomics together in one flow.

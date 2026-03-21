@@ -22,7 +22,12 @@
 //! ## Usage
 //!
 //! ```rust
-//! use crate::cpu::{detect_cpu_safely, get_cpu_temperature, has_cpu_feature, CpuFeature};
+//! use temporal_gradient_core::cpu::{
+//!     detect_cpu_safely,
+//!     get_cpu_temperature,
+//!     has_cpu_feature,
+//!     CpuFeature,
+//! };
 //!
 //! let cpu = detect_cpu_safely();
 //! println!("{}", cpu);                            // full info
@@ -249,26 +254,32 @@ fn collect_features<R: CpuIdReader>(cpuid: &CpuId<R>) -> Vec<String> {
 }
 
 fn detect_topology<R: CpuIdReader>(cpuid: &CpuId<R>) -> (u32, u32) {
-    // Try extended topology leaf first (most accurate)
-    if let Some(topo) = cpuid.get_extended_topology_info() {
-        let mut cores = 0u32;
-        let mut threads = 0u32;
-        for level in topo {
-            match level.level_type() {
-                raw_cpuid::TopologyType::Core => cores = level.processors() as u32,
-                raw_cpuid::TopologyType::SMT  => threads = level.processors() as u32,
-                _ => {}
-            }
-        }
-        if cores > 0 && threads > 0 {
-            return (cores, threads);
-        }
-    }
-
-    // Fallback: use std::thread::available_parallelism
     let logical = std::thread::available_parallelism()
         .map(|n| n.get() as u32)
         .unwrap_or(1);
+
+    // Try extended topology leaf first (most accurate)
+    if let Some(topo) = cpuid.get_extended_topology_info() {
+        let mut logical_per_core = 0u32;
+        let mut logical_per_package = 0u32;
+        for level in topo {
+            match level.level_type() {
+                raw_cpuid::TopologyType::Core => logical_per_package = level.processors() as u32,
+                raw_cpuid::TopologyType::SMT  => logical_per_core = level.processors() as u32,
+                _ => {}
+            }
+        }
+
+        let threads = logical.max(logical_per_package).max(1);
+        if logical_per_package > 0 && logical_per_core > 0 {
+            let cores = (logical_per_package / logical_per_core).max(1).min(threads);
+            return (cores, threads);
+        }
+
+        if logical_per_package > 0 {
+            return (logical_per_package.min(threads), threads);
+        }
+    }
 
     // Assume SMT-2 if HTT bit is set, otherwise cores == threads
     let has_htt = cpuid

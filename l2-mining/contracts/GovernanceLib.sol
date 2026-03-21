@@ -2,7 +2,6 @@
 pragma solidity ^0.8.28;
 
 import { MiningLib } from "./MiningLib.sol";
-import { BloomFilterLib } from "./BloomFilterLib.sol";
 import { ITGBT } from "./interfaces/ITGBT.sol";
 import { RandomnessLib } from "./RandomnessLib.sol";
 

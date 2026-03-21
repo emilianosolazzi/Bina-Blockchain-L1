@@ -2,7 +2,6 @@
 pragma solidity ^0.8.28;
 
 import { Test } from "forge-std/Test.sol";
-import { ERC1967Proxy } from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import { TemporalGradientCore } from "../contracts/TemporalGradientCore.sol";
 import { RateLimitModule } from "../contracts/modules/RateLimitModule.sol";
 
@@ -17,12 +16,7 @@ contract ModularCoreRateLimitTest is Test {
 
     function setUp() public {
         vm.startPrank(admin);
-        TemporalGradientCore implementation = new TemporalGradientCore();
-        ERC1967Proxy proxy = new ERC1967Proxy(
-            address(implementation),
-            abi.encodeCall(TemporalGradientCore.initialize, (admin, bytes32(0)))
-        );
-        core = TemporalGradientCore(address(proxy));
+        core = new TemporalGradientCore(admin, bytes32(0));
 
         rateLimit = new RateLimitModule();
         rateLimit.initialize(address(core));

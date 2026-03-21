@@ -756,6 +756,7 @@ fn now_secs() -> u64 {
 mod tests {
     use super::*;
     use rand::Rng;
+    use std::time::Instant;
 
     fn build_filter() -> TgOutputFilter<Ready> {
         TgOutputFilter::new()

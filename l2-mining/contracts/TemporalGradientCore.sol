@@ -1,23 +1,18 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import { OwnableUpgradeable } from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
-import { PausableUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
-import { AccessControlUpgradeable } from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
+import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
+import { Pausable } from "@openzeppelin/contracts/utils/Pausable.sol";
+import { AccessControl } from "@openzeppelin/contracts/access/AccessControl.sol";
 import { ITemporalGradientCore } from "./interfaces/ITemporalGradientCore.sol";
 
 contract TemporalGradientCore is
-    Initializable,
-    OwnableUpgradeable,
-    PausableUpgradeable,
-    UUPSUpgradeable,
-    AccessControlUpgradeable,
+    Ownable,
+    Pausable,
+    AccessControl,
     ITemporalGradientCore
 {
     bytes32 public constant GOVERNANCE_ROLE = keccak256("GOVERNANCE_ROLE");
-    bytes32 public constant UPGRADER_ROLE = keccak256("UPGRADER_ROLE");
     uint256 public constant OUTPUT_HISTORY_SIZE = 32;
 
     bytes32 public constant MINING_MODULE = keccak256("MINING_MODULE");
@@ -49,16 +44,11 @@ contract TemporalGradientCore is
         _;
     }
 
-    function initialize(address admin, bytes32 initialGenesisOutput) external initializer {
+    constructor(address admin, bytes32 initialGenesisOutput) Ownable(admin) {
         if (admin == address(0)) revert ZeroAddress();
-
-        __Ownable_init(admin);
-        __Pausable_init();
-        __AccessControl_init();
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(GOVERNANCE_ROLE, admin);
-        _grantRole(UPGRADER_ROLE, admin);
 
         bytes32 genesis = initialGenesisOutput == bytes32(0)
             ? keccak256(abi.encodePacked("TEMPORAL_GRADIENT_CORE", admin, block.timestamp, block.prevrandao))
@@ -109,7 +99,7 @@ contract TemporalGradientCore is
     function hasRole(bytes32 role, address account)
         public
         view
-        override(ITemporalGradientCore, AccessControlUpgradeable)
+        override(ITemporalGradientCore, AccessControl)
         returns (bool)
     {
         return super.hasRole(role, account);
@@ -151,11 +141,5 @@ contract TemporalGradientCore is
 
     function unpause() external onlyRole(GOVERNANCE_ROLE) {
         _unpause();
-    }
-
-    function _authorizeUpgrade(address) internal override onlyRole(UPGRADER_ROLE) {}
-
-    constructor() {
-    
     }
 }

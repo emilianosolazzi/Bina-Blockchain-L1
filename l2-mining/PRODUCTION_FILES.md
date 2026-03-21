@@ -17,11 +17,16 @@ Use these when you need the active contract surface that the Rust live miner can
 - [contracts/RandomnessLib.sol](contracts/RandomnessLib.sol)
 - [contracts/TokenomicsLib.sol](contracts/TokenomicsLib.sol)
 - [contracts/CoreUtilsLib.sol](contracts/CoreUtilsLib.sol)
-- [contracts/BloomFilterLib.sol](contracts/BloomFilterLib.sol)
 - [contracts/StorageLib.sol](contracts/StorageLib.sol)
 - [contracts/GovernanceLib.sol](contracts/GovernanceLib.sol)
 - [contracts/RateTypes.sol](contracts/RateTypes.sol)
   - Shared production libraries/types.
+
+Archived reference:
+
+- [archive/deprecated-bloom/BloomFilterLib.sol](archive/deprecated-bloom/BloomFilterLib.sol)
+  - Archived only.
+  - Removed from the active mining system to eliminate bloom-filter false positives and extra maintenance.
 
 ### Modular production path
 
@@ -44,6 +49,7 @@ Status:
 
 - Production code, but not the current live-miner target.
 - Use these for the modular architecture and module-level tests.
+- The modular mining path now uses exact `usedOutputs` tracking for uniqueness.
 
 ### Not production
 
@@ -75,9 +81,6 @@ Status:
 
 ### Utility / not active miner runtime
 
-- [rust/nist_pqc.rs](rust/nist_pqc.rs)
-  - Standalone/support code, not the active runtime entrypoint.
-
 - [rust/memory.rs](rust/memory.rs)
   - Utility file, not part of the Cargo workspace runtime path.
 
@@ -86,9 +89,13 @@ Status:
 
 ### Legacy / do not use
 
-- `rust/Mining.rs`
-  - Deleted.
-  - It was stale legacy code and is not part of the active miner.
+- [archive/deprecated-rust/Mining.rs](archive/deprecated-rust/Mining.rs)
+  - Archived legacy standalone miner/reference implementation.
+  - Not part of the active miner.
+
+- [archive/deprecated-rust/nist_pqc.rs](archive/deprecated-rust/nist_pqc.rs)
+  - Archived standalone PQC reference module.
+  - Replaced in the active runtime by [rust/temporal_gradient_core/src/pqc.rs](rust/temporal_gradient_core/src/pqc.rs).
 
 ## Quick rule
 

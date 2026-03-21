@@ -18,10 +18,12 @@
 //! ## Usage
 //!
 //! ```rust
-//! use crate::memory::SecureBuffer;
+//! use temporal_gradient_core::memory::SecureBuffer;
+//! # let my_secret_bytes = [7u8; 32];
+//! # let expected = [7u8; 32];
 //!
 //! // Create a 32-byte locked buffer for a mining secret
-//! let mut secret = SecureBuffer::new(32)?;
+//! let mut secret = SecureBuffer::new(32).unwrap();
 //! secret.as_mut_slice().unwrap().copy_from_slice(&my_secret_bytes);
 //!
 //! // Constant-time comparison

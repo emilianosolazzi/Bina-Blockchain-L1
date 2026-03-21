@@ -332,8 +332,46 @@ impl LiveMiningClient {
             .ok_or_else(|| anyhow!("No reveal receipt"))
     }
 
+    /// Returns `true` if there is an unrevealed, unexpired commitment on chain.
+    /// This is a quick non-blocking check — use before searching to avoid wasted CPU.
+    pub async fn has_pending_commitment(&self) -> Result<bool> {
+        let selector = keccak256("minerCommitments(address)");
+        let mut full_calldata = selector[..4].to_vec();
+        full_calldata.extend_from_slice(&encode(&[Token::Address(self.miner_address())]));
+
+        let tx = ethers::types::TransactionRequest::new()
+            .to(self.contract_address)
+            .data(Bytes::from(full_calldata));
+        let result = self.provider.call(&tx.into(), None).await?;
+
+        if result.len() < 128 {
+            return Ok(false);
+        }
+        let commit_hash = &result[0..32];
+        if commit_hash.iter().all(|&b| b == 0) {
+            return Ok(false);
+        }
+        let revealed = U256::from_big_endian(&result[64..96]) != U256::zero();
+        if revealed {
+            return Ok(false);
+        }
+
+        let contract = MiningContract::new(self.contract_address, Arc::clone(&self.client));
+        let commit_block = U256::from_big_endian(&result[32..64]).as_u64();
+        let max_age = contract.max_commitment_age().call().await?.as_u64();
+        let expires_at = commit_block.saturating_add(max_age);
+        let current_block = self.provider.get_block_number().await?.as_u64();
+        Ok(current_block <= expires_at)
+    }
+
     /// Checks if there is an existing unrevealed commitment for the miner.
     /// If one exists, waits until it expires (block > timestamp + maxCommitmentAge).
+    pub async fn wait_for_commitment_clearance_public(&self, phase: &PhaseTracker) -> Result<()> {
+        let contract = MiningContract::new(self.contract_address, Arc::clone(&self.client));
+        self.wait_for_commitment_clearance(&contract, phase).await
+    }
+
+    /// Internal: checks and waits for commitment clearance.
     async fn wait_for_commitment_clearance(
         &self,
         contract: &MiningContract<MiningClient>,

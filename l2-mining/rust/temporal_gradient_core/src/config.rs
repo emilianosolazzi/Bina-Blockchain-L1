@@ -54,7 +54,7 @@ impl Default for MinerConfig {
             relay_pinned_cert_sha256: None,
             relay_hmac_key: None,
             difficulty_zero_bits: 11,
-            pqc_mode: "enhanced".to_string(),
+            pqc_mode: "classical-compatible".to_string(),
         }
     }
 }
@@ -80,7 +80,7 @@ impl MinerConfig {
             self.log_level = "INFO".to_string();
         }
         if self.pqc_mode.trim().is_empty() {
-            self.pqc_mode = "enhanced".to_string();
+            self.pqc_mode = "classical-compatible".to_string();
         }
     }
 
