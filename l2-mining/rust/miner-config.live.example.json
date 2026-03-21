@@ -14,6 +14,5 @@
   "max_retries": 5,
   "exit_after_solutions": 1,
   "telemetry_file": "c:/Users/comar/OneDrive/Documents/Entropy_Randomness/Randomness_Entropy/l2-mining/rust/miner-telemetry.jsonl",
-  "difficulty_zero_bits": 11,
-  "pqc_mode": "enhanced"
+  "difficulty_zero_bits": 11
 }

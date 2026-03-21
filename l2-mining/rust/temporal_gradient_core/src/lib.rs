@@ -7,7 +7,6 @@ pub mod logging;
 pub mod memory;
 pub mod paths;
 pub mod pending;
-pub mod pqc;
 pub mod runtime;
 pub mod seed;
 pub mod storage_verification;
@@ -27,7 +26,6 @@ pub use crypto::{
 pub use logging::setup_logging;
 pub use memory::{SecureBuffer, SecureBufferError};
 pub use paths::{app_paths, ensure_app_layout, AppPaths};
-pub use pqc::{apply_pqc_enhancement, PqcMode};
 pub use runtime::{spawn_miner, MinerHandle};
 pub use seed::{decode_temporal_seed_timestamp, encode_temporal_seed, generate_temporal_seed};
 pub use storage_verification::{
@@ -41,4 +39,7 @@ pub use tg_relay_transport::{
     relay_connect, relay_connect_pinned, ReliableRelayChannel, RelayChannel, SecureTransport,
     TransportConfig, TransportError, TransportStats, TransportStatsSnapshot,
 };
-pub use utxo_fetcher::{UTXOFetcher, UTXOInfo, UTXOQuery, UTXOSearchQuery};
+pub use utxo_fetcher::{
+    AnchorSelectionPreview, UTXOAnchorPreference, UTXOFetcher, UTXOInfo, UTXOQuery,
+    UTXOSearchQuery,
+};

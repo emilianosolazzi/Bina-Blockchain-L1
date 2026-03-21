@@ -29,7 +29,6 @@ pub struct MinerConfig {
     #[serde(default)]
     pub relay_hmac_key: Option<String>,
     pub difficulty_zero_bits: u8,
-    pub pqc_mode: String,
 }
 
 impl Default for MinerConfig {
@@ -54,7 +53,6 @@ impl Default for MinerConfig {
             relay_pinned_cert_sha256: None,
             relay_hmac_key: None,
             difficulty_zero_bits: 11,
-            pqc_mode: "classical-compatible".to_string(),
         }
     }
 }
@@ -78,9 +76,6 @@ impl MinerConfig {
         }
         if self.log_level.trim().is_empty() {
             self.log_level = "INFO".to_string();
-        }
-        if self.pqc_mode.trim().is_empty() {
-            self.pqc_mode = "classical-compatible".to_string();
         }
     }
 

@@ -6,7 +6,6 @@ use crate::crypto::{
     pre_filter_nonce, random_secret, MiningMaterial,
 };
 use crate::memory::SecureBuffer;
-use crate::pqc::PqcMode;
 use crate::seed::{decode_temporal_seed_timestamp, generate_temporal_seed};
 use crate::telemetry::{MinerState, MiningPhase, PhaseTracker, TelemetrySnapshot};
 use crate::tg_output_filter::{MemoryBackend, Ready, SledBackend, TgOutputFilter};
@@ -395,7 +394,6 @@ async fn run_live_runtime(
         });
     }
 
-    let pqc_mode = crate::pqc::PqcMode::parse(&config.pqc_mode);
     let mut retry_count = 0usize;
     let mut nonce_cursor = 0u64;
 
@@ -456,7 +454,6 @@ async fn run_live_runtime(
             &telemetry_tx,
             &shutdown,
             &challenge,
-            pqc_mode,
             &hashrate_window,
             &mut nonce_cursor,
             started_at,
@@ -629,7 +626,6 @@ async fn attempt_live_solution(
     telemetry_tx: &broadcast::Sender<TelemetrySnapshot>,
     shutdown: &CancellationToken,
     challenge: &LiveChallenge,
-    _pqc_mode: crate::pqc::PqcMode,
     hashrate_window: &Arc<StdMutex<HashrateWindow>>,
     nonce_cursor: &mut u64,
     started_at: Instant,
@@ -832,7 +828,6 @@ async fn run_worker(
 ) -> Result<()> {
     let signing_key = SigningKey::random(&mut OsRng);
     let miner_address = miner_address_from_signing_key(&signing_key);
-    let pqc_mode = PqcMode::parse(&config.pqc_mode);
     let mut nonce = worker_id as u64;
     let nonce_step = config.threads as u64;
     let target_divisor = (config.difficulty_zero_bits as u64).max(1);
@@ -891,7 +886,6 @@ async fn run_worker(
                 &material,
                 0,
                 unix_secs().saturating_add(300),
-                pqc_mode,
             );
 
             {

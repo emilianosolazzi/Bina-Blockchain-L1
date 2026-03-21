@@ -1,4 +1,3 @@
-use crate::pqc::{apply_pqc_enhancement, PqcMode};
 use blake3;
 use k256::ecdsa::SigningKey;
 use rand::{rngs::OsRng, RngCore};
@@ -97,18 +96,9 @@ pub fn quantum_resistant_hash(
     signature: &[u8],
     entropy_hash: &[u8; 32],
     secret: &[u8; 32],
-    pqc_mode: PqcMode,
 ) -> [u8; 32] {
     let packed = [signature, entropy_hash, secret].concat();
-    let qr = quantum_resistant_hash_inner(&packed);
-    match pqc_mode {
-        PqcMode::ClassicalCompatible => qr,
-        PqcMode::Enhanced => {
-            let pqc = apply_pqc_enhancement(&packed, pqc_mode);
-            let hybrid = [qr.as_slice(), pqc.as_slice()].concat();
-            contract_hash_message(&hybrid)
-        }
-    }
+    quantum_resistant_hash_inner(&packed)
 }
 
 fn sign_recoverable_hash(signing_key: &SigningKey, digest: &[u8; 32]) -> Vec<u8> {
@@ -126,11 +116,10 @@ pub fn build_commitment_payload(
     material: &MiningMaterial,
     pool_id: u8,
     deadline: u64,
-    pqc_mode: PqcMode,
 ) -> CommitmentPayload {
     let entropy_hash = create_entropy_hash(material);
     let signature = sign_recoverable_hash(signing_key, &entropy_hash);
-    let solution_hash = quantum_resistant_hash(&signature, &entropy_hash, &material.secret_value, pqc_mode);
+    let solution_hash = quantum_resistant_hash(&signature, &entropy_hash, &material.secret_value);
 
     let commit_hash = contract_hash_message(
         &[
@@ -223,7 +212,6 @@ mod tests {
             &material,
             0,
             300,
-            PqcMode::ClassicalCompatible,
         );
 
         assert_eq!(payload.signature.len(), 65);

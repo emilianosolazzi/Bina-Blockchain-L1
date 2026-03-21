@@ -2,7 +2,6 @@
   "max_retries": 1,
   "batch_size": 8,
   "contract_address": "0xYourContractAddress",
-  "pqc_mode": "enhanced",
   "rpc_url": "http://localhost:8545",
   "log_level": "INFO",
   "difficulty_zero_bits": 4,

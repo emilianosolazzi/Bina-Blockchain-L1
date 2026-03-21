@@ -37,7 +37,6 @@ Important fields:
 - `rpc_url`
 - `contract_address`
 - `telemetry_file`
-- `pqc_mode`
 
 ## 5. Launch the miner
 
@@ -86,4 +85,3 @@ This runtime is the stabilized executable foundation for the miner package:
 - commitment/reveal helper logic in the core crate
 - live challenge polling and live commit/reveal submission
 - receipt reward parsing
-- PQC-enhanced solution hashing hooks

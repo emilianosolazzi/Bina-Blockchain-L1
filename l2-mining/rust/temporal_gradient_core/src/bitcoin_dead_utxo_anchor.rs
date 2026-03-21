@@ -52,6 +52,73 @@ impl DeadUTXOType {
             DeadUTXOType::BurnAddress { .. } => "burn",
         }
     }
+
+    pub fn display_label(&self) -> &'static str {
+        match self {
+            DeadUTXOType::Spent { .. } => "Spent output",
+            DeadUTXOType::OpReturn { .. } => "OP_RETURN output",
+            DeadUTXOType::Dust { .. } => "Dust output",
+            DeadUTXOType::BurnAddress { .. } => "Burn-address output",
+        }
+    }
+
+    pub fn summary(&self) -> String {
+        match self {
+            DeadUTXOType::Spent {
+                txid,
+                vout,
+                spent_at_height,
+                ..
+            } => format!(
+                "{} {}:{} spent at Bitcoin height {}",
+                self.display_label(),
+                txid,
+                vout,
+                spent_at_height
+            ),
+            DeadUTXOType::OpReturn {
+                txid,
+                vout,
+                block_height,
+                ..
+            } => format!(
+                "{} {}:{} confirmed at Bitcoin height {}",
+                self.display_label(),
+                txid,
+                vout,
+                block_height
+            ),
+            DeadUTXOType::Dust {
+                txid,
+                vout,
+                satoshis,
+                block_height,
+                ..
+            } => format!(
+                "{} {}:{} with {} sats at Bitcoin height {}",
+                self.display_label(),
+                txid,
+                vout,
+                satoshis,
+                block_height
+            ),
+            DeadUTXOType::BurnAddress {
+                txid,
+                vout,
+                address,
+                satoshis,
+                block_height,
+            } => format!(
+                "{} {}:{} to {} with {} sats at Bitcoin height {}",
+                self.display_label(),
+                txid,
+                vout,
+                address,
+                satoshis,
+                block_height
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

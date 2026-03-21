@@ -111,6 +111,59 @@ pub struct UTXOSearchQuery {
     pub limit:              Option<usize>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UTXOAnchorPreference {
+    Spent,
+    OpReturn,
+    Dust,
+    Burn,
+}
+
+impl UTXOAnchorPreference {
+    pub const VALID_VALUES: [&'static str; 4] = ["spent", "op_return", "dust", "burn"];
+
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "spent" => Ok(Self::Spent),
+            "op_return" | "opreturn" | "op-return" => Ok(Self::OpReturn),
+            "dust" => Ok(Self::Dust),
+            "burn" | "burn_address" | "burn-address" => Ok(Self::Burn),
+            other => Err(format!(
+                "Unknown UTXO preference '{other}'. Valid preferences: {}",
+                Self::VALID_VALUES.join(", ")
+            )),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Spent => "spent",
+            Self::OpReturn => "op_return",
+            Self::Dust => "dust",
+            Self::Burn => "burn",
+        }
+    }
+
+    pub fn user_label(self) -> &'static str {
+        match self {
+            Self::Spent => "Spent output",
+            Self::OpReturn => "OP_RETURN output",
+            Self::Dust => "Dust output",
+            Self::Burn => "Burn-address output",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnchorSelectionPreview {
+    pub preference: String,
+    pub utxo_id: String,
+    pub utxo_category: String,
+    pub utxo_summary: String,
+    pub score: u64,
+    pub reason: String,
+}
+
 // ─────────────────────────────────────────────────────────────────
 // mempool.space / blockstream response shapes
 // ─────────────────────────────────────────────────────────────────
@@ -265,18 +318,19 @@ impl UTXOFetcher {
         preference: &str,
         count: usize,
     ) -> Result<Vec<DeadUTXOType>, String> {
+        let preference = UTXOAnchorPreference::parse(preference)?;
         let query = UTXOSearchQuery {
             address: None,
             value_range: None,
             confirmation_range: Some((6, u32::MAX)),
             block_height_range: None,
-            utxo_type: Some(preference.to_string()),
+            utxo_type: Some(preference.as_str().to_string()),
             limit: Some(count.saturating_mul(3)),
         };
         let results = self.search_utxos(query).await?;
         let mut candidates: Vec<(DeadUTXOType, u64)> = results.into_iter()
             .filter_map(|u| {
-                let dead = self.convert_info_to_dead_utxo(&u, preference)?;
+                let dead = self.convert_info_to_dead_utxo(&u, preference.as_str())?;
                 let score = self.anchor_preference_score(&dead)
                     .saturating_add(u.entropy_weight);
                 Some((dead, score))
@@ -293,20 +347,21 @@ impl UTXOFetcher {
         count: usize,
         anchor_data: &[u8],
     ) -> Result<Vec<DeadUTXOType>, String> {
+        let preference = UTXOAnchorPreference::parse(preference)?;
         let entropy = enterprise_entropy(&self.cached_block_headers, anchor_data);
         let query = UTXOSearchQuery {
             address: None,
             value_range: None,
             confirmation_range: Some((6, u32::MAX)),
             block_height_range: None,
-            utxo_type: Some(preference.to_string()),
+            utxo_type: Some(preference.as_str().to_string()),
             limit: Some(count * 3),
         };
         let results = self.search_utxos(query).await?;
         let mut weighted: Vec<(DeadUTXOType, u64)> = results
             .into_iter()
             .filter_map(|u| {
-                let dead = self.convert_info_to_dead_utxo(&u, preference)?;
+                let dead = self.convert_info_to_dead_utxo(&u, preference.as_str())?;
                 let score_hash = Sha256::digest(
                     [&entropy[..], anchor_data, self.utxo_id(&dead).as_bytes()].concat()
                 );
@@ -317,6 +372,53 @@ impl UTXOFetcher {
 
         weighted.sort_by(|a, b| b.1.cmp(&a.1));
         Ok(weighted.into_iter().take(count).map(|(u, _)| u).collect())
+    }
+
+    pub async fn preview_entropy_anchor(
+        &self,
+        preference: &str,
+        data: &[u8],
+    ) -> Result<AnchorSelectionPreview, String> {
+        let preference = UTXOAnchorPreference::parse(preference)?;
+        let entropy = enterprise_entropy(&self.cached_block_headers, data);
+        let query = UTXOSearchQuery {
+            address: None,
+            value_range: None,
+            confirmation_range: Some((6, u32::MAX)),
+            block_height_range: None,
+            utxo_type: Some(preference.as_str().to_string()),
+            limit: Some(3),
+        };
+        let results = self.search_utxos(query).await?;
+
+        let selected = results
+            .into_iter()
+            .filter_map(|u| {
+                let dead = self.convert_info_to_dead_utxo(&u, preference.as_str())?;
+                let score_hash = Sha256::digest(
+                    [&entropy[..], data, self.utxo_id(&dead).as_bytes()].concat()
+                );
+                let score = u64::from_le_bytes(score_hash[..8].try_into().unwrap_or([0; 8]));
+                Some((dead, score))
+            })
+            .max_by_key(|(_, score)| *score)
+            .ok_or_else(|| {
+                format!(
+                    "No suitable dead Bitcoin outputs found for preference '{}'. Valid preferences: {}",
+                    preference.as_str(),
+                    UTXOAnchorPreference::VALID_VALUES.join(", ")
+                )
+            })?;
+
+        let (selected, score) = selected;
+        Ok(AnchorSelectionPreview {
+            preference: preference.as_str().to_string(),
+            utxo_id: self.utxo_id(&selected),
+            utxo_category: selected.category().to_string(),
+            utxo_summary: selected.summary(),
+            score,
+            reason: self.selection_reason(&selected, preference),
+        })
     }
 
     /// Fix 3: return the anchor_id from DeadUTXOAnchorDB, not a locally-computed hash.
@@ -336,9 +438,15 @@ impl UTXOFetcher {
         preference: &str,
         storage_reference: Option<String>,
     ) -> Result<String, String> {
-        let utxos = self.find_entropy_anchoring_utxos(preference, 1, data).await?;
-        let selected = utxos.into_iter().next()
-            .ok_or_else(|| "No suitable UTXOs found for entropy anchoring".to_string())?;
+        let preference = UTXOAnchorPreference::parse(preference)?;
+        let utxos = self.find_entropy_anchoring_utxos(preference.as_str(), 1, data).await?;
+        let selected = utxos.into_iter().next().ok_or_else(|| {
+            format!(
+                "No suitable dead Bitcoin outputs found for preference '{}'. Valid preferences: {}",
+                preference.as_str(),
+                UTXOAnchorPreference::VALID_VALUES.join(", ")
+            )
+        })?;
 
         let utxo_key   = self.utxo_id(&selected);
         let entropy    = enterprise_entropy(&self.cached_block_headers, data);
@@ -349,7 +457,11 @@ impl UTXOFetcher {
 
         let mut meta = HashMap::new();
         meta.insert("method".to_string(),        "entropy_anchor_v1".to_string());
+        meta.insert("preference".to_string(),    preference.as_str().to_string());
         meta.insert("selected_utxo".to_string(), utxo_key.clone());
+        meta.insert("utxo_category".to_string(), selected.category().to_string());
+        meta.insert("utxo_summary".to_string(),  selected.summary());
+        meta.insert("selection_reason".to_string(), self.selection_reason(&selected, preference));
         meta.insert("created_at".to_string(),    now_secs().to_string());
 
         let mut db = self.anchor_db.write().await;
@@ -365,7 +477,12 @@ impl UTXOFetcher {
             &utxo_key, &data_hash, &merkle_root, &storage_ref, meta,
         )?;
 
-        info!("Entropy anchor created: {}", anchor_id);
+        info!(
+            "Entropy anchor created: {} using {} ({})",
+            anchor_id,
+            utxo_key,
+            preference.user_label()
+        );
         Ok(anchor_id)
     }
 
@@ -400,7 +517,7 @@ impl UTXOFetcher {
         if db.dead_utxos.is_empty() {
             if path.is_empty() {
                 return Err(
-                    "Dead UTXO database not loaded. Set SPRINT_DEAD_UTXO_DB to a CSV file."
+                    "Dead UTXO database not loaded. Set SPRINT_DEAD_UTXO_DB to a CSV file, for example l2-mining/randomness-api/test-dead-utxos.csv."
                         .to_string(),
                 );
             }
@@ -532,6 +649,33 @@ impl UTXOFetcher {
         }
     }
 
+    fn selection_reason(&self, utxo: &DeadUTXOType, preference: UTXOAnchorPreference) -> String {
+        match utxo {
+            DeadUTXOType::BurnAddress { address, satoshis, .. } => format!(
+                "Matched {} preference because the output was sent to burn address {} and carries {} sats.",
+                preference.user_label(),
+                address,
+                satoshis
+            ),
+            DeadUTXOType::OpReturn { block_height, .. } => format!(
+                "Matched {} preference because the output is an immutable OP_RETURN record confirmed at Bitcoin height {}.",
+                preference.user_label(),
+                block_height
+            ),
+            DeadUTXOType::Spent { spent_at_height, .. } => format!(
+                "Matched {} preference because the output is already spent and therefore cannot be reused; spend height {}.",
+                preference.user_label(),
+                spent_at_height
+            ),
+            DeadUTXOType::Dust { satoshis, fee_rate_threshold, .. } => format!(
+                "Matched {} preference because the output is dust-sized at {} sats with fee threshold {}.",
+                preference.user_label(),
+                satoshis,
+                fee_rate_threshold
+            ),
+        }
+    }
+
     fn matches_search_criteria(&self, utxo: &DeadUTXOType, q: &UTXOSearchQuery) -> bool {
         if let Some(ref t) = q.utxo_type {
             let ok = match (t.as_str(), utxo) {
@@ -630,6 +774,68 @@ impl UTXOFetcher {
             let j = (entropy[i % 32] as usize) % n;
             explorers.swap(i, j);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preference_parser_accepts_aliases() {
+        assert_eq!(UTXOAnchorPreference::parse("opreturn").unwrap(), UTXOAnchorPreference::OpReturn);
+        assert_eq!(UTXOAnchorPreference::parse("burn-address").unwrap(), UTXOAnchorPreference::Burn);
+    }
+
+    #[test]
+    fn preference_parser_returns_helpful_error() {
+        let err = UTXOAnchorPreference::parse("weird").unwrap_err();
+        assert!(err.contains("Valid preferences: spent, op_return, dust, burn"));
+    }
+
+    #[tokio::test]
+    async fn preview_entropy_anchor_explains_selected_utxo() {
+        let fetcher = UTXOFetcher::new();
+        {
+            let mut db = fetcher.anchor_db.write().await;
+            db.add_dead_utxo(DeadUTXOType::OpReturn {
+                txid: "abc".to_string(),
+                vout: 2,
+                block_height: 900_000,
+                data: vec![0xde, 0xad],
+            }).unwrap();
+        }
+
+        let preview = fetcher.preview_entropy_anchor("opreturn", b"epoch-root").await.unwrap();
+        assert_eq!(preview.preference, "op_return");
+        assert_eq!(preview.utxo_id, "abc:2");
+        assert!(preview.utxo_summary.contains("OP_RETURN output"));
+        assert!(preview.reason.contains("immutable OP_RETURN record"));
+    }
+
+    #[tokio::test]
+    async fn created_anchor_stores_selection_metadata() {
+        let fetcher = UTXOFetcher::new();
+        {
+            let mut db = fetcher.anchor_db.write().await;
+            db.add_dead_utxo(DeadUTXOType::BurnAddress {
+                txid: "def".to_string(),
+                vout: 1,
+                address: "1BitcoinEaterAddressDontSendf59kuE".to_string(),
+                satoshis: 1000,
+                block_height: 800_000,
+            }).unwrap();
+        }
+
+        let anchor_id = fetcher
+            .create_entropy_anchor_with_reference(b"epoch-root", "burn_address", Some("ipfs://cid".to_string()))
+            .await
+            .unwrap();
+        let anchor = fetcher.get_anchor_by_id(&anchor_id).await.unwrap();
+        assert_eq!(anchor.metadata.get("preference").map(String::as_str), Some("burn"));
+        assert_eq!(anchor.metadata.get("utxo_category").map(String::as_str), Some("burn"));
+        assert!(anchor.metadata.get("utxo_summary").is_some());
+        assert!(anchor.metadata.get("selection_reason").is_some());
     }
 }
 

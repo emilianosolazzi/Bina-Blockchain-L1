@@ -1,4 +1,4 @@
-name: NodeJS with Webpack
+name: Node.js packages
 
 on:
   push:
@@ -13,6 +13,9 @@ jobs:
     strategy:
       matrix:
         node-version: [18.x, 20.x, 22.x]
+        package-directory:
+          - l2-mining/js
+          - l2-mining/miner-dashboard
 
     steps:
     - uses: actions/checkout@v4
@@ -21,8 +24,20 @@ jobs:
       uses: actions/setup-node@v4
       with:
         node-version: ${{ matrix.node-version }}
+        cache: npm
+        cache-dependency-path: ${{ matrix.package-directory }}/package-lock.json
 
-    - name: Build
+    - name: Install dependencies
+      working-directory: ${{ matrix.package-directory }}
+      run: npm ci
+
+    - name: Validate package entrypoint
+      working-directory: ${{ matrix.package-directory }}
+      shell: bash
       run: |
-        npm install
-        npx webpack
+        MAIN_FILE=$(node -p "require('./package.json').main || ''")
+        if [ -n "$MAIN_FILE" ] && [ -f "$MAIN_FILE" ]; then
+          node --check "$MAIN_FILE"
+        else
+          echo "No package main entrypoint found to syntax-check"
+        fi
