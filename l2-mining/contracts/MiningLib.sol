@@ -257,40 +257,12 @@ library MiningLib {
 
     function iterativeEntropyHash(bytes memory input) internal pure returns (bytes32) {
         bytes32 h = keccak256(input);
-        for (uint256 i = 0; i < QR_HASH_ITERATIONS; i++) {
+        for (uint256 i = 0; i < QR_HASH_ITERATIONS;) {
             h = keccak256(abi.encodePacked(h ^ bytes32(i + 1)));
             h = bytes32((uint256(h) << QR_HASH_ROTATION) | (uint256(h) >> (256 - QR_HASH_ROTATION)));
+            unchecked { ++i; }
         }
         return h;
-    }
-
-    /// @notice Calculate the rule-based protocol payout for a valid solution.
-    function calculateMiningReward(
-        bytes32 hmacOutput,
-        uint256 baseReward,
-        uint256 difficultyThresholdFactor,
-        uint256 payoutMultiplier,
-        uint256 totalMined,
-        uint256 globalCap,
-        MiningPool storage pool
-    ) internal returns (uint256 reward) {
-        uint256 difficulty = type(uint256).max - uint256(hmacOutput);
-        reward = baseReward;
-
-        uint256 thresholdTarget = pool.targetDifficulty * difficultyThresholdFactor;
-        if (difficulty > thresholdTarget) {
-            reward = (baseReward * payoutMultiplier) / 100;
-            emit ExceptionalSolution(msg.sender, difficulty, thresholdTarget, payoutMultiplier);
-        }
-
-        if (totalMined + reward > globalCap) {
-            reward = globalCap > totalMined ? globalCap - totalMined : 0;
-        }
-        if (pool.totalMined + reward > pool.emissionBucket) {
-            reward = pool.emissionBucket > pool.totalMined ? pool.emissionBucket - pool.totalMined : 0;
-        }
-
-        return reward;
     }
 
     function validatePreviousOutput(
@@ -374,7 +346,6 @@ library MiningLib {
             block.number,
             block.prevrandao,
             block.coinbase,
-                block.prevrandao,
             gasleft()
         ));
         
@@ -411,7 +382,7 @@ library MiningLib {
             
             // Try again with modified entropy
             resistant = keccak256(abi.encodePacked(resistant, i));
-            i++;
+            unchecked { ++i; }
         }
         
         // Only mark nonce as used AFTER all validation has passed

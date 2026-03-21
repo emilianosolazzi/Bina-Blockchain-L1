@@ -27,8 +27,8 @@ contract DeployLocalModularMiningStackScript is Script {
         address minerAddress = vm.envAddress("MINER_ADDRESS");
         uint256 initialReward = vm.envOr("INITIAL_REWARD", uint256(10 ether));
         uint256 initialDifficulty = vm.envOr("INITIAL_DIFFICULTY", uint256(1000));
-        uint256 blocksPerEpoch = vm.envOr("BLOCKS_PER_EPOCH", uint256(100));
-        uint256 halvingInterval = vm.envOr("HALVING_INTERVAL", uint256(1000));
+        uint256 blocksPerEpoch = vm.envOr("BLOCKS_PER_EPOCH", uint256(345_600));      // ~1 day on Arbitrum (0.25s blocks)
+        uint256 halvingInterval = vm.envOr("HALVING_INTERVAL", uint256(252_288_000));  // ~2 years on Arbitrum
         uint256 initialEmission = vm.envOr("INITIAL_EMISSION", uint256(700_000_000 ether));
 
         vm.startBroadcast(deployerPrivateKey);

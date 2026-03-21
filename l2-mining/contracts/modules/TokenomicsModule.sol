@@ -75,8 +75,8 @@ contract TokenomicsModule is ModuleBase, ITokenomicsModule {
         uint256 poolTotalMined,
         uint256 poolEmissionBucket
     ) external onlyAuthorizedMiningModule whenSystemActive returns (uint256 reward) {
-        epochState.rewardAmount = TokenomicsLib.checkEpochTransition(epochState);
-        reward = _calculateReward(output, epochState.rewardAmount, poolTargetDifficulty, poolTotalMined, poolEmissionBucket);
+        uint256 currentReward = TokenomicsLib.checkEpochTransition(epochState);
+        reward = _calculateReward(output, currentReward, poolTargetDifficulty, poolTotalMined, poolEmissionBucket);
 
         if (reward > 0) {
             tgbtToken.mint(miner, reward);
@@ -326,9 +326,9 @@ contract TokenomicsModule is ModuleBase, ITokenomicsModule {
     }
 
     modifier onlyAuthorizedMiningModule() {
-        address miningModule = _module(MODULE_MINING);
-        address batchMiningModule = _module(MODULE_BATCH_MINING);
-        if (msg.sender != miningModule && msg.sender != batchMiningModule) revert OnlyMiningModule();
+        if (msg.sender != _module(MODULE_MINING)) {
+            if (msg.sender != _module(MODULE_BATCH_MINING)) revert OnlyMiningModule();
+        }
         _;
     }
 

@@ -217,7 +217,7 @@ contract StaleBlockOracle is ModuleBase, IStaleBlockOracle {
         bytes32[] calldata loserHashes,
         uint32 reorgDepth
     ) external override onlyCoreOrModule whenSystemActive {
-        require(loserHashes.length > 0 && loserHashes.length <= MAX_LOSERS_PER_EVENT, "invalid loser count");
+        if (loserHashes.length == 0 || loserHashes.length > MAX_LOSERS_PER_EVENT) revert InvalidLoserCount();
 
         if (reorgDepth == 0 || reorgDepth > maxReorgDepth)
             revert ReorgTooDeep(reorgDepth, maxReorgDepth);
@@ -226,8 +226,9 @@ contract StaleBlockOracle is ModuleBase, IStaleBlockOracle {
         bytes32 forkEntropy = keccak256(
             abi.encodePacked(FORK_DOMAIN_TAG, winnerHash, forkHeight)
         );
-        for (uint256 i = 0; i < loserHashes.length; i++) {
+        for (uint256 i = 0; i < loserHashes.length;) {
             forkEntropy ^= loserHashes[i];
+            unchecked { ++i; }
         }
         forkEntropy = keccak256(abi.encodePacked(forkEntropy));
 
@@ -305,7 +306,7 @@ contract StaleBlockOracle is ModuleBase, IStaleBlockOracle {
      */
     function _countLeadingZeroBits(bytes32 hash) internal pure returns (uint32) {
         uint32 count = 0;
-        for (uint256 i = 0; i < 32; i++) {
+        for (uint256 i = 0; i < 32;) {
             uint8 b = uint8(hash[i]);
             if (b == 0) {
                 count += 8;
@@ -320,6 +321,7 @@ contract StaleBlockOracle is ModuleBase, IStaleBlockOracle {
                 if (b < 0x80) { count++; } // 7th zero → b was 0x01
                 return count;
             }
+            unchecked { ++i; }
         }
         return count; // All zeros → 256
     }

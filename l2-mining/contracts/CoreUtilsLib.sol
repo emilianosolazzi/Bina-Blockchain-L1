@@ -27,8 +27,9 @@ library CoreUtilsLib {
      */
     function getHistoricalOutputsHash(bytes32[32] storage outputHistory) internal view returns (bytes32) {
         bytes32[] memory outputs = new bytes32[](32);
-        for (uint256 i = 0; i < 32; i++) {
+        for (uint256 i = 0; i < 32;) {
             outputs[i] = outputHistory[i];
+            unchecked { ++i; }
         }
         return keccak256(abi.encodePacked(outputs));
     }
@@ -65,10 +66,11 @@ library CoreUtilsLib {
         if (output == bytes32(0)) return false;
         if (historySize > 32) revert InvalidHistorySize(historySize);
 
-        for (uint256 i = 0; i < historySize; i++) {
+        for (uint256 i = 0; i < historySize;) {
             if (history[i] == output) {
                 return true;
             }
+            unchecked { ++i; }
         }
 
         return false;

@@ -112,8 +112,9 @@ contract TemporalGradientCore is
     }
 
     function getOutputHistory() external view returns (bytes32[32] memory history) {
-        for (uint256 i = 0; i < OUTPUT_HISTORY_SIZE; i++) {
+        for (uint256 i = 0; i < OUTPUT_HISTORY_SIZE;) {
             history[i] = outputHistory[i];
+            unchecked { ++i; }
         }
     }
 
@@ -130,7 +131,7 @@ contract TemporalGradientCore is
     ) external onlyModule whenNotPaused {
         if (newOutput == bytes32(0)) revert ZeroOutput();
 
-        currentOutputIndex = uint64((currentOutputIndex + 1) % OUTPUT_HISTORY_SIZE);
+        currentOutputIndex = uint64((currentOutputIndex + 1) & 31); // OUTPUT_HISTORY_SIZE=32=2^5
         outputHistory[currentOutputIndex] = newOutput;
         lastOutputTimestamp = uint64(block.timestamp);
 

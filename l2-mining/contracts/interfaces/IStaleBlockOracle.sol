@@ -67,6 +67,7 @@ interface IStaleBlockOracle {
     error AlreadyRewarded(bytes32 blockHash);
     error NotProofSubmitter(bytes32 blockHash);
     error NoRewardAvailable();
+    error InvalidLoserCount();
 
     // ── Write functions ─────────────────────────────────────────
 

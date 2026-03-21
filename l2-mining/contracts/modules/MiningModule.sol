@@ -52,6 +52,11 @@ contract MiningModule is ModuleBase, EIP712("TemporalGradientBeacon", "1") {
     error BatchTooLarge();
     error ArrayLengthMismatch();
     error InvalidPreviousOutput();
+    error NoCommitmentFound();
+    error CommitmentAlreadyRevealed();
+    error CommitmentTooRecent();
+    error CommitmentExpired();
+    error PoolIdMismatch();
 
     function initialize(address coreAddress, address holdTokenAddress, uint256 initialDifficulty, uint256 initialEmission) external {
         __ModuleBase_init(coreAddress);
@@ -129,37 +134,28 @@ contract MiningModule is ModuleBase, EIP712("TemporalGradientBeacon", "1") {
         if (poolId >= poolCount || !miningPools[poolId].active) revert InvalidPoolId();
 
         MiningLib.Commitment storage commitment = minerCommitments[msg.sender];
-        require(commitment.commitHash != bytes32(0), "NoCommitmentFound");
-        require(!commitment.flags.revealed, "CommitmentAlreadyRevealed");
-        require(block.number >= commitment.timestamp + minCommitmentAge, "CommitmentTooRecent");
-        require(block.number <= commitment.timestamp + maxCommitmentAge, "CommitmentExpired");
-        require(commitment.poolId == poolId, "InvalidPoolId");
+        if (commitment.commitHash == bytes32(0)) revert NoCommitmentFound();
+        if (commitment.flags.revealed) revert CommitmentAlreadyRevealed();
+        if (block.number < commitment.timestamp + minCommitmentAge) revert CommitmentTooRecent();
+        if (block.number > commitment.timestamp + maxCommitmentAge) revert CommitmentExpired();
+        if (commitment.poolId != poolId) revert PoolIdMismatch();
 
-        MiningLib.checkCommitmentValidity(
-            MiningLib.RevealParams({
-                miner: msg.sender,
-                previousOutput: previousOutput,
-                temporalSeed: temporalSeed,
-                nonce: nonce,
-                signature: signature,
-                secretValue: secretValue,
-                poolId: poolId
-            }),
-            commitment
-        );
+        MiningLib.RevealParams memory revealParams = MiningLib.RevealParams({
+            miner: msg.sender,
+            previousOutput: previousOutput,
+            temporalSeed: temporalSeed,
+            nonce: nonce,
+            signature: signature,
+            secretValue: secretValue,
+            poolId: poolId
+        });
+
+        MiningLib.checkCommitmentValidity(revealParams, commitment);
 
         if (!_historyContains(previousOutput)) revert InvalidPreviousOutput();
 
         bytes32 hmacOutput = MiningLib.processMiningReveal(
-            MiningLib.RevealParams({
-                miner: msg.sender,
-                previousOutput: previousOutput,
-                temporalSeed: temporalSeed,
-                nonce: nonce,
-                signature: signature,
-                secretValue: secretValue,
-                poolId: poolId
-            }),
+            revealParams,
             miningPools[poolId].targetDifficulty,
             usedOutputs,
             MiningLib.iterativeEntropyHash
@@ -245,8 +241,9 @@ contract MiningModule is ModuleBase, EIP712("TemporalGradientBeacon", "1") {
 
         bytes32[32] memory history = _outputHistory();
         outputs = new bytes32[](history.length);
-        for (uint256 i = 0; i < history.length; i++) {
+        for (uint256 i = 0; i < history.length;) {
             outputs[i] = history[i];
+            unchecked { ++i; }
         }
 
         return (outputs, miningPools[poolId].targetDifficulty);
@@ -282,10 +279,11 @@ contract MiningModule is ModuleBase, EIP712("TemporalGradientBeacon", "1") {
 
     function _historyContains(bytes32 previousOutput) internal view returns (bool) {
         bytes32[32] memory history = _outputHistory();
-        for (uint256 i = 0; i < history.length; i++) {
+        for (uint256 i = 0; i < history.length;) {
             if (history[i] == previousOutput) {
                 return true;
             }
+            unchecked { ++i; }
         }
         return false;
     }
