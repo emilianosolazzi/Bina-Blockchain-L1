@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import { ModuleBase } from "./modules/ModuleBase.sol";
 import { IStaleBlockOracle } from "./interfaces/IStaleBlockOracle.sol";
+import { ITokenomicsModule } from "./interfaces/ITokenomicsModule.sol";
 import { CoreUtilsLib } from "./CoreUtilsLib.sol";
 
 /**
@@ -32,6 +33,7 @@ import { CoreUtilsLib } from "./CoreUtilsLib.sol";
  *         sufficient for PoW validation — no SPV relay or oracle needed.
  */
 contract StaleBlockOracle is ModuleBase, IStaleBlockOracle {
+    bytes32 public constant MODULE_TOKENOMICS = keccak256("TOKENOMICS_MODULE");
 
     // ── Constants ────────────────────────────────────────────────
     uint256 private constant HEADER_SIZE = 80;
@@ -205,13 +207,10 @@ contract StaleBlockOracle is ModuleBase, IStaleBlockOracle {
             revert AlreadyRewarded(blockHash);
 
         proof.rewarded = true;
-        uint256 reward = _calculateReward(proof.qualityScore, proof.reorgDepth);
+        uint256 requestedReward = _calculateReward(proof.qualityScore, proof.reorgDepth);
+        uint256 reward = _tokenomics().onStaleBlockReward(msg.sender, requestedReward);
 
         emit StaleRewardClaimed(blockHash, msg.sender, reward);
-
-        // Actual token transfer delegated to Tokenomics module via Core
-        // core.recordOutput(...) or similar — depends on how rewards flow
-        // through the existing pipeline. For now we emit the event.
     }
 
     /// @inheritdoc IStaleBlockOracle
@@ -440,5 +439,9 @@ contract StaleBlockOracle is ModuleBase, IStaleBlockOracle {
         uint256 qualityMultiplier = uint256(qualityScore);
         uint256 depthMultiplier = uint256(reorgDepth) + 1; // depth 1 → 2x, depth 2 → 3x, etc.
         return (baseReward * qualityMultiplier * depthMultiplier) / 100;
+    }
+
+    function _tokenomics() internal view returns (ITokenomicsModule) {
+        return ITokenomicsModule(_module(MODULE_TOKENOMICS));
     }
 }

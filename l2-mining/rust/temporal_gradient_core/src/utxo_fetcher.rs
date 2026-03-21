@@ -36,14 +36,21 @@ use crate::bitcoin_dead_utxo_anchor::{DeadUTXOAnchorDB, DeadUTXOAnchor, DeadUTXO
 
 fn fast_entropy() -> [u8; 32] {
     let mut buf = [0u8; 32];
-    getrandom::getrandom(&mut buf).unwrap_or(());
+    if getrandom::getrandom(&mut buf).is_err() {
+        let mut h = Sha256::new();
+        h.update(now_secs().to_le_bytes());
+        h.update(std::process::id().to_le_bytes());
+        buf.copy_from_slice(&h.finalize());
+    }
     buf
 }
 
 fn hybrid_entropy(block_headers: &[Vec<u8>]) -> [u8; 32] {
     let mut h = Sha256::new();
     let mut seed = [0u8; 32];
-    getrandom::getrandom(&mut seed).unwrap_or(());
+    if getrandom::getrandom(&mut seed).is_err() {
+        seed = fast_entropy();
+    }
     h.update(seed);
     for header in block_headers {
         h.update(header);
@@ -246,7 +253,7 @@ impl UTXOFetcher {
             client:              reqwest::Client::builder()
                                     .timeout(std::time::Duration::from_secs(10))
                                     .build()
-                                    .unwrap_or_default(),
+                                    .unwrap_or_else(|_| reqwest::Client::new()),
             explorers,
             cache_ttl_seconds:   300,
             max_cache_entries:   10_000,
@@ -568,10 +575,13 @@ impl UTXOFetcher {
             .json().await
             .map_err(|e| format!("Parse tx: {e}"))?;
 
-        let vout_data = tx.vout.get(vout as usize);
-        let value         = vout_data.and_then(|v| v.value);
-        let script_pubkey = vout_data.and_then(|v| v.scriptpubkey.clone()).unwrap_or_default();
-        let address       = vout_data.and_then(|v| v.address.clone());
+        let vout_data = match tx.vout.get(vout as usize) {
+            Some(vout_data) => vout_data,
+            None => return Ok(None),
+        };
+        let value         = vout_data.value;
+        let script_pubkey = vout_data.scriptpubkey.clone().unwrap_or_default();
+        let address       = vout_data.address.clone();
 
         let (block_height, block_hash, confirmations) = match &tx.status {
             Some(s) if s.confirmed => {

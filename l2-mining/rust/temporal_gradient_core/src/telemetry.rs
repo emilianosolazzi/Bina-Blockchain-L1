@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::sync::MutexGuard;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -104,7 +105,7 @@ impl PhaseTracker {
     }
 
     pub fn set(&self, phase: MiningPhase, blocks_remaining: Option<u64>) {
-        let mut s = self.inner.lock().unwrap();
+        let mut s = self.lock_state();
         s.phase = Some(phase);
         s.blocks_remaining = blocks_remaining;
         s.eta_seconds = blocks_remaining.map(|b| {
@@ -114,12 +115,19 @@ impl PhaseTracker {
     }
 
     pub fn get(&self) -> PhaseState {
-        self.inner.lock().unwrap().clone()
+        self.lock_state().clone()
     }
 
     pub fn clear(&self) {
-        let mut s = self.inner.lock().unwrap();
+        let mut s = self.lock_state();
         *s = PhaseState::default();
+    }
+
+    fn lock_state(&self) -> MutexGuard<'_, PhaseState> {
+        match self.inner.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
     }
 }
 

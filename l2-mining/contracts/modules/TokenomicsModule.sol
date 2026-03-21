@@ -13,9 +13,12 @@ contract TokenomicsModule is ModuleBase, ITokenomicsModule {
 
     bytes32 public constant MODULE_MINING = keccak256("MINING_MODULE");
     bytes32 public constant MODULE_BATCH_MINING = keccak256("BATCH_MINING_MODULE");
+    bytes32 public constant MODULE_STALE_BLOCK = keccak256("STALE_BLOCK_MODULE");
+    uint256 private constant BPS_SCALE = 10_000;
 
     uint256 public constant TOTAL_SUPPLY_CAP = 2_000_000_000 ether;
     uint256 public constant MINING_ALLOCATION = 700_000_000 ether;
+    uint256 public constant STALE_BLOCK_ALLOCATION = 25_000_000 ether;
     uint256 public constant MAX_BONUS_MULTIPLIER = 500;
     uint256 public constant DEFAULT_BONUS_THRESHOLD = 2;
     uint16 public constant DEFAULT_BONUS_MULTIPLIER = 125;
@@ -23,6 +26,7 @@ contract TokenomicsModule is ModuleBase, ITokenomicsModule {
     ITGBT public tgbtToken;
     TokenomicsLib.EpochState internal epochState;
     uint256 public totalMined;
+    uint256 public totalStaleRewards;
     uint256 public bonusThreshold;
     uint16 public bonusMultiplier;
 
@@ -31,11 +35,13 @@ contract TokenomicsModule is ModuleBase, ITokenomicsModule {
 
     event ExceptionalSolution(address indexed miner, uint256 difficulty, uint256 threshold, uint256 multiplier);
     event MissedContributionRecorded(address indexed account, uint256 totalMissedContributions);
+    event StaleEntropyRewarded(address indexed recipient, uint256 requestedReward, uint256 actualReward);
 
     error OnlyMiningModule();
     error ZeroToken();
     error InvalidMultiplier();
     error InvalidThreshold();
+    error InitialRewardExceedsAllocation();
 
     function initialize(
         address coreAddress,
@@ -49,6 +55,7 @@ contract TokenomicsModule is ModuleBase, ITokenomicsModule {
         __ModuleBase_init(coreAddress);
 
         if (tokenAddress == address(0)) revert ZeroToken();
+        if (initialReward > MINING_ALLOCATION) revert InitialRewardExceedsAllocation();
 
         tgbtToken = ITGBT(tokenAddress);
         TokenomicsLib.initializeEpochState(epochState, initialReward, blocksPerEpoch, halvingInterval);
@@ -81,6 +88,41 @@ contract TokenomicsModule is ModuleBase, ITokenomicsModule {
     function recordMissedContribution(address contributor) external onlyCoreOrModule whenSystemActive {
         missedContributions[contributor]++;
         emit MissedContributionRecorded(contributor, missedContributions[contributor]);
+    }
+
+    function onStaleBlockReward(address recipient, uint256 requestedReward)
+        external
+        onlyAuthorizedStaleBlockModule
+        whenSystemActive
+        returns (uint256 actualReward)
+    {
+        if (recipient == address(0) || requestedReward == 0) {
+            emit StaleEntropyRewarded(recipient, requestedReward, 0);
+            return 0;
+        }
+
+        uint256 remainingStaleAllocation = STALE_BLOCK_ALLOCATION > totalStaleRewards
+            ? STALE_BLOCK_ALLOCATION - totalStaleRewards
+            : 0;
+        uint256 remainingTotalSupply = TOTAL_SUPPLY_CAP > tgbtToken.totalSupply()
+            ? TOTAL_SUPPLY_CAP - tgbtToken.totalSupply()
+            : 0;
+
+        actualReward = requestedReward;
+        if (actualReward > remainingStaleAllocation) {
+            actualReward = remainingStaleAllocation;
+        }
+        if (actualReward > remainingTotalSupply) {
+            actualReward = remainingTotalSupply;
+        }
+
+        if (actualReward > 0) {
+            tgbtToken.mint(recipient, actualReward);
+            totalStaleRewards += actualReward;
+            _updateActivity(recipient);
+        }
+
+        emit StaleEntropyRewarded(recipient, requestedReward, actualReward);
     }
 
     function resetMissedContributions(address account) external onlyGovernance {
@@ -133,12 +175,79 @@ contract TokenomicsModule is ModuleBase, ITokenomicsModule {
         return TokenomicsLib.getTokenomicsInfo(epochState, TOTAL_SUPPLY_CAP, MINING_ALLOCATION, totalMined);
     }
 
+    function getEmissionHealth()
+        external
+        view
+        returns (
+            uint256 totalSupplyMinted,
+            uint256 capUtilizationBps,
+            uint256 miningAllocationUtilizationBps,
+            uint256 remainingTotalSupply,
+            uint256 remainingMiningAllocation,
+            uint256 currentReward,
+            uint256 currentEpoch
+        )
+    {
+        (currentReward, currentEpoch, , ) = TokenomicsLib.previewEpochState(epochState);
+
+        totalSupplyMinted = tgbtToken.totalSupply();
+        remainingTotalSupply = TOTAL_SUPPLY_CAP > totalSupplyMinted ? TOTAL_SUPPLY_CAP - totalSupplyMinted : 0;
+        remainingMiningAllocation = MINING_ALLOCATION > totalMined ? MINING_ALLOCATION - totalMined : 0;
+        capUtilizationBps = TOTAL_SUPPLY_CAP == 0 ? 0 : Math.mulDiv(totalSupplyMinted, BPS_SCALE, TOTAL_SUPPLY_CAP);
+        miningAllocationUtilizationBps = MINING_ALLOCATION == 0 ? 0 : Math.mulDiv(totalMined, BPS_SCALE, MINING_ALLOCATION);
+    }
+
+    function previewBlockReward(
+        bytes32 output,
+        uint256 poolTargetDifficulty,
+        uint256 poolTotalMined,
+        uint256 poolEmissionBucket
+    )
+        external
+        view
+        returns (
+            uint256 currentBaseReward,
+            bool bonusEligible,
+            uint256 bonusReward,
+            uint256 finalReward,
+            uint256 remainingMiningAllocation,
+            uint256 remainingPoolAllocation
+        )
+    {
+        (currentBaseReward, , , ) = TokenomicsLib.previewEpochState(epochState);
+
+        (
+            finalReward,
+            ,
+            ,
+            bonusEligible,
+            remainingMiningAllocation,
+            remainingPoolAllocation
+        ) = _previewReward(output, currentBaseReward, poolTargetDifficulty, poolTotalMined, poolEmissionBucket, totalMined);
+
+        bonusReward = Math.mulDiv(currentBaseReward, bonusMultiplier, 100);
+    }
+
     function getAccountPenaltyState(address account)
         external
         view
         returns (uint256 lastActivity, uint256 missedContributionCount)
     {
         return (lastActivityBlock[account], missedContributions[account]);
+    }
+
+    function getStaleRewardHealth()
+        external
+        view
+        returns (
+            uint256 rewardedSoFar,
+            uint256 remainingAllocation,
+            uint256 utilizationBps
+        )
+    {
+        rewardedSoFar = totalStaleRewards;
+        remainingAllocation = STALE_BLOCK_ALLOCATION > totalStaleRewards ? STALE_BLOCK_ALLOCATION - totalStaleRewards : 0;
+        utilizationBps = STALE_BLOCK_ALLOCATION == 0 ? 0 : Math.mulDiv(totalStaleRewards, BPS_SCALE, STALE_BLOCK_ALLOCATION);
     }
 
     function onlyMiningModuleAddress() external view returns (address) {
@@ -156,21 +265,61 @@ contract TokenomicsModule is ModuleBase, ITokenomicsModule {
         uint256 poolTotalMined,
         uint256 poolEmissionBucket
     ) internal returns (uint256 reward) {
-        uint256 difficulty = type(uint256).max - uint256(output);
-        reward = baseReward;
+        uint256 difficulty;
+        uint256 bonusTarget;
+        bool bonusEligible;
 
-        uint256 bonusTarget = Math.mulDiv(poolTargetDifficulty, bonusThreshold, 1);
-        if (difficulty > bonusTarget) {
-            reward = Math.mulDiv(baseReward, bonusMultiplier, 100);
+        (reward, difficulty, bonusTarget, bonusEligible, , ) = _previewReward(
+            output,
+            baseReward,
+            poolTargetDifficulty,
+            poolTotalMined,
+            poolEmissionBucket,
+            totalMined
+        );
+
+        if (bonusEligible) {
             emit ExceptionalSolution(msg.sender, difficulty, bonusTarget, bonusMultiplier);
         }
+    }
 
-        if (totalMined + reward > MINING_ALLOCATION) {
-            reward = MINING_ALLOCATION > totalMined ? MINING_ALLOCATION - totalMined : 0;
+    function _previewReward(
+        bytes32 output,
+        uint256 baseReward,
+        uint256 poolTargetDifficulty,
+        uint256 poolTotalMined,
+        uint256 poolEmissionBucket,
+        uint256 minedSoFar
+    )
+        internal
+        view
+        returns (
+            uint256 reward,
+            uint256 difficulty,
+            uint256 bonusTarget,
+            bool bonusEligible,
+            uint256 remainingMiningAllocation,
+            uint256 remainingPoolAllocation
+        )
+    {
+        difficulty = type(uint256).max - uint256(output);
+        reward = baseReward;
+        bonusTarget = Math.mulDiv(poolTargetDifficulty, bonusThreshold, 1);
+
+        if (difficulty > bonusTarget) {
+            bonusEligible = true;
+            reward = Math.mulDiv(baseReward, bonusMultiplier, 100);
         }
 
-        if (poolTotalMined + reward > poolEmissionBucket) {
-            reward = poolEmissionBucket > poolTotalMined ? poolEmissionBucket - poolTotalMined : 0;
+        remainingMiningAllocation = MINING_ALLOCATION > minedSoFar ? MINING_ALLOCATION - minedSoFar : 0;
+        remainingPoolAllocation = poolEmissionBucket > poolTotalMined ? poolEmissionBucket - poolTotalMined : 0;
+
+        if (reward > remainingMiningAllocation) {
+            reward = remainingMiningAllocation;
+        }
+
+        if (reward > remainingPoolAllocation) {
+            reward = remainingPoolAllocation;
         }
     }
 
@@ -182,6 +331,11 @@ contract TokenomicsModule is ModuleBase, ITokenomicsModule {
         address miningModule = _module(MODULE_MINING);
         address batchMiningModule = _module(MODULE_BATCH_MINING);
         if (msg.sender != miningModule && msg.sender != batchMiningModule) revert OnlyMiningModule();
+        _;
+    }
+
+    modifier onlyAuthorizedStaleBlockModule() {
+        if (msg.sender != _module(MODULE_STALE_BLOCK)) revert OnlyMiningModule();
         _;
     }
 }

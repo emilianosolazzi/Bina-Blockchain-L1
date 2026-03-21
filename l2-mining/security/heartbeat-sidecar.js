@@ -5,28 +5,40 @@ const fs = require('fs');
 const http = require('http');
 const path = require('path');
 const crypto = require('crypto');
+const { URL } = require('url');
 
 const ROOT = __dirname;
+
+function readBoundedNumber(name, fallback, min, max) {
+  const raw = process.env[name];
+  if (raw == null || raw === '') return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value)) return fallback;
+  const normalized = Math.trunc(value);
+  if (normalized < min || normalized > max) return fallback;
+  return normalized;
+}
+
 const TELEMETRY_FILE = process.env.TELEMETRY_FILE
   ? path.resolve(process.cwd(), process.env.TELEMETRY_FILE)
   : (process.env.LOCALAPPDATA
     ? path.join(process.env.LOCALAPPDATA, 'entropy', 'TemporalGradientMiner', 'data', 'logs', 'telemetry.jsonl')
     : path.resolve(ROOT, '..', 'rust', 'miner-telemetry.jsonl'));
 const HOST = process.env.HEARTBEAT_HOST || '127.0.0.1';
-const PORT = Number(process.env.HEARTBEAT_PORT || 4380);
-const POLL_INTERVAL_MS = Number(process.env.HEARTBEAT_POLL_INTERVAL_MS || 2000);
-const TELEMETRY_STALE_MS = Number(process.env.HEARTBEAT_TELEMETRY_STALE_MS || 15000);
-const MIN_SOLUTION_GAP_MS = Number(process.env.HEARTBEAT_MIN_SOLUTION_GAP_MS || 30000);
-const MAX_TAIL_BYTES = Number(process.env.HEARTBEAT_MAX_TAIL_BYTES || 1024 * 512);
-const MAX_HISTORY_LINES = Number(process.env.HEARTBEAT_MAX_HISTORY_LINES || 720);
-const HASHRATE_BASELINE_SAMPLES = Number(process.env.HEARTBEAT_HASHRATE_BASELINE_SAMPLES || 60);
+const PORT = readBoundedNumber('HEARTBEAT_PORT', 4380, 1, 65535);
+const POLL_INTERVAL_MS = readBoundedNumber('HEARTBEAT_POLL_INTERVAL_MS', 2000, 250, 300000);
+const TELEMETRY_STALE_MS = readBoundedNumber('HEARTBEAT_TELEMETRY_STALE_MS', 15000, 1000, 3600000);
+const MIN_SOLUTION_GAP_MS = readBoundedNumber('HEARTBEAT_MIN_SOLUTION_GAP_MS', 30000, 1000, 86400000);
+const MAX_TAIL_BYTES = readBoundedNumber('HEARTBEAT_MAX_TAIL_BYTES', 1024 * 512, 4096, 8 * 1024 * 1024);
+const MAX_HISTORY_LINES = readBoundedNumber('HEARTBEAT_MAX_HISTORY_LINES', 720, 10, 10000);
+const HASHRATE_BASELINE_SAMPLES = readBoundedNumber('HEARTBEAT_HASHRATE_BASELINE_SAMPLES', 60, 5, 1000);
 const HASHRATE_DROP_RATIO = Number(process.env.HEARTBEAT_HASHRATE_DROP_RATIO || 0.45);
-const TEMPERATURE_WARN_C = Number(process.env.HEARTBEAT_TEMPERATURE_WARN_C || 82);
-const REJECT_BURST_THRESHOLD = Number(process.env.HEARTBEAT_REJECT_BURST_THRESHOLD || 1);
+const TEMPERATURE_WARN_C = readBoundedNumber('HEARTBEAT_TEMPERATURE_WARN_C', 82, 20, 150);
+const REJECT_BURST_THRESHOLD = readBoundedNumber('HEARTBEAT_REJECT_BURST_THRESHOLD', 1, 1, 1000);
 const MINER_NAME = process.env.HEARTBEAT_MINER_NAME || process.env.MINER_NAME || 'default-miner';
 const MINER_REGION = process.env.HEARTBEAT_MINER_REGION || 'unknown';
 const MINER_OPERATOR = process.env.HEARTBEAT_MINER_OPERATOR || null;
-const MAX_ALERT_HISTORY = Number(process.env.HEARTBEAT_MAX_ALERT_HISTORY || 200);
+const MAX_ALERT_HISTORY = readBoundedNumber('HEARTBEAT_MAX_ALERT_HISTORY', 200, 10, 5000);
 
 const sseClients = new Set();
 const activeAlerts = new Map();
@@ -191,6 +203,29 @@ function emitSse(event, payload) {
   for (const client of sseClients) {
     client.write(encoded);
   }
+}
+
+function isLoopbackOrigin(origin) {
+  if (!origin) return true;
+  try {
+    const parsed = new URL(origin);
+    return parsed.protocol === 'http:' && (
+      parsed.hostname === 'localhost' ||
+      parsed.hostname === '127.0.0.1' ||
+      parsed.hostname === '[::1]' ||
+      parsed.hostname === '::1'
+    );
+  } catch {
+    return false;
+  }
+}
+
+function corsHeaders(origin) {
+  const headers = { Vary: 'Origin' };
+  if (origin && isLoopbackOrigin(origin)) {
+    headers['Access-Control-Allow-Origin'] = origin;
+  }
+  return headers;
 }
 
 function registerAlert(type, severity, message, details, observedAt) {
@@ -435,20 +470,45 @@ function pollTelemetry() {
   }
 }
 
-function sendJson(res, statusCode, payload) {
+function sendJson(req, res, statusCode, payload) {
   res.writeHead(statusCode, {
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
-    'Access-Control-Allow-Origin': '*',
+    'X-Content-Type-Options': 'nosniff',
+    ...corsHeaders(req.headers.origin),
   });
   res.end(JSON.stringify(payload, null, 2));
 }
 
 function handleRequest(req, res) {
-  const url = new URL(req.url, `http://${HOST}:${PORT}`);
+  let url;
+  try {
+    url = new URL(req.url, `http://${HOST}:${PORT}`);
+  } catch {
+    return sendJson(req, res, 400, { error: 'Invalid request URL' });
+  }
+
+  if (req.headers.origin && !isLoopbackOrigin(req.headers.origin)) {
+    return sendJson(req, res, 403, { error: 'Forbidden origin' });
+  }
+
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, {
+      'Access-Control-Allow-Methods': 'GET, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type',
+      'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff',
+      ...corsHeaders(req.headers.origin),
+    });
+    return res.end();
+  }
+
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    return sendJson(req, res, 405, { error: 'Method not allowed' });
+  }
 
   if (req.method === 'GET' && url.pathname === '/api/health') {
-    return sendJson(res, 200, {
+    return sendJson(req, res, 200, {
       ok: status.status !== 'error',
       status: status.status,
       message: status.message,
@@ -462,12 +522,12 @@ function handleRequest(req, res) {
   }
 
   if (req.method === 'GET' && url.pathname === '/api/heartbeat/status') {
-    return sendJson(res, 200, status);
+    return sendJson(req, res, 200, status);
   }
 
   if (req.method === 'GET' && url.pathname === '/api/heartbeat/alerts') {
     const includeResolved = url.searchParams.get('all') === '1';
-    return sendJson(res, 200, {
+    return sendJson(req, res, 200, {
       active: [...activeAlerts.values()],
       history: includeResolved ? alertHistory : alertHistory.filter(item => item.status === 'active'),
     });
@@ -478,7 +538,7 @@ function handleRequest(req, res) {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
       Connection: 'keep-alive',
-      'Access-Control-Allow-Origin': '*',
+      ...corsHeaders(req.headers.origin),
     });
     res.write(': heartbeat-sidecar connected\n\n');
     sseClients.add(res);
@@ -487,7 +547,7 @@ function handleRequest(req, res) {
     return;
   }
 
-  sendJson(res, 404, {
+  sendJson(req, res, 404, {
     error: 'Not found',
     routes: [
       '/api/health',
@@ -507,3 +567,12 @@ server.listen(PORT, HOST, () => {
   console.log(`[HeartbeatSidecar] telemetry: ${TELEMETRY_FILE}`);
   console.log(`[HeartbeatSidecar] miner: ${MINER_NAME} (${MINER_REGION})`);
 });
+
+function shutdown(signal) {
+  console.log(`[HeartbeatSidecar] shutting down on ${signal}`);
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(1), 5000).unref();
+}
+
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));

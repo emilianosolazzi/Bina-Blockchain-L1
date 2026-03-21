@@ -118,6 +118,36 @@ impl BitcoinAnchorProof {
             creator_commitment,
         }
     }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.parent_txid.trim().is_empty() {
+            return Err("parent_txid cannot be empty".to_string());
+        }
+        if self.child_txid.trim().is_empty() {
+            return Err("child_txid cannot be empty".to_string());
+        }
+        if self.creator.trim().is_empty() {
+            return Err("creator cannot be empty".to_string());
+        }
+        if self.parent_txid == self.child_txid {
+            return Err("parent_txid and child_txid must differ".to_string());
+        }
+
+        let expected_proof_id = compute_proof_id(
+            &self.parent_txid,
+            &self.child_txid,
+            self.anchor_vout,
+            self.block_height,
+            &self.creator,
+            self.fee_rate,
+            self.creator_commitment.as_deref(),
+        );
+        if self.proof_id != expected_proof_id {
+            return Err("proof_id does not match proof contents".to_string());
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -162,6 +192,8 @@ impl AnchorClaimRegistry {
     }
 
     pub fn register_claim(&mut self, proof: BitcoinAnchorProof) -> Result<(), String> {
+        proof.validate()?;
+
         if self.is_claimed(&proof.proof_id) {
             return Err(format!("duplicate proof_id {}", proof.proof_id));
         }
@@ -206,6 +238,8 @@ impl AnchorVerifier {
         registry: Option<&AnchorClaimRegistry>,
         min_fee_rate: u64,
     ) -> Result<(), String> {
+        proof.validate()?;
+
         if !parent_tx.is_truc() {
             return Err(format!(
                 "parent nVersion={}, expected {}",
@@ -383,5 +417,16 @@ mod tests {
         registry.register_claim(first).unwrap();
         let err = registry.register_claim(second).unwrap_err();
         assert!(err.contains("anchor outpoint already claimed"));
+    }
+
+    #[test]
+    fn rejects_tampered_proof_id() {
+        let parent = parent_with_anchor();
+        let child = child_spending_anchor();
+        let mut proof = BitcoinAnchorProof::create("parent-tx", "child-tx", 1, 1, "creator", 1, None);
+        proof.proof_id = "tampered".to_string();
+
+        let err = AnchorVerifier::verify(&proof, &parent, &child, None, 0).unwrap_err();
+        assert!(err.contains("proof_id does not match proof contents"));
     }
 }

@@ -331,9 +331,8 @@ impl Core {
     fn two_hashes(&self, data: &[u8]) -> [u64; 2] {
         let key: [u8; 32] = {
             let mut k = [0u8; 32];
-            let tb = self.config.tweak.to_le_bytes();
             for i in 0..8 {
-                k[i * 4..(i + 1) * 4].copy_from_slice(&tb);
+                k[i * 4..(i + 1) * 4].copy_from_slice(&self.seeds[i].to_le_bytes());
             }
             k
         };

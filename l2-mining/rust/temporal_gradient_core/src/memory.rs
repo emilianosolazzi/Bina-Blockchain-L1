@@ -272,13 +272,10 @@ impl SecureBuffer {
             return Err(SecureBufferError::InvalidSize);
         }
 
-        let mut data = Vec::with_capacity(size);
-        if data.capacity() < size {
+        let data = vec![0u8; size];
+        if data.len() != size {
             return Err(SecureBufferError::AllocationFailed);
         }
-        // Safety: capacity >= size, all bytes initialised to 0.
-        unsafe { data.set_len(size); }
-        data.iter_mut().for_each(|b| *b = 0);
 
         let canary = make_canary(data.as_ptr());
 
@@ -306,11 +303,7 @@ impl SecureBuffer {
             if let Some(pos) = pool.iter().position(|v| v.capacity() >= size) {
                 let mut data = pool.remove(pos);
                 data.zeroize();
-                // Resize without reallocation (capacity is already sufficient).
-                unsafe {
-                    data.set_len(size);
-                }
-                data[..size].iter_mut().for_each(|b| *b = 0);
+                data.resize(size, 0);
 
                 let canary = make_canary(data.as_ptr());
                 let mut buf = Self {
@@ -507,8 +500,7 @@ impl Drop for SecureBuffer {
                     let mut recycled = Vec::new();
                     std::mem::swap(&mut recycled, &mut self.data);
                     recycled.zeroize();
-                    // Keep capacity, reset length.
-                    unsafe { recycled.set_len(0); }
+                    recycled.clear();
                     pool.push(recycled);
                 }
             }

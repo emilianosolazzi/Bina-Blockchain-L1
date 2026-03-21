@@ -57,6 +57,7 @@ const FRAME_LEN_SIZE: usize = 4;
 const FRAME_MAC_SIZE: usize = 32;
 const FRAME_OVERHEAD: usize = FRAME_LEN_SIZE + FRAME_MAC_SIZE;
 const DEFAULT_MAX_MSG: usize = 64 * 1024 * 1024; // 64 MB
+const COVER_PACKET_MAGIC: [u8; 16] = *b"TG-COVER-NOISE!#";
 
 // ─────────────────────────────────────────────────────────────────
 // Errors
@@ -80,6 +81,8 @@ pub enum TransportError {
     Closed,
     #[error("Reconnect limit exceeded")]
     ReconnectLimitExceeded,
+    #[error("Only HTTPS endpoints are allowed")]
+    InsecureEndpoint,
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -236,6 +239,15 @@ impl RelayChannel {
             endpoint.to_string()
         };
         let url = Url::parse(&s).context(format!("Invalid endpoint: {endpoint}"))?;
+        if url.scheme() != "https" {
+            return Err(TransportError::InsecureEndpoint.into());
+        }
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err(anyhow!("Endpoint must not include credentials"));
+        }
+        if url.path() != "/" || url.query().is_some() || url.fragment().is_some() {
+            return Err(anyhow!("Endpoint must not include path, query, or fragment"));
+        }
         let domain = url
             .host_str()
             .ok_or_else(|| anyhow!("Endpoint missing host"))?
@@ -321,12 +333,10 @@ impl RelayChannel {
     // ── Connect noise burst ─────────────────────────────────────
 
     async fn send_connect_noise(stream: &mut TlsStream<TcpStream>) -> Result<()> {
-        let size = CONNECT_NOISE_SIZE / 2 + OsRng.gen_range(0..CONNECT_NOISE_SIZE / 2);
-        let mut buf = vec![0u8; size];
-        OsRng.fill_bytes(&mut buf);
-        stream.write_all(&buf).await?;
+        let packet = Self::cover_packet(CONNECT_NOISE_SIZE / 2 + OsRng.gen_range(0..CONNECT_NOISE_SIZE / 2));
+        stream.write_all(&packet).await?;
         stream.flush().await?;
-        debug!("Connect noise: {} bytes", size);
+        debug!("Connect noise: {} bytes", packet.len());
         Ok(())
     }
 
@@ -433,6 +443,27 @@ impl RelayChannel {
         ct_eq_32(mac_bytes, &expected)
     }
 
+    fn cover_packet(payload_len: usize) -> Vec<u8> {
+        let random_len = payload_len.max(COVER_PACKET_MAGIC.len()) - COVER_PACKET_MAGIC.len();
+        let mut body = Vec::with_capacity(COVER_PACKET_MAGIC.len() + random_len);
+        body.extend_from_slice(&COVER_PACKET_MAGIC);
+        if random_len > 0 {
+            let mut random = vec![0u8; random_len];
+            OsRng.fill_bytes(&mut random);
+            body.extend_from_slice(&random);
+        }
+        let mac = hmac_sha256(&[0u8; HMAC_KEY_SIZE], &body);
+        let mut frame = Vec::with_capacity(FRAME_OVERHEAD + body.len());
+        frame.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        frame.extend_from_slice(&mac);
+        frame.extend_from_slice(&body);
+        frame
+    }
+
+    fn is_cover_packet(body: &[u8]) -> bool {
+        body.len() >= COVER_PACKET_MAGIC.len() && body[..COVER_PACKET_MAGIC.len()] == COVER_PACKET_MAGIC
+    }
+
     // ── Reconnect ───────────────────────────────────────────────
 
     pub async fn reconnect(&mut self) -> Result<()> {
@@ -489,8 +520,7 @@ impl RelayChannel {
                     break;
                 }
                 let sz = rng.gen_range(NOISE_SIZE_MIN..=NOISE_SIZE_MAX);
-                let mut buf = vec![0u8; sz];
-                rng.fill_bytes(&mut buf);
+                let buf = Self::cover_packet(sz);
                 let mut guard = stream.lock().await;
                 if guard.write_all(&buf).await.is_ok() && guard.flush().await.is_ok() {
                     stats.noise_bytes_sent.fetch_add(sz as u64, Ordering::Relaxed);
@@ -543,43 +573,56 @@ impl SecureTransport for RelayChannel {
         if !self.alive.load(Ordering::Relaxed) {
             return Err(TransportError::Closed.into());
         }
-        // Read 4-byte length + 32-byte MAC
-        let mut header = [0u8; FRAME_OVERHEAD];
-        self.maybe_refresh_keys();
-        let mut stream = self.stream.lock().await;
-        if let Err(err) = stream
-            .read_exact(&mut header)
-            .await
-            .context("recv: header read failed")
-        {
-            self.alive.store(false, Ordering::SeqCst);
-            return Err(err);
-        }
-        let body_len = u32::from_be_bytes(header[..4].try_into().unwrap()) as usize;
-        if body_len > self.config.max_message_size {
-            return Err(TransportError::FrameTooLarge(body_len).into());
-        }
-        let mut body = vec![0u8; body_len];
-        if let Err(err) = stream
-            .read_exact(&mut body)
-            .await
-            .context("recv: body read failed")
-        {
-            self.alive.store(false, Ordering::SeqCst);
-            return Err(err);
-        }
-        let mac: &[u8; 32] = header[FRAME_LEN_SIZE..].try_into().unwrap();
-        if !self.verify_mac(mac, &body) {
+        loop {
+            // Read 4-byte length + 32-byte MAC
+            let mut header = [0u8; FRAME_OVERHEAD];
+            self.maybe_refresh_keys();
+            let mut stream = self.stream.lock().await;
+            if let Err(err) = stream
+                .read_exact(&mut header)
+                .await
+                .context("recv: header read failed")
+            {
+                self.alive.store(false, Ordering::SeqCst);
+                return Err(err);
+            }
+            let body_len = u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as usize;
+            if body_len > self.config.max_message_size {
+                return Err(TransportError::FrameTooLarge(body_len).into());
+            }
+            let mut body = vec![0u8; body_len];
+            if let Err(err) = stream
+                .read_exact(&mut body)
+                .await
+                .context("recv: body read failed")
+            {
+                self.alive.store(false, Ordering::SeqCst);
+                return Err(err);
+            }
+            let mut mac = [0u8; FRAME_MAC_SIZE];
+            mac.copy_from_slice(&header[FRAME_LEN_SIZE..FRAME_OVERHEAD]);
+            let is_cover = Self::is_cover_packet(&body);
+            let mac_valid = if is_cover {
+                let cover_mac = hmac_sha256(&[0u8; HMAC_KEY_SIZE], &body);
+                ct_eq_32(&mac, &cover_mac)
+            } else {
+                self.verify_mac(&mac, &body)
+            };
+            if !mac_valid {
+                self.stats
+                    .integrity_failures
+                    .fetch_add(1, Ordering::Relaxed);
+                return Err(TransportError::IntegrityFailure.into());
+            }
             self.stats
-                .integrity_failures
-                .fetch_add(1, Ordering::Relaxed);
-            return Err(TransportError::IntegrityFailure.into());
+                .bytes_received
+                .fetch_add((FRAME_OVERHEAD + body_len) as u64, Ordering::Relaxed);
+            if is_cover {
+                continue;
+            }
+            self.stats.messages_received.fetch_add(1, Ordering::Relaxed);
+            return Ok(body);
         }
-        self.stats
-            .bytes_received
-            .fetch_add((FRAME_OVERHEAD + body_len) as u64, Ordering::Relaxed);
-        self.stats.messages_received.fetch_add(1, Ordering::Relaxed);
-        Ok(body)
     }
 
     async fn close(&mut self) -> Result<()> {
@@ -773,6 +816,29 @@ mod tests {
         let (_, _, port) =
             RelayChannel::parse_endpoint("https://rpc.example.com:8545").unwrap();
         assert_eq!(port, 8545);
+    }
+
+    #[test]
+    fn reject_non_https_endpoint() {
+        let err = RelayChannel::parse_endpoint("http://example.com:8443").unwrap_err();
+        assert!(err.to_string().contains("HTTPS"));
+    }
+
+    #[test]
+    fn reject_endpoint_with_path() {
+        let err = RelayChannel::parse_endpoint("https://example.com/api").unwrap_err();
+        assert!(err.to_string().contains("path"));
+    }
+
+    #[test]
+    fn cover_packet_roundtrip_is_detectable() {
+        let pkt = RelayChannel::cover_packet(48);
+        let body_len = u32::from_be_bytes(pkt[..4].try_into().unwrap()) as usize;
+        let mut mac = [0u8; 32];
+        mac.copy_from_slice(&pkt[4..36]);
+        let body = &pkt[36..36 + body_len];
+        assert!(RelayChannel::is_cover_packet(body));
+        assert!(ct_eq_32(&mac, &hmac_sha256(&[0u8; HMAC_KEY_SIZE], body)));
     }
 
     // ── Stats ─────────────────────────────────────────────────────

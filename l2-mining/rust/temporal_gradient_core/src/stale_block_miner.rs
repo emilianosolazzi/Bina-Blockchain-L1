@@ -744,8 +744,6 @@ pub struct StaleBlockMiner {
     tracker: LoserChainTracker,
     /// Pending proofs ready for L2 submission.
     pending_proofs: VecDeque<StaleWorkProof>,
-    /// Last known canonical tip height.
-    last_canonical_height: u64,
 }
 
 impl StaleBlockMiner {
@@ -754,7 +752,6 @@ impl StaleBlockMiner {
             config,
             tracker: LoserChainTracker::new(),
             pending_proofs: VecDeque::new(),
-            last_canonical_height: 0,
         }
     }
 
