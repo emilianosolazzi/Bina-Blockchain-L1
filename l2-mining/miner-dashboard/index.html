@@ -779,6 +779,107 @@
     }
     .stale-status-text.on { color: var(--gold); }
 
+    /* ── UTXO Live Scan Panel ── */
+    .utxo-scan-panel {
+      margin-top: 16px;
+      border: 1px solid rgba(34,197,94,.18);
+      border-radius: 14px;
+      background: rgba(15,23,42,.75);
+      padding: 20px 22px;
+      animation: utxoSlideIn .4s ease;
+    }
+    .utxo-scan-panel.hidden { display: none; }
+    @keyframes utxoSlideIn {
+      from { opacity: 0; transform: translateY(-8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .utxo-scan-header {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 14px; flex-wrap: wrap; gap: 8px;
+    }
+    .utxo-steps { display: flex; flex-direction: column; gap: 0; position: relative; }
+    .utxo-step {
+      display: flex; align-items: flex-start; gap: 14px;
+      padding: 11px 0; border-bottom: 1px solid rgba(148,163,184,.07);
+      opacity: 0; transform: translateX(-8px);
+      transition: opacity .35s ease, transform .35s ease;
+    }
+    .utxo-step.visible { opacity: 1; transform: translateX(0); }
+    .utxo-step:last-child { border-bottom: none; }
+    .utxo-step-num {
+      width: 30px; height: 30px; border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 14px; font-weight: 700;
+      border: 2px solid rgba(148,163,184,.25);
+      color: var(--muted); background: var(--bg); flex-shrink: 0;
+      transition: all .3s ease;
+    }
+    .utxo-step.ok .utxo-step-num { border-color: var(--accent-2); background: var(--accent-2); color: #000; }
+    .utxo-step.error .utxo-step-num { border-color: var(--danger); background: var(--danger); color: #fff; }
+    .utxo-step.warn .utxo-step-num { border-color: var(--warn); background: var(--warn); color: #000; }
+    .utxo-step.running .utxo-step-num { border-color: var(--accent); color: var(--accent); animation: utxoPulse 1.2s ease infinite; }
+    @keyframes utxoPulse { 0%,100% { box-shadow: 0 0 0 0 rgba(56,189,248,.4); } 50% { box-shadow: 0 0 0 7px rgba(56,189,248,0); } }
+    .utxo-step-body { flex: 1; min-width: 0; }
+    .utxo-step-title { font-size: 13px; font-weight: 600; color: var(--text); margin-bottom: 2px; }
+    .utxo-step.ok .utxo-step-title { color: var(--accent-2); }
+    .utxo-step.error .utxo-step-title { color: var(--danger); }
+    .utxo-step-detail { font-size: 12px; color: var(--muted); word-break: break-all; line-height: 1.45; }
+    .utxo-step-links { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 5px; }
+    .utxo-step-links a {
+      color: var(--accent); text-decoration: none; font-size: 11px;
+      display: inline-flex; align-items: center; gap: 3px;
+    }
+    .utxo-step-links a:hover { text-decoration: underline; }
+    .utxo-step-links .opreturn-decoded {
+      font-size: 11px; color: var(--accent-2); font-style: italic;
+    }
+    .utxo-step-time { font-size: 11px; color: var(--muted); white-space: nowrap; flex-shrink: 0; padding-top: 2px; }
+    .utxo-data-toggle {
+      display: inline-flex; align-items: center; gap: 4px;
+      margin-top: 5px; font-size: 11px; color: var(--accent);
+      cursor: pointer; user-select: none;
+    }
+    .utxo-data-toggle:hover { text-decoration: underline; }
+    .utxo-raw-json {
+      margin-top: 6px; padding: 10px 12px; border-radius: 8px;
+      background: rgba(0,0,0,.5); border: 1px solid rgba(148,163,184,.08);
+      font-family: 'SF Mono','Fira Code',monospace; font-size: 11px;
+      color: var(--muted); overflow-x: auto; max-height: 220px;
+      overflow-y: auto; display: none; white-space: pre-wrap; line-height: 1.5;
+    }
+    .utxo-raw-json.show { display: block; }
+    .utxo-raw-json .json-key { color: #38bdf8; }
+    .utxo-raw-json .json-str { color: #22c55e; }
+    .utxo-raw-json .json-num { color: #fbbf24; }
+    .utxo-raw-json .json-bool { color: #f472b6; }
+    .utxo-scan-summary {
+      margin-top: 14px; padding: 14px 16px; border-radius: 10px;
+      background: rgba(34,197,94,.06); border: 1px solid rgba(34,197,94,.18);
+      display: none; flex-wrap: wrap; gap: 16px; align-items: center;
+    }
+    .utxo-scan-summary.show { display: flex; }
+    .utxo-scan-summary .s-item { display: flex; flex-direction: column; gap: 2px; }
+    .utxo-scan-summary .s-label {
+      font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
+    }
+    .utxo-scan-summary .s-val {
+      font-size: 13px; font-weight: 600; color: var(--accent-2);
+      font-family: 'SF Mono','Fira Code',monospace;
+    }
+    .utxo-scan-btn {
+      padding: 4px 11px; font-size: 11px; border-radius: 6px;
+      background: rgba(34,197,94,.12); border: 1px solid rgba(34,197,94,.25);
+      color: var(--accent-2); cursor: pointer; font-weight: 600;
+      transition: all .2s;
+    }
+    .utxo-scan-btn:hover { background: rgba(34,197,94,.22); }
+    .utxo-scan-btn:disabled { opacity: .5; cursor: wait; }
+    .utxo-close-btn {
+      background: none; border: 1px solid var(--border); color: var(--muted);
+      padding: 3px 10px; border-radius: 6px; font-size: 11px; cursor: pointer;
+    }
+    .utxo-close-btn:hover { color: var(--text); border-color: var(--muted); }
+
     @media (max-width: 980px) {
       .card { grid-column: span 6; }
       .left, .right { grid-column: span 12; }
@@ -786,6 +887,7 @@
       .status-card { grid-column: span 6; }
       .entropy-source-card { grid-column: span 12 !important; }
       .settings-control { flex-wrap: wrap; }
+      .utxo-scan-panel { padding: 14px; }
     }
     @media (max-width: 640px) {
       .card { grid-column: span 12; }
@@ -797,6 +899,7 @@
       .status-card { grid-column: span 12; }
       .entropy-source-card { grid-column: span 12 !important; }
       .settings-control { gap: 10px; }
+      .utxo-scan-summary { gap: 10px; }
     }
   </style>
 </head>
@@ -987,8 +1090,11 @@
           <!-- Dead UTXO Anchoring -->
           <div class="entropy-source-card utxo-source" style="grid-column: span 4;">
             <div class="source-header">
-              <h3 class="source-title" style="color:var(--accent-2);">💀 Dead UTXO Anchoring</h3>
-              <span class="badge ok" id="utxoStatus">Active</span>
+              <div style="display:flex;align-items:center;gap:10px;">
+                <h3 class="source-title" style="color:var(--accent-2);">💀 Dead UTXO Anchoring</h3>
+                <span class="badge ok" id="utxoStatus">Active</span>
+              </div>
+              <button class="utxo-scan-btn" id="utxoScanBtn">⚡ Live Scan</button>
             </div>
             <div class="source-metrics">
               <div class="source-metric-row"><span>Anchored UTXOs</span><span class="val" id="epUtxoCount">—</span></div>
@@ -1036,6 +1142,25 @@
               <span id="epStaleTgbt">0.00 TGBT (pending)</span>
             </div>
           </div>
+        </div>
+
+        <!-- ── UTXO Live Scan Panel ── -->
+        <div class="utxo-scan-panel hidden" id="utxoScanPanel">
+          <div class="utxo-scan-header">
+            <div style="display:flex;align-items:center;gap:10px;">
+              <span style="font-size:15px;">💀</span>
+              <span style="font-size:14px;font-weight:700;color:var(--accent-2);">UTXO Live Scan — Proof Pipeline</span>
+              <span class="badge ok" id="utxoScanStatusBadge" style="font-size:10px;">Ready</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:10px;">
+              <span class="helper" id="utxoScanTiming"></span>
+              <button class="utxo-close-btn" id="utxoScanClose">✕ Close</button>
+            </div>
+          </div>
+          <div class="utxo-steps" id="utxoScanSteps">
+            <div style="text-align:center;padding:18px;color:var(--muted);font-size:12px;">Click <strong>⚡ Live Scan</strong> above to run the 5-step UTXO verification pipeline</div>
+          </div>
+          <div class="utxo-scan-summary" id="utxoScanSummary"></div>
         </div>
 
         <!-- ── Entropy Mixer Flow Diagram ── -->
@@ -2731,6 +2856,155 @@
 
     // Initialize toggle state on page load
     syncStaleToggleUI();
+
+    // ── UTXO Live Scan ──────────────────────────────────────
+    const RANDOMNESS_API = 'http://127.0.0.1:4271';
+    let utxoScanRunning = false;
+
+    function utxoEsc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+    function utxoJsonHighlight(obj) {
+      return JSON.stringify(obj, null, 2)
+        .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+        .replace(/"([^"]+)":/g, '<span class="json-key">"$1"</span>:')
+        .replace(/: "([^"]*)"/g, ': <span class="json-str">"$1"</span>')
+        .replace(/: (\d+\.?\d*)/g, ': <span class="json-num">$1</span>')
+        .replace(/: (true|false|null)/g, ': <span class="json-bool">$1</span>');
+    }
+
+    function utxoStepLinks(step) {
+      const parts = [];
+      if (step.data?.explorerUrl)
+        parts.push(`<a href="${step.data.explorerUrl}" target="_blank" rel="noopener">🔗 View on mempool.space ↗</a>`);
+      if (step.data?.apiUrls?.tx)
+        parts.push(`<a href="${step.data.apiUrls.tx}" target="_blank" rel="noopener">📡 API: /tx ↗</a>`);
+      if (step.data?.apiUrls?.outspend)
+        parts.push(`<a href="${step.data.apiUrls.outspend}" target="_blank" rel="noopener">📡 API: /outspend ↗</a>`);
+      if (step.data?.decodedData?.decoded)
+        parts.push(`<span class="opreturn-decoded">📝 OP_RETURN: "${utxoEsc(step.data.decodedData.decoded)}"</span>`);
+      if (step.data?.blockHash)
+        parts.push(`<a href="https://mempool.space/block/${step.data.blockHash}" target="_blank" rel="noopener">📦 Block ↗</a>`);
+      return parts.length ? `<div class="utxo-step-links">${parts.join('')}</div>` : '';
+    }
+
+    function utxoRenderStep(step) {
+      const uid = 'utxo-json-' + step.step + '-' + Math.random().toString(36).slice(2,6);
+      return `
+        <div class="utxo-step running">
+          <div class="utxo-step-num">${step.icon || step.step}</div>
+          <div class="utxo-step-body">
+            <div class="utxo-step-title">${utxoEsc(step.title)}</div>
+            <div class="utxo-step-detail">${utxoEsc(step.detail)}</div>
+            ${utxoStepLinks(step)}
+            <div class="utxo-data-toggle" onclick="document.getElementById('${uid}').classList.toggle('show');this.textContent=this.textContent.includes('▶')?'▼ Hide raw data':'▶ Show raw data'">▶ Show raw data</div>
+            <div class="utxo-raw-json" id="${uid}">${utxoJsonHighlight(step.data)}</div>
+          </div>
+          <div class="utxo-step-time">${step.durationMs}ms</div>
+        </div>`;
+    }
+
+    function utxoRenderSummary(el, s) {
+      el.innerHTML = `
+        <div class="s-item"><span class="s-label">UTXO</span><span class="s-val">${s.txid.slice(0,8)}…:${s.vout}</span></div>
+        <div class="s-item"><span class="s-label">Type</span><span class="s-val">${s.type}</span></div>
+        <div class="s-item"><span class="s-label">Block</span><span class="s-val">${Number(s.blockHeight).toLocaleString()}</span></div>
+        <div class="s-item"><span class="s-label">Dead?</span><span class="s-val" style="color:${s.isDead?'var(--accent-2)':'var(--danger)'}">${s.isDead?'✓ Verified':'✗ Unverified'}</span></div>
+        <div class="s-item"><span class="s-label">Anchor ID</span><span class="s-val">${s.anchorId.slice(0,14)}…</span></div>
+        <a href="${s.explorerUrl}" target="_blank" rel="noopener" style="color:var(--accent);font-size:12px;text-decoration:none;">View TX on mempool.space ↗</a>`;
+      el.classList.add('show');
+    }
+
+    function utxoUpdateCard(scan) {
+      if (!scan.summary) return;
+      const s = scan.summary;
+      els.epUtxoCount.textContent = '1';
+      els.epUtxoScanned.textContent = scan.steps[0]?.data?.count || '—';
+      els.epUtxoHeight.textContent = Number(s.blockHeight).toLocaleString();
+      els.epUtxoHash.textContent = s.dataHash;
+      els.epUtxoEnterprise.textContent = s.isDead ? 'Verified ✓' : 'Unverified';
+      els.epUtxoEnterprise.className = s.isDead ? 'val ok' : 'val warn';
+      els.epUtxoFreshness.textContent = 'Just scanned';
+      els.epUtxoFreshness.className = 'val ok';
+      els.epUtxoQuality.style.width = s.isDead ? '95%' : '30%';
+      els.epUtxoQualityLabel.textContent = s.isDead ? '95/100' : '30/100';
+      setBadge(els.utxoStatus, s.isDead ? 'Verified' : 'Unverified', s.isDead ? 'ok' : 'warn');
+      // Feed real data into entropy state
+      entropyState.utxo.anchored = 1;
+      entropyState.utxo.scanned = scan.steps[0]?.data?.count || 0;
+      entropyState.utxo.height = s.blockHeight;
+      entropyState.utxo.hash = s.dataHash;
+      entropyState.utxo.quality = s.isDead ? 95 : 30;
+    }
+
+    async function runUtxoScan() {
+      if (utxoScanRunning) return;
+      utxoScanRunning = true;
+
+      const panel = els.utxoScanPanel;
+      const stepsEl = els.utxoScanSteps;
+      const summaryEl = els.utxoScanSummary;
+      const badge = els.utxoScanStatusBadge;
+      const timing = els.utxoScanTiming;
+      const btn = els.utxoScanBtn;
+
+      panel.classList.remove('hidden');
+      stepsEl.innerHTML = '';
+      summaryEl.classList.remove('show');
+      summaryEl.innerHTML = '';
+      badge.className = 'badge warn'; badge.textContent = 'Scanning…';
+      btn.disabled = true; btn.textContent = '⏳ Scanning…';
+      timing.textContent = '';
+
+      try {
+        const resp = await fetch(`${RANDOMNESS_API}/api/utxo/scan`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+
+        // Render steps one-by-one with staggered animation
+        for (let i = 0; i < data.steps.length; i++) {
+          const html = utxoRenderStep(data.steps[i]);
+          stepsEl.insertAdjacentHTML('beforeend', html);
+          const stepEl = stepsEl.lastElementChild;
+          // Trigger animation after paint
+          await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+          stepEl.classList.add('visible');
+          stepEl.classList.remove('running');
+          stepEl.classList.add(data.steps[i].status);
+          await new Promise(r => setTimeout(r, 220));
+        }
+
+        if (data.summary) {
+          utxoRenderSummary(summaryEl, data.summary);
+        }
+        utxoUpdateCard(data);
+
+        badge.className = data.error ? 'badge fail' : 'badge ok';
+        badge.textContent = data.error ? 'Error' : `Done — ${data.steps.filter(s=>s.status==='ok').length}/5 passed`;
+        timing.textContent = `${data.durationMs}ms total • ${new Date(data.timestamp).toLocaleTimeString()}`;
+        showToast(`UTXO scan complete — ${data.steps.filter(s=>s.status==='ok').length}/5 steps passed in ${data.durationMs}ms`);
+
+      } catch (err) {
+        badge.className = 'badge fail'; badge.textContent = 'Failed';
+        stepsEl.innerHTML = `<div style="color:var(--danger);font-size:12px;padding:14px;text-align:center;">
+          <strong>Scan failed:</strong> ${utxoEsc(err.message)}<br>
+          <span style="color:var(--muted);font-size:11px;">Make sure the Randomness API is running on port 4271 (<code>start-all.ps1</code> or <code>node server.js</code> in randomness-api/)</span>
+        </div>`;
+        showToast('UTXO scan failed — is the Randomness API running?');
+      } finally {
+        utxoScanRunning = false;
+        btn.disabled = false; btn.textContent = '⚡ Live Scan';
+      }
+    }
+
+    els.utxoScanBtn.addEventListener('click', runUtxoScan);
+    els.utxoScanClose.addEventListener('click', () => {
+      els.utxoScanPanel.classList.add('hidden');
+    });
+
+    // Auto-load last scan result on page load (if available)
+    fetch(`${RANDOMNESS_API}/api/utxo/latest`).then(r => r.ok ? r.json() : null).then(scan => {
+      if (scan && scan.summary) utxoUpdateCard(scan);
+    }).catch(() => {});
 
     els.refreshEntropy.addEventListener('click', () => {
       if (entropyState.initialized) tickEntropyPipeline();

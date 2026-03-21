@@ -23,6 +23,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { ethers } = require('ethers');
 const { getEpochFilePath, verifyEpochStorage } = require('./storage-attestation');
+const utxoScanner = require('./utxo-scanner');
 
 // ── Config ──────────────────────────────────────────────
 const HOST = process.env.RANDOMNESS_HOST || '127.0.0.1';
@@ -432,6 +433,24 @@ const server = http.createServer((req, res) => {
 			return handleHealth(req, res);
 		}
 
+		// ── UTXO live scan endpoints ──
+		if (req.method === 'GET' && p === '/api/utxo/scan') {
+			utxoScanner.runFullScan('live-dashboard-scan-' + Date.now())
+				.then(result => sendJson(res, 200, result))
+				.catch(err => sendJson(res, 500, { error: err.message }));
+			return;
+		}
+		if (req.method === 'GET' && p === '/api/utxo/latest') {
+			const last = utxoScanner.getLastScan();
+			return last ? sendJson(res, 200, last) : sendJson(res, 404, { error: 'No scan yet. Hit /api/utxo/scan first.' });
+		}
+		if (req.method === 'GET' && p === '/api/utxo/inventory') {
+			return sendJson(res, 200, utxoScanner.getInventoryInfo());
+		}
+		if (req.method === 'GET' && p === '/api/utxo/history') {
+			return sendJson(res, 200, { scans: utxoScanner.getScanHistory() });
+		}
+
 		sendJson(res, 404, { error: 'Not found' });
 	} catch (err) {
 		console.error('[API] Error:', err);
@@ -449,7 +468,11 @@ server.listen(PORT, HOST, () => {
 	console.log(`    GET  /api/epochs`);
 	console.log(`    GET  /api/epochs/:epochId`);
 	console.log(`    POST /api/epochs`);
-	console.log(`    GET  /api/health\n`);
+	console.log(`    GET  /api/health`);
+	console.log(`    GET  /api/utxo/scan`);
+	console.log(`    GET  /api/utxo/latest`);
+	console.log(`    GET  /api/utxo/inventory`);
+	console.log(`    GET  /api/utxo/history\n`);
 });
 
 module.exports = { saveEpoch, epochIndex, epochLeaves };
