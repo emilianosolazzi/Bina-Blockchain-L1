@@ -21,6 +21,7 @@ contract TemporalGradientCore is
     bytes32 public constant TOKENOMICS_MODULE = keccak256("TOKENOMICS_MODULE");
     bytes32 public constant GOVERNANCE_MODULE = keccak256("GOVERNANCE_MODULE");
     bytes32 public constant RATE_LIMIT_MODULE = keccak256("RATE_LIMIT_MODULE");
+    bytes32 public constant STALE_BLOCK_MODULE = keccak256("STALE_BLOCK_MODULE");
 
     bytes32[OUTPUT_HISTORY_SIZE] public outputHistory;
     uint64 public currentOutputIndex;
@@ -71,7 +72,8 @@ contract TemporalGradientCore is
             moduleId != RANDOMNESS_MODULE &&
             moduleId != TOKENOMICS_MODULE &&
             moduleId != GOVERNANCE_MODULE &&
-            moduleId != RATE_LIMIT_MODULE
+            moduleId != RATE_LIMIT_MODULE &&
+            moduleId != STALE_BLOCK_MODULE
         ) revert InvalidModule();
 
         address previous = modules[moduleId];

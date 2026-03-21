@@ -11,6 +11,7 @@ pub mod paths;
 pub mod pending;
 pub mod runtime;
 pub mod seed;
+pub mod stale_block_miner;
 pub mod storage_verification;
 pub mod telemetry;
 pub mod tg_output_filter;
@@ -31,6 +32,11 @@ pub use crypto::{
 };
 pub use entropy_quality_scorer::{ContributorStats, EntropyQualityScorer, EntropyScoreReport};
 pub use logging::setup_logging;
+pub use stale_block_miner::{
+    ChainForkEvent, ChainTip, LoserChainStats, LoserChainTracker, ScoreBreakdown,
+    StaleBlockError, StaleBlockHeader, StaleBlockMiner, StaleBlockMinerConfig,
+    StaleEntropyReport, StaleWorkProof, TipStatus,
+};
 pub use memory::{SecureBuffer, SecureBufferError};
 pub use paths::{app_paths, ensure_app_layout, AppPaths};
 pub use runtime::{spawn_miner, MinerHandle};
