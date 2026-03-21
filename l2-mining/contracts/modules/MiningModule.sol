@@ -18,7 +18,7 @@ contract MiningModule is ModuleBase, EIP712("TemporalGradientBeacon", "1") {
 
     uint256 public constant MIN_DIFFICULTY = 1000;
     uint256 public constant MAX_DIFFICULTY = 2**245;
-    uint256 public constant REQUIRED_TSTAKE_AMOUNT = 100 ether;
+    uint256 public constant REQUIRED_TGBT_HOLD_AMOUNT = 100 ether;
     uint256 private constant DEFAULT_SUBMISSION_COST = 1;
     uint256 private constant DEFAULT_REVEAL_COST = 2;
     uint256 private constant MAX_BATCH = 20;
@@ -26,7 +26,7 @@ contract MiningModule is ModuleBase, EIP712("TemporalGradientBeacon", "1") {
     bytes32 private constant MINING_COMMITMENT_TYPEHASH =
         keccak256("MiningCommitment(address miner,bytes32 commitHash,uint256 poolId,uint256 nonce,uint256 deadline)");
 
-    IERC20 public stakeToken;
+    IERC20 public holdToken;
     uint8 public poolCount;
     uint8 public minBlockInterval;
     uint8 public minCommitmentAge;
@@ -49,15 +49,15 @@ contract MiningModule is ModuleBase, EIP712("TemporalGradientBeacon", "1") {
     error ActiveCommitmentExists();
     error MiningTooFrequently();
     error InvalidSignature();
-    error InsufficientStake();
+    error InsufficientHoldBalance();
     error BatchTooLarge();
     error ArrayLengthMismatch();
     error InvalidPreviousOutput();
 
-    function initialize(address coreAddress, address stakeTokenAddress, uint256 initialDifficulty, uint256 initialEmission) external {
+    function initialize(address coreAddress, address holdTokenAddress, uint256 initialDifficulty, uint256 initialEmission) external {
         __ModuleBase_init(coreAddress);
 
-        stakeToken = IERC20(stakeTokenAddress);
+        holdToken = IERC20(holdTokenAddress);
         poolCount = 1;
         minBlockInterval = 1;
         minCommitmentAge = 2;
@@ -83,7 +83,7 @@ contract MiningModule is ModuleBase, EIP712("TemporalGradientBeacon", "1") {
         bytes calldata signature
     ) public whenSystemActive {
         _rateLimit().consumeOrRevert(msg.sender, DEFAULT_SUBMISSION_COST, keccak256("MINING_COMMIT"));
-        if (stakeToken.balanceOf(msg.sender) < REQUIRED_TSTAKE_AMOUNT) revert InsufficientStake();
+        if (holdToken.balanceOf(msg.sender) < REQUIRED_TGBT_HOLD_AMOUNT) revert InsufficientHoldBalance();
         if (poolId >= poolCount || !miningPools[poolId].active) revert InvalidPoolId();
         if (block.timestamp > deadline) revert DeadlineExpired();
 
@@ -128,7 +128,7 @@ contract MiningModule is ModuleBase, EIP712("TemporalGradientBeacon", "1") {
         uint8 poolId
     ) external whenSystemActive {
         _rateLimit().consumeOrRevert(msg.sender, DEFAULT_REVEAL_COST, keccak256("MINING_REVEAL"));
-        if (stakeToken.balanceOf(msg.sender) < REQUIRED_TSTAKE_AMOUNT) revert InsufficientStake();
+        if (holdToken.balanceOf(msg.sender) < REQUIRED_TGBT_HOLD_AMOUNT) revert InsufficientHoldBalance();
         if (poolId >= poolCount || !miningPools[poolId].active) revert InvalidPoolId();
 
         MiningLib.Commitment storage commitment = minerCommitments[msg.sender];

@@ -14,7 +14,7 @@ contract MiningModuleHarness is MiningModule {
         uint8 poolId
     ) external whenSystemActive {
         _rateLimit().consumeOrRevert(msg.sender, 2, keccak256("MINING_REVEAL"));
-        if (stakeToken.balanceOf(msg.sender) < REQUIRED_TSTAKE_AMOUNT) revert InsufficientStake();
+        if (holdToken.balanceOf(msg.sender) < REQUIRED_TGBT_HOLD_AMOUNT) revert InsufficientHoldBalance();
         if (poolId >= poolCount || !miningPools[poolId].active) revert InvalidPoolId();
 
         MiningLib.Commitment storage commitment = minerCommitments[msg.sender];

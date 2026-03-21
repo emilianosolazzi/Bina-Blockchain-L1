@@ -19,7 +19,7 @@ contract DeployLocalModularMiningStackScript is Script {
             address tokenomicsModuleAddress,
             address rateLimitModuleAddress,
             address rewardTokenAddress,
-            address stakeTokenAddress
+            address holdTokenAddress
         )
     {
         uint256 deployerPrivateKey = vm.envUint("DEPLOYER_PRIVATE_KEY");
@@ -34,12 +34,12 @@ contract DeployLocalModularMiningStackScript is Script {
         vm.startBroadcast(deployerPrivateKey);
 
         MockProtocolToken rewardToken = new MockProtocolToken("Reward Token", "RWD");
-        MockProtocolToken stakeToken = new MockProtocolToken("Stake Token", "STK");
+    MockProtocolToken holdToken = new MockProtocolToken("TGBT Token", "TGBT");
 
         TemporalGradientCore core = new TemporalGradientCore(admin, bytes32(0));
 
         MiningModule miningModule = new MiningModule();
-        miningModule.initialize(address(core), address(stakeToken), initialDifficulty, initialEmission);
+        miningModule.initialize(address(core), address(holdToken), initialDifficulty, initialEmission);
 
         RandomnessModule randomnessModule = new RandomnessModule();
         randomnessModule.initialize(address(core), address(rewardToken));
@@ -63,7 +63,7 @@ contract DeployLocalModularMiningStackScript is Script {
         core.setModule(keccak256("TOKENOMICS_MODULE"), address(tokenomicsModule));
         core.setModule(keccak256("RATE_LIMIT_MODULE"), address(rateLimitModule));
 
-        stakeToken.mint(minerAddress, miningModule.REQUIRED_TSTAKE_AMOUNT());
+        holdToken.mint(minerAddress, miningModule.REQUIRED_TGBT_HOLD_AMOUNT());
 
         vm.stopBroadcast();
 
@@ -74,8 +74,8 @@ contract DeployLocalModularMiningStackScript is Script {
         console2.log("Tokenomics module:", address(tokenomicsModule));
         console2.log("Rate limit module:", address(rateLimitModule));
         console2.log("Reward token:", address(rewardToken));
-        console2.log("Stake token:", address(stakeToken));
-        console2.log("Miner address funded with stake:", minerAddress);
+        console2.log("Anti-sybil hold token:", address(holdToken));
+        console2.log("Miner address funded with TGBT hold balance:", minerAddress);
 
         return (
             address(core),
@@ -84,7 +84,7 @@ contract DeployLocalModularMiningStackScript is Script {
             address(tokenomicsModule),
             address(rateLimitModule),
             address(rewardToken),
-            address(stakeToken)
+            address(holdToken)
         );
     }
 }

@@ -57,11 +57,11 @@ contract BatchMiningModule is ModuleBase, EIP712("TemporalGradientBatch", "1"), 
     /// @notice TGBT reward per valid solution (same unit as MiningModule)
     uint256 public constant REWARD_PER_SOLUTION = 1.375 ether;
 
-    /// @notice Required TSTAKE balance to submit epoch roots
-    uint256 public constant REQUIRED_TSTAKE = 100 ether;
+    /// @notice Required TGBT hold balance to submit epoch roots for anti-sybil protection
+    uint256 public constant REQUIRED_TGBT_HOLD_AMOUNT = 100 ether;
 
     // ── Storage ─────────────────────────────────────────
-    IERC20 public stakeToken;
+    IERC20 public holdToken;
 
     /// @notice Auto-incrementing epoch counter
     uint256 private _nextEpochId;
@@ -93,9 +93,9 @@ contract BatchMiningModule is ModuleBase, EIP712("TemporalGradientBatch", "1"), 
 
     // ── Initialiser (matches ModuleBase pattern) ────────
 
-    function initialize(address coreAddress, address stakeTokenAddress) external {
+    function initialize(address coreAddress, address holdTokenAddress) external {
         __ModuleBase_init(coreAddress);
-        stakeToken = IERC20(stakeTokenAddress);
+        holdToken = IERC20(holdTokenAddress);
     }
 
     // ── Operator: commitEpochRoot ───────────────────────
@@ -109,8 +109,8 @@ contract BatchMiningModule is ModuleBase, EIP712("TemporalGradientBatch", "1"), 
         uint256 deadline,
         bytes calldata signature
     ) external override whenSystemActive {
-        // Stake guard
-        if (stakeToken.balanceOf(msg.sender) < REQUIRED_TSTAKE)
+        // Anti-sybil TGBT hold guard
+        if (holdToken.balanceOf(msg.sender) < REQUIRED_TGBT_HOLD_AMOUNT)
             revert IBatchMiningModule.InvalidLeafCount(); // reuse — could mint a custom one
 
         // Leaf bound

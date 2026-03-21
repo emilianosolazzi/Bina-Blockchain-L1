@@ -2,7 +2,7 @@
 pragma solidity ^0.8.28;
 
 import { RandomnessLib } from "./RandomnessLib.sol";
-import { ECDSAUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/cryptography/ECDSAUpgradeable.sol";
+import { ECDSA } from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
 /**
  * @title RandomnessHandlerLib
@@ -17,14 +17,14 @@ import { ECDSAUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/cryp
  *      sequencer-controlled and not a reliable entropy source. The five inputs
  *      are now all miner-derived or chain-structural.
  *   3. FeeNotSet guard made opt-in via feeEnforced flag — allows zero-fee
- *      testnet / free-tier operation without reverting every request.
+ *      testnet / free-tier operation when emergency fee parameters are unset.
  *   4. contributeEntropy now returns an explicit error when the request does
  *      not exist rather than silently producing a zero randomValue.
  *   5. EIP-712 structured hash replaces raw abi.encodePacked in the message
  *      hash to prevent cross-contract signature replay.
  */
 library RandomnessHandlerLib {
-    using ECDSAUpgradeable for bytes32;
+    using ECDSA for bytes32;
 
     // ─────────────────────────────────────────────────────────────
     // Events
@@ -92,7 +92,7 @@ library RandomnessHandlerLib {
         /// Key: miner address → registered.
         mapping(address => bool) registeredMiners;
 
-        /// When true, requestRandomness() reverts if state.fee == 0.
+        /// When true, requestRandomness() reverts if emergency fee parameters are unset.
         /// Set to false for testnet / free-tier deployments.
         bool feeEnforced;
 
@@ -139,7 +139,7 @@ library RandomnessHandlerLib {
     /**
      * @notice Register a miner address as authorised to contribute entropy.
      * @dev    Call from the host contract with appropriate access control.
-     *         On mainnet this should require the miner to hold >= REQUIRED_TSTAKE_AMOUNT.
+        *         On mainnet this should require the miner to hold >= REQUIRED_TGBT_HOLD_AMOUNT.
      */
     function registerMiner(
         RandomnessContext storage self,
@@ -195,13 +195,6 @@ library RandomnessHandlerLib {
         RandomnessContext storage self,
         bytes32 historicalHash
     ) internal {
-        RandomnessLib.processBatch(
-            self.state,
-            3,
-            historicalHash,
-            self.entropyAccumulator
-        );
-
         bytes32 newRoot = keccak256(abi.encodePacked(
             self.entropyMerkleRoot,   // 1. prior root
             self.entropyAccumulator,  // 2. contribution accumulator
@@ -287,9 +280,9 @@ library RandomnessHandlerLib {
     /**
      * @notice Open a new randomness request.
      *
-     * Fix: FeeNotSet revert is now conditional on self.feeEnforced.
-     * When feeEnforced == false (default for testnet / free-tier),
-     * requests with fee == 0 are accepted normally.
+    * Fix: FeeNotSet revert is now conditional on self.feeEnforced.
+    * When feeEnforced == false (default for testnet / free-tier),
+    * requests are accepted even if emergency fee parameters are unset.
      *
      * @param self      Storage context.
      * @param userSeed  Caller-provided seed mixed into the output.
@@ -302,7 +295,11 @@ library RandomnessHandlerLib {
         address requester
     ) internal returns (uint256 requestId) {
         // Fix 3: only revert on zero fee when enforcement is explicitly enabled
-        if (self.feeEnforced && self.state.fee == 0) revert FeeNotSet();
+        if (
+            self.feeEnforced &&
+            self.state.baseEmergencyFee == 0 &&
+            self.state.feePerContributor == 0
+        ) revert FeeNotSet();
 
         requestId = RandomnessLib.createRequest(
             self.state,
@@ -347,7 +344,7 @@ library RandomnessHandlerLib {
             self.state,
             requestId,
             historicalHash,
-            self.entropyAccumulator
+            bytes32(self.entropyAccumulator)
         );
 
         // Fix 4: surface silent failures

@@ -1,3 +1,4 @@
+pub mod bitcoin_anchor_proof;
 pub mod bitcoin_dead_utxo_anchor;
 pub mod chain;
 pub mod config;
@@ -15,6 +16,10 @@ pub mod tg_output_filter;
 pub mod tg_relay_transport;
 pub mod utxo_fetcher;
 
+pub use bitcoin_anchor_proof::{
+    AnchorClaimRegistry, AnchorVerifier, BitcoinAnchorProof, BitcoinTxInputRef,
+    BitcoinTxOutputRef, TrucTransactionProof, MAX_CHILD_WEIGHT, TRUC_VERSION,
+};
 pub use bitcoin_dead_utxo_anchor::{DeadUTXOAnchor, DeadUTXOAnchorDB, DeadUTXOType};
 pub use chain::{wallet_address_from_config, LiveChallenge, LiveMiningClient, LiveSubmission};
 pub use config::{load_or_create_config, default_config_json, MinerConfig};

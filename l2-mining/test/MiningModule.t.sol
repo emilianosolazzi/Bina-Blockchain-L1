@@ -33,7 +33,7 @@ contract MiningModuleTest is Test {
     MiningModuleHarness internal mining;
     RateLimitModule internal rateLimit;
     MockTokenomicsModule internal tokenomics;
-    MockProtocolToken internal stakeToken;
+    MockProtocolToken internal holdToken;
 
     struct RevealFixture {
         bytes32 previousOutput;
@@ -57,13 +57,13 @@ contract MiningModuleTest is Test {
 
         core = new TemporalGradientCore(address(this), bytes32(uint256(1)));
 
-        stakeToken = new MockProtocolToken("Stake Token", "STK");
+        holdToken = new MockProtocolToken("TGBT Token", "TGBT");
 
         rateLimit = new RateLimitModule();
         rateLimit.initialize(address(core));
 
         mining = new MiningModuleHarness();
-        mining.initialize(address(core), address(stakeToken), INITIAL_DIFFICULTY, type(uint256).max / 4);
+        mining.initialize(address(core), address(holdToken), INITIAL_DIFFICULTY, type(uint256).max / 4);
 
         tokenomics = new MockTokenomicsModule();
 
@@ -71,8 +71,8 @@ contract MiningModuleTest is Test {
         core.setModule(TOKENOMICS_MODULE_ID, address(tokenomics));
         core.setModule(MINING_MODULE_ID, address(mining));
 
-        stakeToken.mint(miner, mining.REQUIRED_TSTAKE_AMOUNT());
-        stakeToken.mint(secondMiner, mining.REQUIRED_TSTAKE_AMOUNT());
+        holdToken.mint(miner, mining.REQUIRED_TGBT_HOLD_AMOUNT());
+        holdToken.mint(secondMiner, mining.REQUIRED_TGBT_HOLD_AMOUNT());
     }
 
     function testSubmitCommitmentStoresStateAndIncrementsNonce() public {
@@ -116,11 +116,11 @@ contract MiningModuleTest is Test {
         assertEq(lastUpdateBlock, block.number);
     }
 
-    function testSubmitCommitmentRejectsInvalidSignatureStakeAndPool() public {
+    function testSubmitCommitmentRejectsInvalidSignatureHoldAndPool() public {
         RevealFixture memory fixture = _buildFixture(minerPk, miner, core.outputHistoryAt(0), 0, bytes32("secret-b"), 0);
 
         vm.prank(vm.addr(0xDEAD));
-        vm.expectRevert(MiningModule.InsufficientStake.selector);
+        vm.expectRevert(MiningModule.InsufficientHoldBalance.selector);
         mining.submitMiningCommitment(fixture.commitHash, 0, fixture.commitmentNonce, fixture.deadline, fixture.commitmentSignature);
 
         vm.prank(miner);
@@ -172,19 +172,19 @@ contract MiningModuleTest is Test {
         assertEq(core.outputHistoryAt(newIndex), fixture.expectedOutput);
     }
 
-    function testRevealCommitmentRequiresStakeAtRevealTime() public {
-        RevealFixture memory fixture = _buildFixture(minerPk, miner, core.outputHistoryAt(0), 0, bytes32("secret-c-stake"), 19);
-        uint256 requiredStake = mining.REQUIRED_TSTAKE_AMOUNT();
+    function testRevealCommitmentRequiresHoldBalanceAtRevealTime() public {
+        RevealFixture memory fixture = _buildFixture(minerPk, miner, core.outputHistoryAt(0), 0, bytes32("secret-c-hold"), 19);
+        uint256 requiredHoldAmount = mining.REQUIRED_TGBT_HOLD_AMOUNT();
 
         vm.prank(miner);
         mining.submitMiningCommitment(fixture.commitHash, 0, fixture.commitmentNonce, fixture.deadline, fixture.commitmentSignature);
 
         vm.prank(miner);
-        stakeToken.transfer(address(0xCAFE), requiredStake);
+        holdToken.transfer(address(0xCAFE), requiredHoldAmount);
 
         vm.roll(block.number + mining.minCommitmentAge());
         vm.prank(miner);
-        vm.expectRevert(MiningModule.InsufficientStake.selector);
+        vm.expectRevert(MiningModule.InsufficientHoldBalance.selector);
         mining.revealMiningCommitmentHarness(
             fixture.previousOutput,
             fixture.temporalSeed,
