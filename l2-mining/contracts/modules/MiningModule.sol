@@ -18,7 +18,7 @@ contract MiningModule is ModuleBase, EIP712("TemporalGradientBeacon", "1") {
 
     uint256 public constant MIN_DIFFICULTY = 1000;
     uint256 public constant MAX_DIFFICULTY = 2**245;
-    uint256 public constant REQUIRED_TGBT_HOLD_AMOUNT = 100 ether;
+    // Hold requirement removed — genesis miners can mine with 0 TGBT
     uint256 private constant DEFAULT_SUBMISSION_COST = 1;
     uint256 private constant DEFAULT_REVEAL_COST = 2;
     uint256 private constant MAX_BATCH = 20;
@@ -49,7 +49,7 @@ contract MiningModule is ModuleBase, EIP712("TemporalGradientBeacon", "1") {
     error ActiveCommitmentExists();
     error MiningTooFrequently();
     error InvalidSignature();
-    error InsufficientHoldBalance();
+    // error InsufficientHoldBalance(); // removed — no hold requirement
     error BatchTooLarge();
     error ArrayLengthMismatch();
     error InvalidPreviousOutput();
@@ -83,7 +83,6 @@ contract MiningModule is ModuleBase, EIP712("TemporalGradientBeacon", "1") {
         bytes calldata signature
     ) public whenSystemActive {
         _rateLimit().consumeOrRevert(msg.sender, DEFAULT_SUBMISSION_COST, keccak256("MINING_COMMIT"));
-        if (holdToken.balanceOf(msg.sender) < REQUIRED_TGBT_HOLD_AMOUNT) revert InsufficientHoldBalance();
         if (poolId >= poolCount || !miningPools[poolId].active) revert InvalidPoolId();
         if (block.timestamp > deadline) revert DeadlineExpired();
 
@@ -128,7 +127,6 @@ contract MiningModule is ModuleBase, EIP712("TemporalGradientBeacon", "1") {
         uint8 poolId
     ) external whenSystemActive {
         _rateLimit().consumeOrRevert(msg.sender, DEFAULT_REVEAL_COST, keccak256("MINING_REVEAL"));
-        if (holdToken.balanceOf(msg.sender) < REQUIRED_TGBT_HOLD_AMOUNT) revert InsufficientHoldBalance();
         if (poolId >= poolCount || !miningPools[poolId].active) revert InvalidPoolId();
 
         MiningLib.Commitment storage commitment = minerCommitments[msg.sender];

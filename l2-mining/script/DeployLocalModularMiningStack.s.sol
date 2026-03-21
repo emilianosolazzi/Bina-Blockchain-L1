@@ -63,7 +63,7 @@ contract DeployLocalModularMiningStackScript is Script {
         core.setModule(keccak256("TOKENOMICS_MODULE"), address(tokenomicsModule));
         core.setModule(keccak256("RATE_LIMIT_MODULE"), address(rateLimitModule));
 
-        holdToken.mint(minerAddress, miningModule.REQUIRED_TGBT_HOLD_AMOUNT());
+        // No hold requirement — miner can mine with 0 TGBT
 
         vm.stopBroadcast();
 

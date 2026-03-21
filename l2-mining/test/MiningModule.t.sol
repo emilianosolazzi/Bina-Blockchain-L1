@@ -71,8 +71,8 @@ contract MiningModuleTest is Test {
         core.setModule(TOKENOMICS_MODULE_ID, address(tokenomics));
         core.setModule(MINING_MODULE_ID, address(mining));
 
-        holdToken.mint(miner, mining.REQUIRED_TGBT_HOLD_AMOUNT());
-        holdToken.mint(secondMiner, mining.REQUIRED_TGBT_HOLD_AMOUNT());
+        holdToken.mint(miner, 100 ether);   // optional — no hold gate, but keeps wallet funded
+        holdToken.mint(secondMiner, 100 ether);
     }
 
     function testSubmitCommitmentStoresStateAndIncrementsNonce() public {
@@ -119,8 +119,9 @@ contract MiningModuleTest is Test {
     function testSubmitCommitmentRejectsInvalidSignatureHoldAndPool() public {
         RevealFixture memory fixture = _buildFixture(minerPk, miner, core.outputHistoryAt(0), 0, bytes32("secret-b"), 0);
 
+        // No hold-balance gate — unfunded caller gets InvalidSignature (sig was built for miner, not 0xDEAD)
         vm.prank(vm.addr(0xDEAD));
-        vm.expectRevert(MiningModule.InsufficientHoldBalance.selector);
+        vm.expectRevert(MiningModule.InvalidSignature.selector);
         mining.submitMiningCommitment(fixture.commitHash, 0, fixture.commitmentNonce, fixture.deadline, fixture.commitmentSignature);
 
         vm.prank(miner);
@@ -172,28 +173,7 @@ contract MiningModuleTest is Test {
         assertEq(core.outputHistoryAt(newIndex), fixture.expectedOutput);
     }
 
-    function testRevealCommitmentRequiresHoldBalanceAtRevealTime() public {
-        RevealFixture memory fixture = _buildFixture(minerPk, miner, core.outputHistoryAt(0), 0, bytes32("secret-c-hold"), 19);
-        uint256 requiredHoldAmount = mining.REQUIRED_TGBT_HOLD_AMOUNT();
-
-        vm.prank(miner);
-        mining.submitMiningCommitment(fixture.commitHash, 0, fixture.commitmentNonce, fixture.deadline, fixture.commitmentSignature);
-
-        vm.prank(miner);
-        holdToken.transfer(address(0xCAFE), requiredHoldAmount);
-
-        vm.roll(block.number + mining.minCommitmentAge());
-        vm.prank(miner);
-        vm.expectRevert(MiningModule.InsufficientHoldBalance.selector);
-        mining.revealMiningCommitmentHarness(
-            fixture.previousOutput,
-            fixture.temporalSeed,
-            fixture.miningNonce,
-            fixture.revealSignature,
-            fixture.secretValue,
-            0
-        );
-    }
+    // testRevealCommitmentRequiresHoldBalanceAtRevealTime removed — hold gate no longer exists
 
     function testRevealCommitmentRemainsValidAfterTimestampAdvances() public {
         RevealFixture memory fixture = _buildFixture(minerPk, miner, core.outputHistoryAt(0), 0, bytes32("secret-c-time"), 20);

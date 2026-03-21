@@ -58,7 +58,7 @@ contract BatchMiningModule is ModuleBase, EIP712("TemporalGradientBatch", "1"), 
     uint256 public constant REWARD_PER_SOLUTION = 1.375 ether;
 
     /// @notice Required TGBT hold balance to submit epoch roots for anti-sybil protection
-    uint256 public constant REQUIRED_TGBT_HOLD_AMOUNT = 100 ether;
+    // Hold requirement removed — genesis miners can mine with 0 TGBT
 
     // ── Storage ─────────────────────────────────────────
     IERC20 public holdToken;
@@ -109,10 +109,6 @@ contract BatchMiningModule is ModuleBase, EIP712("TemporalGradientBatch", "1"), 
         uint256 deadline,
         bytes calldata signature
     ) external override whenSystemActive {
-        // Anti-sybil TGBT hold guard
-        if (holdToken.balanceOf(msg.sender) < REQUIRED_TGBT_HOLD_AMOUNT)
-            revert IBatchMiningModule.InvalidLeafCount(); // reuse — could mint a custom one
-
         // Leaf bound
         if (leafCount == 0 || leafCount > MAX_LEAVES_PER_EPOCH)
             revert IBatchMiningModule.InvalidLeafCount();
