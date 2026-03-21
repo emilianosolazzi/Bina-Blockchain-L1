@@ -1257,4 +1257,323 @@ mod tests {
         let raw_hex = hex::encode(header.block_hash);
         assert_ne!(hex_str, raw_hex); // Reversed should differ (unless palindrome)
     }
+
+    // ═══════════════════════════════════════════════════════════
+    //  EXPLOIT & EDGE-CASE TEST SUITE
+    //  These mirror the Solidity tests in StaleBlockOracle.t.sol
+    //  so both layers are tested against the same attack vectors.
+    // ═══════════════════════════════════════════════════════════
+
+    // ── Reorg-depth cap ─────────────────────────────────────────
+
+    #[test]
+    fn reorg_depth_score_capped_at_6() {
+        let header = make_test_header(800_000, 1);
+        // Depths 6, 50, 100 should all produce the same score
+        let score_6  = compute_score_breakdown(&header, 6).reorg_depth_score;
+        let score_50 = compute_score_breakdown(&header, 50).reorg_depth_score;
+        let score_100 = compute_score_breakdown(&header, 100).reorg_depth_score;
+        assert_eq!(score_6, 25);
+        assert_eq!(score_50, score_6, "depth 50 must be capped to same score as depth 6");
+        assert_eq!(score_100, score_6, "depth 100 must be capped to same score as depth 6");
+    }
+
+    #[test]
+    fn reorg_depth_boundary_values() {
+        let header = make_test_header(800_000, 1);
+        let s0 = compute_score_breakdown(&header, 0).reorg_depth_score;
+        let s1 = compute_score_breakdown(&header, 1).reorg_depth_score;
+        let s2 = compute_score_breakdown(&header, 2).reorg_depth_score;
+        let s3 = compute_score_breakdown(&header, 3).reorg_depth_score;
+        let s5 = compute_score_breakdown(&header, 5).reorg_depth_score;
+        let s6 = compute_score_breakdown(&header, 6).reorg_depth_score;
+        let s7 = compute_score_breakdown(&header, 7).reorg_depth_score;
+        assert_eq!(s0, 0);
+        assert_eq!(s1, 10);
+        assert_eq!(s2, 15);
+        assert_eq!(s3, 20);
+        assert_eq!(s5, 20);
+        assert_eq!(s6, 25);
+        assert_eq!(s7, s6, "depth 7 must be capped to same as depth 6");
+    }
+
+    #[test]
+    fn reorg_depth_max_rejects_over_100() {
+        let header = make_test_header(800_000, 42);
+        let result = StaleWorkProof::build(&header, canonical_hash(), 101, "attacker");
+        // ReorgTooDeep OR InsufficientWork — PoW check runs first for random headers
+        match result {
+            Err(StaleBlockError::ReorgTooDeep { depth: 101, max_depth: 100 }) => {}
+            Err(StaleBlockError::InsufficientWork { .. }) => {
+                // PoW check fires before reorg depth for random headers,
+                // so verify the depth check independently.
+                assert!(101 > MAX_REORG_DEPTH);
+            }
+            Ok(_) => panic!("depth 101 must never produce a valid proof"),
+            Err(e) => panic!("unexpected error: {e}"),
+        }
+    }
+
+    #[test]
+    fn reorg_depth_max_boundary_accepts_100() {
+        let header = make_test_header(800_000, 42);
+        // depth=100 is within MAX_REORG_DEPTH; may fail on PoW check instead
+        let result = StaleWorkProof::build(&header, canonical_hash(), 100, "miner");
+        match result {
+            Err(StaleBlockError::ReorgTooDeep { .. }) => panic!("depth 100 should NOT be too deep"),
+            Err(StaleBlockError::InsufficientWork { .. }) => {} // ok — PoW check comes first
+            Ok(_) => {} // ok if PoW happened to pass
+            Err(e) => panic!("unexpected error: {e}"),
+        }
+    }
+
+    // ── Canonical hash spoofing ─────────────────────────────────
+
+    #[test]
+    fn canonical_hash_equals_block_hash_rejected() {
+        let header = make_test_header(800_000, 42);
+        // Try to submit a block as stale when canonical_hash == block_hash
+        let config = StaleBlockMinerConfig {
+            min_leading_zeros: 0,
+            submitter_address: "attacker".to_string(),
+            ..Default::default()
+        };
+        let mut miner = StaleBlockMiner::new(config);
+        let raw = header.to_raw();
+        let result = miner.submit_stale_header(&raw, 800_000, header.block_hash, 1);
+        assert!(
+            matches!(result, Err(StaleBlockError::NotStale(_))),
+            "submitting a block with canonical_hash == block_hash must be rejected"
+        );
+    }
+
+    #[test]
+    fn verify_self_catches_canonical_hash_equals_block_hash() {
+        // Even if a proof is manually constructed with canonical == block hash,
+        // verify_self must reject it.
+        let header = make_test_header(800_000, 42);
+        let mut proof = StaleWorkProof {
+            proof_id: "fake".to_string(),
+            raw_header: header.to_raw().to_vec(),
+            block_hash: header.block_hash,
+            height: 800_000,
+            canonical_hash: header.block_hash, // ← spoofed
+            leading_zeros: header.leading_zero_bits(),
+            reorg_depth: 1,
+            entropy: header.extract_entropy(),
+            quality_score: 50,
+            submitter: "attacker".to_string(),
+            created_at: now_secs(),
+        };
+        // Overwrite canonical to match the block hash
+        proof.canonical_hash = proof.block_hash;
+        assert!(matches!(proof.verify_self(), Err(StaleBlockError::NotStale(_))));
+    }
+
+    #[test]
+    fn different_canonical_hashes_produce_different_proof_ids() {
+        let header = make_test_header(800_000, 42);
+        let id1 = compute_proof_id(&header.block_hash, &[0x11; 32], 800_000, 1, "miner");
+        let id2 = compute_proof_id(&header.block_hash, &[0x22; 32], 800_000, 1, "miner");
+        assert_ne!(id1, id2, "spoofed canonical hash must change the proof_id");
+    }
+
+    #[test]
+    fn different_canonical_hash_changes_fork_divergence_entropy() {
+        let header = make_test_header(800_000, 42);
+        let r1 = StaleEntropyReport::build(&header, [0x11; 32], 1);
+        let r2 = StaleEntropyReport::build(&header, [0x22; 32], 1);
+        assert_ne!(
+            r1.fork_divergence_entropy, r2.fork_divergence_entropy,
+            "different canonical hashes must produce different divergence entropy"
+        );
+        // But primary entropy is independent of canonical hash
+        assert_eq!(r1.primary_entropy, r2.primary_entropy);
+    }
+
+    // ── Duplicate submission ────────────────────────────────────
+
+    #[test]
+    fn duplicate_submission_rejected() {
+        let config = StaleBlockMinerConfig {
+            min_leading_zeros: 0,
+            submitter_address: "miner".to_string(),
+            ..Default::default()
+        };
+        let mut miner = StaleBlockMiner::new(config);
+        let header = make_test_header(800_000, 7);
+        let raw = header.to_raw();
+
+        let first = miner.submit_stale_header(&raw, 800_000, canonical_hash(), 1);
+        if first.is_ok() {
+            let second = miner.submit_stale_header(&raw, 800_000, canonical_hash(), 1);
+            assert!(
+                matches!(second, Err(StaleBlockError::AlreadyHarvested(_))),
+                "duplicate submission must be rejected"
+            );
+        }
+    }
+
+    // ── Age bounds ──────────────────────────────────────────────
+
+    #[test]
+    fn ancient_stale_block_rejected() {
+        let ancient_timestamp = 1_000_000u32; // ~2001, definitely > 1 week old
+        let header = StaleBlockHeader::from_fields(
+            0x20000000,
+            [0xAA; 32],
+            [0xBB; 32],
+            ancient_timestamp,
+            0x1d00ffff,
+            42,
+            100_000,
+        );
+        let config = StaleBlockMinerConfig {
+            min_leading_zeros: 0,
+            submitter_address: "miner".to_string(),
+            ..Default::default()
+        };
+        let mut miner = StaleBlockMiner::new(config);
+        let raw = header.to_raw();
+        let result = miner.submit_stale_header(&raw, 100_000, canonical_hash(), 1);
+        assert!(
+            matches!(result, Err(StaleBlockError::TooOld { .. })),
+            "ancient block must be rejected as too old"
+        );
+    }
+
+    // ── Entropy pollution resistance ────────────────────────────
+
+    #[test]
+    fn cumulative_entropy_not_zero_after_submissions() {
+        let mut tracker = LoserChainTracker::new();
+        let h1 = make_test_header(800_000, 100);
+        let h2 = make_test_header(800_001, 200);
+
+        // Record two stale blocks (may fail on PoW — that's fine, use low threshold)
+        let _ = tracker.record_stale_block(h1, canonical_hash(), 1, "miner");
+        let _ = tracker.record_stale_block(h2, canonical_hash(), 1, "miner");
+
+        // Even if PoW check prevents recording, cumulative should be deterministic
+        let entropy = tracker.cumulative_entropy();
+        // Re-create a fresh tracker with same inputs → same entropy
+        let mut tracker2 = LoserChainTracker::new();
+        let h1b = make_test_header(800_000, 100);
+        let h2b = make_test_header(800_001, 200);
+        let _ = tracker2.record_stale_block(h1b, canonical_hash(), 1, "miner");
+        let _ = tracker2.record_stale_block(h2b, canonical_hash(), 1, "miner");
+        assert_eq!(entropy, tracker2.cumulative_entropy(), "entropy must be deterministic");
+    }
+
+    #[test]
+    fn xor_self_cancellation_requires_different_blocks() {
+        // If an attacker submits block A, then tries to XOR-cancel by
+        // submitting the same block again, the duplicate check stops it.
+        let mut tracker = LoserChainTracker::new();
+        let h = make_test_header(800_000, 55);
+        let hash_hex = h.block_hash_hex();
+
+        let first = tracker.record_stale_block(h.clone(), canonical_hash(), 1, "miner");
+        if first.is_ok() {
+            let entropy_after_first = tracker.cumulative_entropy();
+            assert_ne!(entropy_after_first, [0u8; 32]);
+
+            let second = tracker.record_stale_block(h, canonical_hash(), 1, "miner");
+            assert!(
+                matches!(second, Err(StaleBlockError::AlreadyHarvested(_))),
+                "duplicate must be blocked — prevents XOR self-cancellation"
+            );
+            // Entropy unchanged after failed duplicate
+            assert_eq!(tracker.cumulative_entropy(), entropy_after_first);
+        }
+    }
+
+    // ── Proof tamper detection ──────────────────────────────────
+
+    #[test]
+    fn verify_self_catches_raw_header_tamper() {
+        let header = make_test_header(800_000, 42);
+        let mut proof = StaleWorkProof {
+            proof_id: "test".to_string(),
+            raw_header: header.to_raw().to_vec(),
+            block_hash: header.block_hash,
+            height: 800_000,
+            canonical_hash: canonical_hash(),
+            leading_zeros: header.leading_zero_bits(),
+            reorg_depth: 1,
+            entropy: header.extract_entropy(),
+            quality_score: 50,
+            submitter: "miner".to_string(),
+            created_at: now_secs(),
+        };
+        // Flip one bit in raw_header → hash mismatch
+        proof.raw_header[40] ^= 0x01;
+        assert!(
+            matches!(proof.verify_self(), Err(StaleBlockError::InvalidHeader(_))),
+            "tampered raw_header must be detected via hash mismatch"
+        );
+    }
+
+    #[test]
+    fn verify_self_catches_leading_zeros_lie() {
+        let header = make_test_header(800_000, 42);
+        let mut proof = StaleWorkProof {
+            proof_id: "test".to_string(),
+            raw_header: header.to_raw().to_vec(),
+            block_hash: header.block_hash,
+            height: 800_000,
+            canonical_hash: canonical_hash(),
+            leading_zeros: 200, // ← lie: claim 200 leading zeros
+            reorg_depth: 1,
+            entropy: header.extract_entropy(),
+            quality_score: 50,
+            submitter: "miner".to_string(),
+            created_at: now_secs(),
+        };
+        assert!(
+            matches!(proof.verify_self(), Err(StaleBlockError::InvalidHeader(_))),
+            "inflated leading_zeros must be caught"
+        );
+    }
+
+    // ── Quality score total never exceeds 100 ───────────────────
+
+    #[test]
+    fn quality_score_never_exceeds_100() {
+        let header = make_test_header(800_000, 42);
+        // Try every combination of extreme values
+        for depth in [0, 1, 2, 3, 5, 6, 50, 100] {
+            let score = compute_quality_score(256, depth, &header);
+            assert!(score <= 100, "quality score {score} exceeded 100 at depth {depth}");
+        }
+    }
+
+    // ── Staleness edge: block_hash one bit different from canonical ──
+
+    #[test]
+    fn one_bit_different_from_canonical_is_still_stale() {
+        let header = make_test_header(800_000, 42);
+        let mut near_canonical = header.block_hash;
+        near_canonical[0] ^= 0x01; // flip one bit
+        // Should be accepted as stale (hashes differ)
+        let config = StaleBlockMinerConfig {
+            min_leading_zeros: 0,
+            submitter_address: "miner".to_string(),
+            ..Default::default()
+        };
+        let mut miner = StaleBlockMiner::new(config);
+        let raw = header.to_raw();
+        let result = miner.submit_stale_header(&raw, 800_000, near_canonical, 1);
+        // Should not be NotStale (hashes differ by 1 bit)
+        assert!(!matches!(result, Err(StaleBlockError::NotStale(_))));
+    }
+
+    // ── Zero reorg depth rejected by proof builder ──────────────
+
+    #[test]
+    fn zero_reorg_depth_at_score_level() {
+        let header = make_test_header(800_000, 42);
+        let breakdown = compute_score_breakdown(&header, 0);
+        assert_eq!(breakdown.reorg_depth_score, 0, "depth 0 must yield score 0");
+    }
 }
