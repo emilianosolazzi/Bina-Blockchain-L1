@@ -10,7 +10,9 @@ library TokenomicsLib {
     // Add constants for bounds checking
     uint256 private constant MAX_BLOCKS_PER_EPOCH = 1_000_000;
     uint256 private constant MIN_BLOCKS_PER_EPOCH = 100;
-    uint256 private constant MAX_HALVING_INTERVAL = 15_000_000;
+    /// @dev 630,720,000 blocks ≈ 5 years on Arbitrum (0.25 s blocks).
+    ///      Supports multi-year halving intervals like Bitcoin.
+    uint256 private constant MAX_HALVING_INTERVAL = 630_720_000;
     uint256 private constant MIN_HALVING_INTERVAL = 10_000;
     uint256 private constant MIN_REWARD = 1e6;
     uint256 private constant MAX_EPOCHS = type(uint64).max;
