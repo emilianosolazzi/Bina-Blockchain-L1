@@ -430,14 +430,24 @@ contract StaleBlockOracle is ModuleBase, IStaleBlockOracle {
     /**
      * @dev Calculate the reward for a stale block proof.
      *      Higher quality and deeper reorgs earn more.
+     *
+     *      The depth multiplier is capped at 7 (reorgDepth ≥ 6) because
+     *      reorgs deeper than 6 blocks are extraordinarily rare on Bitcoin
+     *      mainnet.  Without this cap a malicious submitter could claim
+     *      reorgDepth = 100 and inflate the reward by 101×.
      */
+    uint256 private constant MAX_DEPTH_MULTIPLIER = 7;
+
     function _calculateReward(
         uint32 qualityScore,
         uint32 reorgDepth
     ) internal view returns (uint256) {
-        // Base × (quality / 100) × depth multiplier
+        // Base × (quality / 100) × capped depth multiplier
         uint256 qualityMultiplier = uint256(qualityScore);
-        uint256 depthMultiplier = uint256(reorgDepth) + 1; // depth 1 → 2x, depth 2 → 3x, etc.
+        uint256 rawDepth = uint256(reorgDepth) + 1;
+        uint256 depthMultiplier = rawDepth > MAX_DEPTH_MULTIPLIER
+            ? MAX_DEPTH_MULTIPLIER
+            : rawDepth;
         return (baseReward * qualityMultiplier * depthMultiplier) / 100;
     }
 

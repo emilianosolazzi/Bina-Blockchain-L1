@@ -974,13 +974,17 @@ fn compute_score_breakdown(header: &StaleBlockHeader, reorg_depth: u32) -> Score
         (leading_zeros / 3).min(14)
     };
 
-    // Reorg depth: deeper = rarer = more valuable (max 25)
-    let reorg_depth_score = match reorg_depth {
+    // Reorg depth: deeper = rarer = more valuable (max 25).
+    // Capped at depth 6 — deeper reorgs are extraordinarily rare on
+    // mainnet, and uncapped values let a malicious submitter inflate
+    // scores/rewards by claiming an unrealistically deep reorg.
+    let capped_depth = reorg_depth.min(6);
+    let reorg_depth_score = match capped_depth {
         0 => 0,
         1 => 10,       // Common: single-block stale
         2 => 15,       // Uncommon: 2-deep reorg
         3..=5 => 20,   // Rare: 3-5 deep
-        _ => 25,       // Very rare: 6+ deep
+        _ => 25,       // Very rare: 6 deep (capped)
     };
 
     // Divergence: how different the nonce/timestamp are from round numbers (max 25)
