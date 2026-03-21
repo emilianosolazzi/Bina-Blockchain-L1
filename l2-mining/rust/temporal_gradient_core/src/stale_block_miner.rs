@@ -1471,7 +1471,7 @@ mod tests {
         // submitting the same block again, the duplicate check stops it.
         let mut tracker = LoserChainTracker::new();
         let h = make_test_header(800_000, 55);
-        let hash_hex = h.block_hash_hex();
+        let _hash_hex = h.block_hash_hex();
 
         let first = tracker.record_stale_block(h.clone(), canonical_hash(), 1, "miner");
         if first.is_ok() {
@@ -1517,7 +1517,7 @@ mod tests {
     #[test]
     fn verify_self_catches_leading_zeros_lie() {
         let header = make_test_header(800_000, 42);
-        let mut proof = StaleWorkProof {
+        let proof = StaleWorkProof {
             proof_id: "test".to_string(),
             raw_header: header.to_raw().to_vec(),
             block_hash: header.block_hash,

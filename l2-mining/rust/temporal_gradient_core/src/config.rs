@@ -5,6 +5,73 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+/// Optional configuration for stale-block (Bitcoin orphan) entropy mining.
+///
+/// Node operators who have access to a Bitcoin full node or mempool API
+/// can enable stale-block mining by adding this section to their config.
+/// When absent or `enabled: false`, stale-block mining is completely inactive.
+#[cfg(feature = "stale-mining")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StaleBlockConfig {
+    /// Master switch — must be `true` to activate stale-block mining.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Bitcoin RPC or API endpoint (e.g. "https://mempool.space/api").
+    pub bitcoin_api_url: String,
+    /// How often to poll for new chain tips (seconds). Minimum 10.
+    #[serde(default = "default_poll_interval")]
+    pub poll_interval_secs: u64,
+    /// Minimum PoW leading zeros required for a stale header. Default 11.
+    #[serde(default = "default_min_leading_zeros")]
+    pub min_leading_zeros: u32,
+    /// Maximum stale block age to accept (seconds). Default 7200.
+    #[serde(default = "default_max_stale_age")]
+    pub max_stale_age_secs: u64,
+    /// Submitter address for proof attribution on the L2 contract.
+    #[serde(default)]
+    pub submitter_address: String,
+    /// Whether to automatically submit proofs to the L2 contract.
+    #[serde(default)]
+    pub auto_submit: bool,
+}
+
+#[cfg(feature = "stale-mining")]
+fn default_poll_interval() -> u64 { 30 }
+#[cfg(feature = "stale-mining")]
+fn default_min_leading_zeros() -> u32 { 11 }
+#[cfg(feature = "stale-mining")]
+fn default_max_stale_age() -> u64 { 7200 }
+
+#[cfg(feature = "stale-mining")]
+impl StaleBlockConfig {
+    /// Clamp values into safe ranges.
+    pub fn normalize(&mut self) {
+        if self.poll_interval_secs < 10 {
+            self.poll_interval_secs = 10;
+        }
+        if self.min_leading_zeros == 0 {
+            self.min_leading_zeros = 11;
+        }
+        if self.max_stale_age_secs == 0 {
+            self.max_stale_age_secs = 7200;
+        }
+        // Strip whitespace from URL
+        self.bitcoin_api_url = self.bitcoin_api_url.trim().to_string();
+    }
+
+    /// Convert to the internal `StaleBlockMinerConfig` used by the miner.
+    pub fn to_miner_config(&self) -> crate::stale_block_miner::StaleBlockMinerConfig {
+        crate::stale_block_miner::StaleBlockMinerConfig {
+            bitcoin_api_url: self.bitcoin_api_url.clone(),
+            poll_interval_secs: self.poll_interval_secs,
+            min_leading_zeros: self.min_leading_zeros,
+            max_stale_age_secs: self.max_stale_age_secs,
+            submitter_address: self.submitter_address.clone(),
+            auto_submit: self.auto_submit,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MinerConfig {
     pub config_version: u32,
@@ -29,6 +96,11 @@ pub struct MinerConfig {
     #[serde(default)]
     pub relay_hmac_key: Option<String>,
     pub difficulty_zero_bits: u8,
+    /// Optional stale-block mining config. Only compiled with the `stale-mining` feature.
+    /// Operators add this section and set `enabled: true` to opt-in.
+    #[cfg(feature = "stale-mining")]
+    #[serde(default)]
+    pub stale_block: Option<StaleBlockConfig>,
 }
 
 impl Default for MinerConfig {
@@ -53,6 +125,8 @@ impl Default for MinerConfig {
             relay_pinned_cert_sha256: None,
             relay_hmac_key: None,
             difficulty_zero_bits: 11,
+            #[cfg(feature = "stale-mining")]
+            stale_block: None,
         }
     }
 }
@@ -77,10 +151,20 @@ impl MinerConfig {
         if self.log_level.trim().is_empty() {
             self.log_level = "INFO".to_string();
         }
+        #[cfg(feature = "stale-mining")]
+        if let Some(ref mut sb) = self.stale_block {
+            sb.normalize();
+        }
     }
 
     pub fn has_live_target(&self) -> bool {
         self.contract_address != crate::chain::DEFAULT_CONTRACT_PLACEHOLDER
+    }
+
+    /// Returns `true` when stale-block mining is compiled in AND enabled in the config.
+    #[cfg(feature = "stale-mining")]
+    pub fn stale_mining_enabled(&self) -> bool {
+        self.stale_block.as_ref().map_or(false, |sb| sb.enabled)
     }
 
     pub fn stats_interval(&self) -> Duration {

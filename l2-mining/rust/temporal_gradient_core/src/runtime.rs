@@ -235,6 +235,21 @@ async fn run_runtime(
     telemetry_tx: broadcast::Sender<TelemetrySnapshot>,
     shutdown: CancellationToken,
 ) -> Result<()> {
+    // ── Optional stale-block mining sidecar ──────────────────────
+    #[cfg(feature = "stale-mining")]
+    let _stale_handle: Option<JoinHandle<()>> = if config.stale_mining_enabled() {
+        let sb_cfg = config.stale_block.as_ref().unwrap().to_miner_config();
+        let sb_shutdown = shutdown.clone();
+        info!(
+            "Stale-block mining enabled — polling {} every {}s",
+            sb_cfg.bitcoin_api_url, sb_cfg.poll_interval_secs
+        );
+        Some(tokio::spawn(run_stale_block_loop(sb_cfg, sb_shutdown)))
+    } else {
+        debug!("Stale-block mining disabled (not configured or enabled: false)");
+        None
+    };
+
     if let Some(live_client) = LiveMiningClient::connect(&config).await? {
         info!("Live chain submission mode enabled for contract {}", config.contract_address);
         return run_live_runtime(
@@ -1204,6 +1219,65 @@ fn rotate_hash_left(input: [u8; 32], bits: u32) -> [u8; 32] {
 fn xor_round_constant(mut input: [u8; 32], value: u8) -> [u8; 32] {
     input[31] ^= value;
     input
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Optional stale-block mining loop (only compiled with `stale-mining`)
+// ────────────────────────────────────────────────────────────────────
+#[cfg(feature = "stale-mining")]
+async fn run_stale_block_loop(
+    config: crate::stale_block_miner::StaleBlockMinerConfig,
+    shutdown: CancellationToken,
+) {
+    use crate::stale_block_miner::{ChainTip, StaleBlockMiner};
+
+    let mut miner = StaleBlockMiner::new(config.clone());
+    let poll = Duration::from_secs(config.poll_interval_secs);
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .expect("failed to build HTTP client for stale mining");
+
+    info!("Stale-block mining loop started");
+
+    loop {
+        tokio::select! {
+            _ = shutdown.cancelled() => {
+                info!("Stale-block mining loop shutting down");
+                break;
+            }
+            _ = time::sleep(poll) => {
+                let url = format!("{}/v1/mining/pool/blocksaudit", config.bitcoin_api_url.trim_end_matches('/'));
+                match client.get(&url).send().await {
+                    Ok(resp) if resp.status().is_success() => {
+                        match resp.json::<Vec<ChainTip>>().await {
+                            Ok(tips) => {
+                                let proofs = miner.process_tips(tips);
+                                if !proofs.is_empty() {
+                                    info!("Stale-block mining produced {} new proof(s)", proofs.len());
+                                }
+                            }
+                            Err(e) => {
+                                warn!("Stale-block: failed to parse chain tips: {e}");
+                            }
+                        }
+                    }
+                    Ok(resp) => {
+                        debug!("Stale-block: API returned status {}", resp.status());
+                    }
+                    Err(e) => {
+                        warn!("Stale-block: failed to reach Bitcoin API: {e}");
+                    }
+                }
+            }
+        }
+    }
+
+    // Drain pending proofs on shutdown
+    let pending = miner.drain_pending_proofs();
+    if !pending.is_empty() {
+        info!("Stale-block mining: {} pending proof(s) drained on shutdown", pending.len());
+    }
 }
 
 #[cfg(test)]

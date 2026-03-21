@@ -54,9 +54,15 @@ windows-sys = { version = "0.52", features = ["Win32_System_Memory", "Win32_Syst
 [target.'cfg(target_os = "macos")'.dependencies]
 smc = "0.2"
 
+[features]
+default = []
+# Enable stale-block mining (Bitcoin fork/orphan entropy harvesting).
+# Requires Bitcoin API access (e.g. mempool.space). Off by default.
+stale-mining = []
+
 [dev-dependencies]
 tempfile = "3"
 
 [[example]]
 name = "stale_block_demo"
-required-features = []
+required-features = ["stale-mining"]

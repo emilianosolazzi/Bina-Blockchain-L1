@@ -11,6 +11,7 @@ pub mod paths;
 pub mod pending;
 pub mod runtime;
 pub mod seed;
+#[cfg(feature = "stale-mining")]
 pub mod stale_block_miner;
 pub mod storage_verification;
 pub mod telemetry;
@@ -32,6 +33,7 @@ pub use crypto::{
 };
 pub use entropy_quality_scorer::{ContributorStats, EntropyQualityScorer, EntropyScoreReport};
 pub use logging::setup_logging;
+#[cfg(feature = "stale-mining")]
 pub use stale_block_miner::{
     ChainForkEvent, ChainTip, LoserChainStats, LoserChainTracker, ScoreBreakdown,
     StaleBlockError, StaleBlockHeader, StaleBlockMiner, StaleBlockMinerConfig,
