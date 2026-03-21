@@ -4,6 +4,7 @@ pub mod chain;
 pub mod config;
 pub mod cpu;
 pub mod crypto;
+pub mod entropy_quality_scorer;
 pub mod logging;
 pub mod memory;
 pub mod paths;
@@ -28,6 +29,7 @@ pub use crypto::{
     build_commitment_payload, contract_hash_message, create_entropy_hash, has_leading_zero_bits,
     miner_address_from_signing_key, CommitmentPayload, DynamicMiningCommitment, MiningMaterial,
 };
+pub use entropy_quality_scorer::{ContributorStats, EntropyQualityScorer, EntropyScoreReport};
 pub use logging::setup_logging;
 pub use memory::{SecureBuffer, SecureBufferError};
 pub use paths::{app_paths, ensure_app_layout, AppPaths};

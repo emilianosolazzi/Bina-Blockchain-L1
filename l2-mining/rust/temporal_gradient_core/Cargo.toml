@@ -21,6 +21,7 @@ indexmap = "2"
 k256 = { version = "0.13", features = ["ecdsa"] }
 lazy_static = "1"
 log = "0.4"
+num-traits = "0.2"
 once_cell = "1"
 raw-cpuid = "11"
 rand = "0.8"
