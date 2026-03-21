@@ -161,28 +161,8 @@ contract RandomnessModule is ModuleBase {
         return RandomnessLib.getContributionDetails(randomnessState, requestId);
     }
 
-    function setTgbtToken(address newToken) external onlyGovernance {
-        if (newToken == address(0)) revert ZeroAddress();
-        randomnessState.tgbtTokenAddress = newToken;
-        emit RandomnessTokenUpdated(newToken);
-    }
-
-    function setEmergencyFeeParams(uint256 baseFee, uint256 perContributorFee) external onlyGovernance {
-        randomnessState.baseEmergencyFee = baseFee;
-        randomnessState.feePerContributor = perContributorFee;
-        emit EmergencyFeeParametersChanged(baseFee, perContributorFee);
-    }
-
-    function setRandomnessContributionParams(uint256 minContributions, uint256 maxContributions, uint256 expiryBlocks) external onlyGovernance {
-        if (minContributions < 2) revert MinContributionsTooLow();
-        if (maxContributions <= minContributions) revert MaxLessThanMin();
-        if (maxContributions > 50) revert MaxContributionsTooHigh();
-
-        randomnessState.minContributions = minContributions;
-        randomnessState.maxContributions = maxContributions;
-        randomnessState.expiryBlocks = expiryBlocks;
-        emit RandomnessContributionParamsChanged(minContributions, maxContributions, expiryBlocks);
-    }
+    // Governance tuning functions removed — all params are set once at initialize(), immutable thereafter.
+    // Token address, fee params, and contribution params are permanently locked at deployment.
 
     function _historicalHash() internal view returns (bytes32) {
         bytes32[32] memory history = _outputHistory();

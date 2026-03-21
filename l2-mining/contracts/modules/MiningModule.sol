@@ -41,7 +41,6 @@ contract MiningModule is ModuleBase, EIP712("TemporalGradientBeacon", "1") {
     event CommitmentSubmitted(address indexed miner, bytes32 commitHash, uint8 poolId);
     event CommitmentRevealed(address indexed miner, bytes32 revealedValue, uint8 poolId);
     event MiningPoolCreated(uint8 indexed poolId, uint256 targetDifficulty, uint256 emissionBucket);
-    event MiningPoolUpdated(uint8 indexed poolId, uint256 targetDifficulty, uint256 emissionBucket);
 
     error InvalidPoolId();
     error DeadlineExpired();
@@ -224,17 +223,7 @@ contract MiningModule is ModuleBase, EIP712("TemporalGradientBeacon", "1") {
         emit MiningPoolCreated(newPoolId, targetDifficulty, emissionBucket);
     }
 
-    function updateMiningPool(uint8 poolId, uint256 targetDifficulty, uint256 emissionBucket, bool active) external onlyGovernance {
-        if (poolId >= poolCount) revert InvalidPoolId();
-        require(targetDifficulty >= MIN_DIFFICULTY && targetDifficulty <= MAX_DIFFICULTY, "InvalidDifficulty");
-
-        MiningLib.MiningPool storage pool = miningPools[poolId];
-        pool.targetDifficulty = targetDifficulty;
-        pool.emissionBucket = emissionBucket;
-        pool.active = active;
-        pool.lastUpdateBlock = uint64(block.number);
-        emit MiningPoolUpdated(poolId, targetDifficulty, emissionBucket);
-    }
+    // updateMiningPool removed — pools are immutable after creation (Bitcoin-style).
 
     function getPoolInfo(uint8 poolId) external view returns (uint256 difficulty, uint256 emission, uint256 mined, bool active) {
         if (poolId >= poolCount) revert InvalidPoolId();

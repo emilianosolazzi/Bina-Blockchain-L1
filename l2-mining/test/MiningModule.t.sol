@@ -366,13 +366,13 @@ contract MiningModuleTest is Test {
         mining.createMiningPool(10_000, 1_000 ether);
         assertEq(mining.poolCount(), 2);
 
-        mining.updateMiningPool(1, 20_000, 2_000 ether, false);
+        // Pool is immutable after creation — verify stored values
         (uint256 difficulty, uint256 emission, uint256 mined, bool active) = mining.getPoolInfo(1);
 
-        assertEq(difficulty, 20_000);
-        assertEq(emission, 2_000 ether);
+        assertEq(difficulty, 10_000);
+        assertEq(emission, 1_000 ether);
         assertEq(mined, 0);
-        assertFalse(active);
+        assertTrue(active);
 
         vm.expectRevert(bytes("InvalidDifficulty"));
         mining.createMiningPool(999, 1 ether);

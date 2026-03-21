@@ -49,7 +49,8 @@ contract BatchMiningModule is ModuleBase, EIP712("TemporalGradientBatch", "1"), 
     uint256 public constant EPOCH_COOLDOWN_BLOCKS = 50;
 
     /// @notice Blocks after commit before epoch can be finalised (challenge window)
-    uint256 public constant CHALLENGE_WINDOW = 100;
+    /// 28 800 blocks ≈ 2 hours on Arbitrum (0.25 s blocks). Immutable by design.
+    uint256 public constant CHALLENGE_WINDOW = 28_800;
 
     /// @notice Maximum leaves (solutions) per epoch to bound gas on finalisation
     uint32 public constant MAX_LEAVES_PER_EPOCH = 10_000;

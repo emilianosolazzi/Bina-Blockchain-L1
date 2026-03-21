@@ -292,15 +292,7 @@ contract TokenomicsModuleTest is Test {
         assertEq(lastActivity, block.number);
     }
 
-    function testResetMissedContributionsClearsReputationCounter() public {
-        tokenomics.recordMissedContribution(miner);
-        tokenomics.recordMissedContribution(miner);
-
-        tokenomics.resetMissedContributions(miner);
-
-        (, uint256 missedContributionCount) = tokenomics.getAccountPenaltyState(miner);
-        assertEq(missedContributionCount, 0);
-    }
+    // resetMissedContributions test removed — governance tuning function was removed.
 
     function testInitializeRejectsInitialRewardAboveMiningAllocation() public {
         TokenomicsModule implementation = new TokenomicsModule();

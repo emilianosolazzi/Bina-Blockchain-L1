@@ -71,7 +71,10 @@ contract StaleBlockOracleTest is Test {
     }
 
     function testClaimRewardClipsToStaleAllocation() public {
-        oracle.updateConfig(0, 10, 7 days, tokenomics.STALE_BLOCK_ALLOCATION());
+        // Re-deploy oracle with baseReward == full stale allocation to force a clip
+        oracle = new StaleBlockOracle();
+        oracle.initialize(address(core), 0, 10, 7 days, tokenomics.STALE_BLOCK_ALLOCATION());
+        core.setModule(STALE_BLOCK_MODULE, address(oracle));
 
         bytes memory firstHeader = _buildHeader(uint32(block.timestamp - 90));
         bytes32 firstBlockHash = sha256(abi.encodePacked(sha256(firstHeader)));

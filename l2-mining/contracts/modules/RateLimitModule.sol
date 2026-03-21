@@ -70,39 +70,8 @@ contract RateLimitModule is ModuleBase, IRateLimitModule {
         emit RateConsumed(user, operation, cost, currentRate, rateStats.rateBps);
     }
 
-    function configureThresholds(
-        uint256 warningThreshold,
-        uint256 criticalThreshold,
-        uint256 throttleThreshold,
-        uint256 banThreshold,
-        uint256 individualUserLimit,
-        uint256 globalLimit
-    ) external onlyGovernance {
-        if (
-            warningThreshold == 0 ||
-            criticalThreshold <= warningThreshold ||
-            throttleThreshold == 0 ||
-            banThreshold <= criticalThreshold ||
-            individualUserLimit == 0 ||
-            globalLimit < criticalThreshold
-        ) revert InvalidThresholds();
-
-        rateThresholds.warningThreshold = warningThreshold;
-        rateThresholds.criticalThreshold = criticalThreshold;
-        rateThresholds.throttleThreshold = throttleThreshold;
-        rateThresholds.banThreshold = banThreshold;
-        rateThresholds.individualUserLimit = individualUserLimit;
-        rateThresholds.globalLimit = globalLimit;
-
-        emit RateThresholdsConfigured(
-            warningThreshold,
-            criticalThreshold,
-            throttleThreshold,
-            banThreshold,
-            individualUserLimit,
-            globalLimit
-        );
-    }
+    // configureThresholds removed — rate limits are set once at initialize(), immutable thereafter.
+    // To change thresholds, deploy a new RateLimitModule and register it on Core.
 
     function getUserCapacity(address user) external view returns (uint256 currentTokens, uint256 capacity) {
         RateTypes.TokenBucket storage bucket = userRateBuckets[user];

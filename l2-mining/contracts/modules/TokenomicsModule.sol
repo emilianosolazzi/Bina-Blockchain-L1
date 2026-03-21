@@ -125,9 +125,7 @@ contract TokenomicsModule is ModuleBase, ITokenomicsModule {
         emit StaleEntropyRewarded(recipient, requestedReward, actualReward);
     }
 
-    function resetMissedContributions(address account) external onlyGovernance {
-        missedContributions[account] = 0;
-    }
+    // resetMissedContributions removed — no governance intervention, fully decentralized.
 
     function getMiningEconomics()
         external

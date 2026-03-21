@@ -96,21 +96,7 @@ contract StaleBlockOracle is ModuleBase, IStaleBlockOracle {
         baseReward       = _baseReward;
     }
 
-    // ── Configuration Updates (Governance) ───────────────────────
-
-    function updateConfig(
-        uint32  _minLeadingZeros,
-        uint32  _maxReorgDepth,
-        uint64  _maxStaleAgeSecs,
-        uint256 _baseReward
-    ) external onlyGovernance {
-        minLeadingZeros  = _minLeadingZeros;
-        maxReorgDepth    = _maxReorgDepth;
-        maxStaleAgeSecs  = _maxStaleAgeSecs;
-        baseReward       = _baseReward;
-
-        emit ConfigUpdated(_minLeadingZeros, _maxReorgDepth, _maxStaleAgeSecs, _baseReward);
-    }
+    // Governance tuning removed — all config is set once at initialize(), immutable thereafter.
 
     // ══════════════════════════════════════════════════════════════
     //  CORE: Submit a stale block header
@@ -230,7 +216,7 @@ contract StaleBlockOracle is ModuleBase, IStaleBlockOracle {
         bytes32 winnerHash,
         bytes32[] calldata loserHashes,
         uint32 reorgDepth
-    ) external override whenSystemActive {
+    ) external override onlyCoreOrModule whenSystemActive {
         require(loserHashes.length > 0 && loserHashes.length <= MAX_LOSERS_PER_EVENT, "invalid loser count");
 
         if (reorgDepth == 0 || reorgDepth > maxReorgDepth)
