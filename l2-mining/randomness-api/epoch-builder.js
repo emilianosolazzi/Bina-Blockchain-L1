@@ -41,7 +41,7 @@ const TELEMETRY_FILE = process.env.TELEMETRY_FILE
 	? path.resolve(__dirname, process.env.TELEMETRY_FILE)
 	: path.resolve(__dirname, '..', 'rust', 'miner-telemetry.jsonl');
 const SOLUTIONS_PER_EPOCH = Number(process.env.SOLUTIONS_PER_EPOCH || 50);
-const RPC_URL = process.env.RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com';
+const RPC_URL = process.env.RPC_URL || 'https://api.nativebtc.org/v1/arb';
 const BATCH_CONTRACT = process.env.BATCH_CONTRACT || '';
 const RANDOMNESS_API = process.env.RANDOMNESS_API || 'http://127.0.0.1:4271';
 const POOL_ID = Number(process.env.POOL_ID || 0);

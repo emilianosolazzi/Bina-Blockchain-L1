@@ -43,4 +43,53 @@ contract ModularCoreRateLimitTest is Test {
         assertEq(capacity, 60);
         assertLt(currentTokens, capacity);
     }
+
+    function testCoreAllowsFutureModuleIdsBeforeLock() public {
+        bytes32 futureModuleId = keccak256("ANALYTICS_MODULE_V2");
+        address futureModule = address(0xDEAD);
+
+        vm.prank(admin);
+        core.setModule(futureModuleId, futureModule);
+
+        assertEq(core.moduleAddress(futureModuleId), futureModule);
+        assertTrue(core.isModule(futureModule));
+        assertEq(core.moduleCount(), 3);
+    }
+
+    function testCoreCanRemoveModuleBeforeLock() public {
+        vm.prank(admin);
+        core.removeModule(RATE_LIMIT_MODULE_ID);
+
+        assertEq(core.moduleAddress(RATE_LIMIT_MODULE_ID), address(0));
+        assertFalse(core.isModule(address(rateLimit)));
+        assertEq(core.moduleCount(), 1);
+    }
+
+    function testCoreCanOssifyAfterBootstrap() public {
+        vm.prank(admin);
+        core.ossify();
+
+        assertTrue(core.modulesLocked());
+        assertTrue(core.pausePermanentlyDisabled());
+        assertTrue(core.governanceLocked());
+        assertTrue(core.isOssified());
+        assertEq(core.owner(), address(0));
+        assertEq(core.governanceRoleCount(), 0);
+        assertEq(core.defaultAdminRoleCount(), 0);
+
+        vm.prank(admin);
+        vm.expectRevert();
+        core.setModule(keccak256("POST_LOCK_MODULE"), address(0xBEEF));
+    }
+
+    function testDisablePauseForeverBlocksPause() public {
+        vm.prank(admin);
+        core.disablePauseForever();
+
+        assertTrue(core.pausePermanentlyDisabled());
+
+        vm.prank(admin);
+        vm.expectRevert(TemporalGradientCore.PauseDisabled.selector);
+        core.pause();
+    }
 }

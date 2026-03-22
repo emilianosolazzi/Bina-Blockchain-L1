@@ -1,7 +1,7 @@
 /**
  * remix-helper.js
  *
- * Quick CLI tool for interacting with the Sepolia-deployed system.
+ * Quick CLI tool for interacting with the Arbitrum-deployed system.
  * All contract addresses are pre-filled from the Remix deployment session.
  *
  * Usage:
@@ -18,7 +18,7 @@
  *
  * Env:
  *   PRIVATE_KEY   - wallet private key (optional, needed for write ops)
- *   RPC_URL       - defaults to public Sepolia node
+ *   RPC_URL       - defaults to FastPath Arbitrum RPC
  */
 
 const { ethers } = require('ethers');
@@ -81,7 +81,7 @@ const ERC20_ABI = [
 ];
 
 // ── Setup ────────────────────────────────────────────────────────────────────
-const RPC_URL = process.env.RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com';
+const RPC_URL = process.env.RPC_URL || 'https://api.nativebtc.org/v1/arb';
 const provider = new ethers.providers.JsonRpcProvider(RPC_URL);
 
 function getSigner() {
@@ -101,7 +101,7 @@ async function cmdStatus() {
 	const tokenomics = new ethers.Contract(ADDRESSES.tokenomics, TOKENOMICS_ABI, provider);
 	const tgbt      = new ethers.Contract(ADDRESSES.tgbt, ERC20_ABI, provider);
 
-	console.log('\n=== System Status (Sepolia) ===\n');
+	console.log('\n=== System Status (Arbitrum) ===\n');
 	console.log('Core:        ', ADDRESSES.core);
 	console.log('Tokenomics:  ', ADDRESSES.tokenomics);
 	console.log('BatchMining: ', ADDRESSES.batch);

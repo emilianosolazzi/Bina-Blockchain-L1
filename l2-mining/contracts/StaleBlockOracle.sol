@@ -352,12 +352,18 @@ contract StaleBlockOracle is ModuleBase, IStaleBlockOracle {
         uint64 height
     ) internal pure returns (bytes32) {
         // Fields: version[0:4] | prevHash[4:36] | merkleRoot[36:68] | ts[68:72] | bits[72:76] | nonce[76:80]
-        return keccak256(
+        // Split into two halves to avoid stack-too-deep
+        bytes32 half1 = keccak256(
             abi.encodePacked(
                 ENTROPY_DOMAIN_TAG,
                 blockHash,
                 rawHeader[36:68],  // merkle root
-                rawHeader[76:80],  // nonce
+                rawHeader[76:80]   // nonce
+            )
+        );
+        return keccak256(
+            abi.encodePacked(
+                half1,
                 rawHeader[68:72],  // timestamp
                 rawHeader[72:76],  // bits (difficulty)
                 rawHeader[0:4],    // version

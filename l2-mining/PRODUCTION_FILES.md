@@ -37,6 +37,7 @@ These are the intended production contracts for the modular split:
 - [contracts/modules/RandomnessModule.sol](contracts/modules/RandomnessModule.sol)
 - [contracts/modules/TokenomicsModule.sol](contracts/modules/TokenomicsModule.sol)
 - [contracts/modules/RateLimitModule.sol](contracts/modules/RateLimitModule.sol)
+- [contracts/StaleBlockOracle.sol](contracts/StaleBlockOracle.sol)
 - [contracts/modules/ModuleBase.sol](contracts/modules/ModuleBase.sol)
 - [contracts/interfaces/ITemporalGradientCore.sol](contracts/interfaces/ITemporalGradientCore.sol)
 - [contracts/interfaces/IMiningModule.sol](contracts/interfaces/IMiningModule.sol)
@@ -47,9 +48,21 @@ These are the intended production contracts for the modular split:
 
 Status:
 
-- Production code, but not the current live-miner target.
-- Use these for the modular architecture and module-level tests.
-- The modular mining path now uses exact `usedOutputs` tracking for uniqueness.
+- Production code — now the **current live-miner target** on Arbitrum.
+- The modular mining path uses exact `usedOutputs` tracking for uniqueness.
+
+Arbitrum deployment addresses:
+
+| Module | Address |
+|---|---|
+| TemporalGradientCore | `0xF6556DDC7CdD3635A05428BD85BCf33A09F752e6` |
+| TGBT Token | `0x31228eE520e895DA19f728DE5459b1b317d9b8D8` |
+| MINING_MODULE | `0x56C458a06FB104cb31820856fCe42E1f6926CBDD` |
+| BATCH_MINING_MODULE | `0x6eb6D03A8E98c79E89B98ce19AcAefB865817Db2` |
+| RANDOMNESS_MODULE | `0x583863CFC5EFc0106886BA485e1b67F0966584f9` |
+| TOKENOMICS_MODULE | `0xA9f684d709bB46155A252b260dDDE4cb2a37a0E3` |
+| RATE_LIMIT_MODULE | `0x61dEEEf2B2956db3AD291c639939669cD5399c1B` |
+| STALE_BLOCK_MODULE | `0xC4A16a11a8C61eA06F194f1EeD1d08a362fe986F` |
 
 ### Not production
 

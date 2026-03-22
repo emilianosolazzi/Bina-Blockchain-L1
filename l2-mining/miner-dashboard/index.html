@@ -1044,7 +1044,7 @@
             <button class="action-btn" id="refreshEntropy">Refresh sources</button>
           </div>
         </div>
-        <p class="helper" style="margin:4px 0 16px;">Three independent entropy streams are harvested and mixed into every beacon output. Currently only <strong>PoW Mining</strong> mints TGBT on Sepolia (via BatchMiningModule → TokenomicsModule). Stale Block rewards are calculated on-chain but <em>claimReward()</em> does not yet mint. UTXO anchoring contributes entropy only.</p>
+        <p class="helper" style="margin:4px 0 16px;">Three independent entropy streams are harvested and mixed into every beacon output. Currently only <strong>PoW Mining</strong> mints TGBT on Arbitrum L2 (via MiningModule → TokenomicsModule). Stale Block rewards are calculated on-chain but <em>claimReward()</em> does not yet mint. UTXO anchoring contributes entropy only.</p>
 
         <!-- ── Node Operator Controls ── -->
         <div class="settings-control">
@@ -1229,7 +1229,7 @@
               </div>
             </div>
             <div style="margin-top:12px;font-size:11px;color:var(--muted);text-align:center;">
-              Only PoW rewards are live on Sepolia (1.375 TGBT/solution via BatchMiningModule → TokenomicsModule).<br>
+              Only PoW rewards are live on Arbitrum (12.5 TGBT/solution via MiningModule → TokenomicsModule).<br>
               Stale block rewards: contract calculates but claimReward() TODO. UTXO: entropy only, no mint path.
             </div>
           </div>
@@ -1598,7 +1598,7 @@
     };
 
     const browserEthers = window.ethers || null;
-    const SEPOLIA_CHAIN_ID_HEX = '0xaa36a7';
+    const ARBITRUM_CHAIN_ID_HEX = '0xa4b1';  // Arbitrum One (42161)
     const WALLET_BATCH_ABI = [
       'function finalizeEpoch(uint256 epochId) external',
       'function recordStorageAttestation(uint256 epochId, bytes32 attestationHash) external',
@@ -1962,16 +1962,31 @@
       const sys = state.system;
       if (!sys) return;
 
+      // Show RPC error banner if system status had issues
+      if (sys._error) {
+        els.rpcStatus.textContent = `RPC Error: ${sys._error}`;
+        els.rpcStatus.className = 'danger';
+      } else {
+        els.rpcStatus.textContent = sys.chain?.rpcUrl || '—';
+        els.rpcStatus.className = '';
+      }
+
       setBadge(els.randomnessApiBadge, sys.randomnessApi?.online ? 'Online' : 'Offline', sys.randomnessApi?.online ? 'ok' : 'fail');
       setBadge(els.heartbeatApiBadge, sys.heartbeatApi?.online ? 'Online' : 'Offline', sys.heartbeatApi?.online ? 'ok' : 'fail');
       els.telemetryPath.textContent = sys.dashboard?.telemetryFile || '—';
       els.solutionBackend.textContent = sys.dashboard?.solutionsBackend || '—';
       els.storageLabel.textContent = (sys.dashboard?.solutionsBackend || 'file').toUpperCase();
 
+      // Wallet: always show the address (it's config, not RPC-dependent)
       els.walletAddress.textContent = sys.chain?.walletAddress || '—';
-      els.walletTgbt.textContent = `${fmtTGBT(Number(sys.chain?.token?.balance || 0))} ${sys.chain?.token?.symbol || 'TGBT'}`;
-      els.walletEth.textContent = `${fmtEth(sys.chain?.ethBalance || 0)} ETH`;
-      els.rpcStatus.textContent = sys.chain?.rpcUrl || '—';
+      const tgbtBalance = Number(sys.chain?.token?.balance || 0);
+      const ethBalance = Number(sys.chain?.ethBalance || 0);
+      els.walletTgbt.textContent = tgbtBalance > 0 || !sys._error
+        ? `${fmtTGBT(tgbtBalance)} ${sys.chain?.token?.symbol || 'TGBT'}`
+        : 'Loading…';
+      els.walletEth.textContent = ethBalance > 0 || !sys._error
+        ? `${fmtEth(sys.chain?.ethBalance || 0)} ETH`
+        : 'Loading…';
 
       const batchEnabled = !!sys.chain?.contracts?.batchEnabled;
       const batchWiring = batchEnabled
@@ -2022,14 +2037,21 @@
       const heartbeat = threat.heartbeatStatus || {};
       const telemetry = threat.telemetry || {};
       const alerts = threat.heartbeatAlerts?.active || heartbeat.security?.activeAlerts || [];
+      const heartbeatError = heartbeat.error || null;
       const suspicious = heartbeat.security?.suspicious;
 
-      els.personalThreatSummary.textContent = telemetry.continuousVerifiedLabel || heartbeat.security?.narrative || 'Security summary unavailable.';
+      // If heartbeat is in error state, show a meaningful status instead of all "—"
+      if (heartbeatError) {
+        els.personalThreatSummary.textContent = telemetry.continuousVerifiedLabel || 'Heartbeat sidecar is not responding. Security metrics will populate once it starts.';
+        setBadge(els.threatPostureBadge, 'Unknown', 'warn');
+      } else {
+        els.personalThreatSummary.textContent = telemetry.continuousVerifiedLabel || heartbeat.security?.narrative || 'Security summary unavailable.';
+        setBadge(els.threatPostureBadge, suspicious ? 'Suspicious' : 'Trusted', suspicious ? 'fail' : 'ok');
+      }
       els.threatContinuity.textContent = telemetry.continuousVerifiedHours != null ? `${fmtNum(telemetry.continuousVerifiedHours)} h` : '—';
       els.threatCurrentGap.textContent = fmtMsDuration(heartbeat.heartbeat?.solutionGapMs ?? telemetry.currentGapMs);
       els.threatLongestGap.textContent = fmtMsDuration(telemetry.longestGapMs);
       els.threatGapCount.textContent = fmtNum(telemetry.gapCount || 0);
-      setBadge(els.threatPostureBadge, suspicious ? 'Suspicious' : 'Trusted', suspicious ? 'fail' : 'ok');
       els.threatIntrusionScore.textContent = fmtNum(heartbeat.security?.intrusionScore || 0);
       els.threatIntrusionScore.className = suspicious ? 'danger' : 'ok';
       els.threatTelemetryFresh.textContent = heartbeat.heartbeat?.telemetryFresh ? 'Fresh' : 'Stale';
@@ -2266,7 +2288,7 @@
       await window.ethereum.request({ method: 'eth_requestAccounts' });
       const provider = new browserEthers.BrowserProvider(window.ethereum);
       try {
-        await window.ethereum.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: SEPOLIA_CHAIN_ID_HEX }] });
+        await window.ethereum.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: ARBITRUM_CHAIN_ID_HEX }] });
       } catch (err) {
         if (err?.code !== 4902) throw err;
       }
@@ -2362,48 +2384,90 @@
     }
 
     async function loadSystemStatus() {
-      const res = await fetch('/api/system/status');
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to load system status');
-      state.system = data;
+      try {
+        const res = await fetch('/api/system/status');
+        const data = await res.json();
+        if (!res.ok) {
+          // Server returned a structured error — merge partial data into state, show error
+          state.system = state.system || {};
+          state.system._error = data.error || 'Failed to load system status';
+        } else {
+          state.system = data;
+        }
+      } catch (err) {
+        // Network/parse failure — keep cached state, flag the error
+        state.system = state.system || {};
+        state.system._error = err.message || 'Network error loading system status';
+      }
       renderSystemStatus();
     }
 
     async function loadNetworkLatest() {
-      const res = await fetch('/api/network/randomness/latest');
-      const data = await res.json();
-      state.randomnessLatest = res.ok ? data : { error: data.error || 'No latest randomness available' };
+      try {
+        const res = await fetch('/api/network/randomness/latest');
+        const data = await res.json();
+        state.randomnessLatest = res.ok ? data : { error: data.error || 'No latest randomness available' };
+      } catch (err) {
+        state.randomnessLatest = state.randomnessLatest || { error: err.message || 'Failed to fetch randomness' };
+      }
       renderLatestRandomness();
     }
 
     async function loadEpochs() {
-      const res = await fetch('/api/network/epochs?limit=50');
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to load epochs');
-      const baseEpochs = data.epochs || [];
-      const detailed = await Promise.all(baseEpochs.map(async (ep) => {
-        try {
-          const detailRes = await fetch(`/api/network/epochs/${ep.epochId}`);
-          const detail = await detailRes.json();
-          return detailRes.ok ? detail : ep;
-        } catch {
-          return ep;
-        }
-      }));
-      state.epochs = detailed;
-      state.epochSource = data.source || 'randomness-api';
-      state.epochProofsAvailable = data.proofsAvailable !== false;
+      try {
+        const res = await fetch('/api/network/epochs?limit=50');
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to load epochs');
+        const baseEpochs = data.epochs || [];
+        const detailed = await Promise.all(baseEpochs.map(async (ep) => {
+          try {
+            const detailRes = await fetch(`/api/network/epochs/${ep.epochId}`);
+            const detail = await detailRes.json();
+            return detailRes.ok ? detail : ep;
+          } catch {
+            return ep;
+          }
+        }));
+        state.epochs = detailed;
+        state.epochSource = data.source || 'randomness-api';
+        state.epochProofsAvailable = data.proofsAvailable !== false;
+      } catch (err) {
+        // Keep cached epochs if available; don't wipe on transient failure
+        state.epochs = state.epochs || [];
+      }
       renderEpochs();
     }
 
     async function loadSecurity() {
-      const [threatRes, relayRes] = await Promise.all([
-        fetch('/api/security/threat-profile'),
-        fetch('/api/security/relay-profile'),
-      ]);
-      const [threatData, relayData] = await Promise.all([threatRes.json(), relayRes.json()]);
-      state.security.threatProfile = threatRes.ok ? threatData : { heartbeatStatus: { error: threatData.error || 'Failed to load threat profile' }, telemetry: { history: [] }, heartbeatAlerts: { active: [] } };
-      state.security.relayProfile = relayRes.ok ? relayData : null;
+      try {
+        const [threatRes, relayRes] = await Promise.all([
+          fetch('/api/security/threat-profile').catch(() => null),
+          fetch('/api/security/relay-profile').catch(() => null),
+        ]);
+        if (threatRes) {
+          try {
+            const threatData = await threatRes.json();
+            state.security.threatProfile = threatRes.ok ? threatData : { heartbeatStatus: { error: threatData.error || 'Failed to load threat profile' }, telemetry: { history: [] }, heartbeatAlerts: { active: [] } };
+          } catch {
+            state.security.threatProfile = state.security.threatProfile || { heartbeatStatus: { error: 'Invalid threat profile response' }, telemetry: { history: [] }, heartbeatAlerts: { active: [] } };
+          }
+        } else {
+          state.security.threatProfile = state.security.threatProfile || { heartbeatStatus: { error: 'Heartbeat API unreachable' }, telemetry: { history: [] }, heartbeatAlerts: { active: [] } };
+        }
+        if (relayRes) {
+          try {
+            const relayData = await relayRes.json();
+            state.security.relayProfile = relayRes.ok ? relayData : null;
+          } catch {
+            state.security.relayProfile = state.security.relayProfile || null;
+          }
+        } else {
+          state.security.relayProfile = state.security.relayProfile || null;
+        }
+      } catch (err) {
+        // Keep whatever cached state we have
+        state.security.threatProfile = state.security.threatProfile || { heartbeatStatus: { error: err.message }, telemetry: { history: [] }, heartbeatAlerts: { active: [] } };
+      }
       renderSecurity();
     }
 
@@ -2513,8 +2577,8 @@
     }
 
     // ── Unified Entropy Pipeline ──────────────────────────────
-    // REWARD TRUTH: Only PoW mining actually mints TGBT on Sepolia via
-    // BatchMiningModule → TokenomicsModule.onBlockMined() → tgbtToken.mint().
+    // REWARD TRUTH: Only PoW mining actually mints TGBT on Arbitrum via
+    // MiningModule → TokenomicsModule.onBlockMined() → tgbtToken.mint().
     // StaleBlockOracle.claimReward() calculates but does NOT mint (TODO in contract).
     // Dead UTXO has NO on-chain reward mechanism yet.
     // All entropy sources contribute to beacon quality; only PoW has live rewards.
@@ -2578,16 +2642,22 @@
       // Bitcoin tip height — estimate from genesis date
       entropyState.btcTipHeight = 941529 + Math.floor((Date.now() - new Date('2025-05-01').getTime()) / 600000);
 
-      // UTXO/Stale: show as offline until real subsystems connect
+      // UTXO: show as offline until real subsystem connects
       entropyState.utxo.height = entropyState.btcTipHeight;
       entropyState.utxo.scanned = 0;
       entropyState.utxo.anchored = 0;
       entropyState.utxo.status = 'offline';
-      entropyState.stale.count = 0;
-      entropyState.stale.forkDepth = 0;
-      entropyState.stale.zeroBits = 0;
-      entropyState.stale.status = 'offline';
+
+      // Stale block: respect the stale mining toggle instead of hardcoding offline
+      entropyState.stale.count = snap?.stale_block_count || 0;
+      entropyState.stale.forkDepth = snap?.stale_fork_depth || 0;
+      entropyState.stale.zeroBits = snap?.stale_zero_bits || 0;
       entropyState.stale.blocks = [];
+      if (staleMiningEnabled) {
+        entropyState.stale.status = entropyState.stale.count > 0 ? 'active' : 'scanning';
+      } else {
+        entropyState.stale.status = 'disabled';
+      }
 
       // Pull real TGBT reward from existing effectiveRewards()
       if (snap) {
@@ -2693,7 +2763,7 @@
       } else if (sourcesUp > 0) {
         statusEl.className = 'badge warn';
         const disabledNote = staleDisabled ? ' (stale off)' : '';
-        statusEl.innerHTML = `<span class="live-dot gold"></span>${sourcesUp}/${maxSources} active` + (sourcesUp === 1 ? ' (PoW only — Sepolia)' : '') + disabledNote;
+        statusEl.innerHTML = `<span class="live-dot gold"></span>${sourcesUp}/${maxSources} active` + (sourcesUp === 1 ? ' (PoW only — Arbitrum)' : '') + disabledNote;
       } else {
         statusEl.className = 'badge fail';
         statusEl.textContent = 'No sources';
@@ -2731,13 +2801,14 @@
       els.epStaleCount.textContent = staleDisabled ? 'Disabled' : fmtNum(ep.stale.count);
       els.epStaleForkDepth.textContent = staleDisabled ? '—' : (ep.stale.forkDepth > 0 ? `${ep.stale.forkDepth} blocks` : '—');
       els.epStaleZeroBits.textContent = staleDisabled ? '—' : (ep.stale.zeroBits > 0 ? `${ep.stale.zeroBits} bits` : '—');
-      els.epStaleXorStatus.textContent = staleDisabled ? 'Disabled' : (ep.stale.count > 0 ? `${ep.stale.count} blocks XOR'd` : 'No blocks');
+      els.epStaleXorStatus.textContent = staleDisabled ? 'Disabled' : (ep.stale.count > 0 ? `${ep.stale.count} blocks XOR'd` : 'Scanning for forks…');
       els.epStaleTipHeight.textContent = staleDisabled ? '—' : fmtNum(ep.btcTipHeight);
       els.epStaleHash.textContent = staleDisabled ? 'Stale mining disabled — enable via toggle above' : ep.stale.xorPool;
       els.epStaleQuality.style.width = staleDisabled ? '0%' : `${ep.stale.quality}%`;
       els.epStaleQualityLabel.textContent = staleDisabled ? 'Off' : `${ep.stale.quality}/100`;
       els.epStaleTgbt.textContent = staleDisabled ? 'Disabled' : (staleActive ? `${fmtTGBT(ep.tgbt.stale)} TGBT` : '0.000 TGBT (no mint)');
-      setBadge(els.staleStatus, staleDisabled ? 'Disabled' : (staleActive ? 'Active' : 'Offline'), staleDisabled ? 'warn' : (staleActive ? 'ok' : 'fail'));
+      const staleScanning = staleMiningEnabled && !staleActive;
+      setBadge(els.staleStatus, staleDisabled ? 'Disabled' : (staleActive ? 'Active' : 'Scanning'), staleDisabled ? 'warn' : (staleActive ? 'ok' : (staleScanning ? 'warn' : 'fail')));
 
       // Keep card inactive class in sync
       if (els.staleSourceCard) els.staleSourceCard.classList.toggle('inactive', staleDisabled);
@@ -2822,7 +2893,7 @@
       if (!staleMiningEnabled) {
         entropyState.stale.status = 'disabled';
       } else {
-        entropyState.stale.status = entropyState.stale.count > 0 ? 'active' : 'offline';
+        entropyState.stale.status = entropyState.stale.count > 0 ? 'active' : 'scanning';
       }
     }
 
@@ -3013,16 +3084,21 @@
     });
 
     async function loadHistory() {
-      const res = await fetch('/api/history?limit=120');
-      const data = await res.json();
-      state.history = data.history || [];
+      try {
+        const res = await fetch('/api/history?limit=120');
+        const data = await res.json();
+        state.history = data.history || [];
 
-      // Detect reward events from history
-      for (let i = 1; i < state.history.length; i++) {
-        detectRewardEvent(state.history[i - 1], state.history[i]);
+        // Detect reward events from history
+        for (let i = 1; i < state.history.length; i++) {
+          detectRewardEvent(state.history[i - 1], state.history[i]);
+        }
+
+        if (data.latest) render(data.latest);
+      } catch (err) {
+        console.warn('[loadHistory] Failed to load telemetry history:', err.message);
+        state.history = [];
       }
-
-      if (data.latest) render(data.latest);
     }
 
     function connect() {
@@ -3032,19 +3108,23 @@
       source.onopen = () => { els.conn.textContent = 'Live'; els.conn.className = 'ok'; };
       source.onerror = () => { els.conn.textContent = 'Reconnecting…'; els.conn.className = 'warn'; };
       source.addEventListener('snapshot', (event) => {
-        const snap = JSON.parse(event.data);
-        state.history.push(snap);
-        if (state.history.length > 120) state.history.shift();
-        render(snap);
+        try {
+          const snap = JSON.parse(event.data);
+          state.history.push(snap);
+          if (state.history.length > 120) state.history.shift();
+          render(snap);
+        } catch (err) {
+          console.warn('[SSE] Failed to parse snapshot event:', err.message);
+        }
       });
       source.addEventListener('meta', () => {});
     }
 
     loadHistory().then(connect).catch(err => {
-      els.conn.textContent = 'Error';
-      els.phaseTitle.textContent = 'Failed to load telemetry';
-      els.phaseDesc.textContent = err.message;
-      console.error(err);
+      console.error('[init] History+SSE failed, attempting SSE anyway:', err.message);
+      els.conn.textContent = 'Reconnecting…';
+      els.conn.className = 'warn';
+      connect();
     });
 
     window.dashboardActions = {

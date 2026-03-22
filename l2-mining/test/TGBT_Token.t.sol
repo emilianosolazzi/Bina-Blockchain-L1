@@ -70,6 +70,18 @@ contract TGBTTokenTest is Test {
         vm.stopPrank();
     }
 
+    function testUnauthorizedMintReverts() public {
+        vm.prank(user);
+        vm.expectRevert(TGBT.NotAuthorized.selector);
+        token.mint(user, 1 ether);
+    }
+
+    function testLockPermissionsRequiresAuthorizedModule() public {
+        vm.prank(governance);
+        vm.expectRevert(TGBT.NoAuthorizedModules.selector);
+        token.lockPermissions();
+    }
+
     function testRecordStampStoresEpochAnchor() public {
         vm.prank(governance);
         token.grantAuthorization(module);
@@ -94,5 +106,27 @@ contract TGBTTokenTest is Test {
         assertEq(stamp.bitcoinVout, 2);
         assertEq(stamp.bitcoinBlock, 900_000);
         assertEq(stamp.proofDigest, keccak256(hex"1234"));
+    }
+
+    function testRecordStampRejectsZeroMiner() public {
+        vm.prank(governance);
+        token.grantAuthorization(module);
+
+        vm.prank(module);
+        vm.expectRevert(TGBT.ZeroMiner.selector);
+        token.recordStamp(
+            7,
+            address(0),
+            keccak256("merkle-root"),
+            keccak256("bitcoin-tx"),
+            2,
+            900_000,
+            hex"1234"
+        );
+    }
+
+    function testGetEpochStampRevertsWhenMissing() public {
+        vm.expectRevert(TGBT.EpochNotStamped.selector);
+        token.getEpochStamp(999);
     }
 }

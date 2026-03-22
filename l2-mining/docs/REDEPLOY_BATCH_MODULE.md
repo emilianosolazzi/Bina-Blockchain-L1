@@ -1,6 +1,28 @@
+> **NOTE**: The addresses in this document are from the original **Sepolia testnet** deployment.
+> For the current **Arbitrum mainnet** deployment, see the address table below.
+
+## Current Arbitrum Deployment (Production)
+
+| Contract / Module | Address |
+|---|---|
+| TemporalGradientCore | `0xF6556DDC7CdD3635A05428BD85BCf33A09F752e6` |
+| TGBT Token | `0x31228eE520e895DA19f728DE5459b1b317d9b8D8` |
+| MINING_MODULE | `0x56C458a06FB104cb31820856fCe42E1f6926CBDD` |
+| BATCH_MINING_MODULE | `0x6eb6D03A8E98c79E89B98ce19AcAefB865817Db2` |
+| RANDOMNESS_MODULE | `0x583863CFC5EFc0106886BA485e1b67F0966584f9` |
+| TOKENOMICS_MODULE | `0xA9f684d709bB46155A252b260dDDE4cb2a37a0E3` |
+| RATE_LIMIT_MODULE | `0x61dEEEf2B2956db3AD291c639939669cD5399c1B` |
+| STALE_BLOCK_MODULE | `0xC4A16a11a8C61eA06F194f1EeD1d08a362fe986F` |
+| Admin wallet | `0xd28E6a7AD806E85BD0544ed443D25E48f52c06c3` (Ledger) |
+| Miner wallet | `0x5cB4D906f0464b34c44d6555A770BF6aF4A2cEfe` |
+
+---
+
+## Original Sepolia Batch Module Redeployment (Historical)
+
 Do this exactly. Do not call initialize() on the Core again.
 
-Use these addresses:
+Use these addresses (Sepolia only — see table above for Arbitrum):
 
 Core live address: 0x843fAc753610163776374Ab0261029BAEA0251b7
 TGBT: 0x496598fDeab78fb2986e89d396249779595418E9

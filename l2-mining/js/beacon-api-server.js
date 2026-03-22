@@ -6,7 +6,7 @@
 //   • Batch epoch-based mining (BatchMiningModule) — optional
 //
 // Architecture:
-//   Client dApp → beacon-api-server → Redis cache → Sepolia contracts
+//   Client dApp → beacon-api-server → Redis cache → Arbitrum contracts
 //                                    → PostgreSQL (usage logs)
 //
 // Fixes applied:

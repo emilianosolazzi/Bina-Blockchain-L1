@@ -424,10 +424,43 @@ async fn run_live_runtime(
     .await?;
 
     while !shutdown.is_cancelled() {
-        // ── Pre-check: wait out any stale on-chain commitment before searching ──
-        match live_client.has_pending_commitment().await {
-            Ok(true) => {
-                tracing::info!("Stale on-chain commitment detected — waiting for clearance before searching");
+        // ── Pre-check: read on-chain commitment state and handle intelligently ──
+        match live_client.get_onchain_commitment().await {
+            Ok(Some(commitment)) if !commitment.expired => {
+                let same_pool = commitment.pool_id == config.pool_id;
+
+                if same_pool {
+                    // Commitment is for OUR pool — try to reveal with saved pending data
+                    match try_resume_pending_commitment(
+                        &live_client,
+                        &config,
+                        &stats,
+                        &output_filter,
+                        &phase_tracker,
+                        &shutdown,
+                    ).await {
+                        Ok(true) => {
+                            tracing::info!("Successfully revealed pending commitment — resuming mining");
+                            continue;
+                        }
+                        Ok(false) => {
+                            tracing::info!("No saved reveal data for pool {} commitment — waiting for expiry", commitment.pool_id);
+                        }
+                        Err(err) => {
+                            tracing::warn!("Pending reveal attempt failed: {err:#} — waiting for expiry");
+                        }
+                    }
+                } else {
+                    // Commitment is for a DIFFERENT pool — no point trying to reveal,
+                    // just wait for it to expire cleanly
+                    tracing::warn!(
+                        "On-chain commitment is for POOL {} but miner is configured for POOL {} — \
+                         cannot reveal, waiting for expiry at block {}",
+                        commitment.pool_id, config.pool_id, commitment.expires_at
+                    );
+                }
+
+                // Wait for the stale commitment to expire
                 if let Err(err) = live_client.wait_for_commitment_clearance_public(&phase_tracker).await {
                     tracing::warn!("Clearance wait failed: {err:#}");
                     time::sleep(Duration::from_secs(5)).await;
@@ -435,10 +468,41 @@ async fn run_live_runtime(
                 }
                 tracing::info!("Commitment cleared — resuming mining");
             }
-            Ok(false) => {} // no pending commitment, proceed normally
+            Ok(Some(commitment)) if commitment.expired => {
+                // Already expired — log and proceed immediately, no waiting needed
+                tracing::info!(
+                    "Stale on-chain commitment (pool {}, block {}) already expired — mining immediately",
+                    commitment.pool_id, commitment.commit_block
+                );
+            }
+            Ok(Some(_)) => {} // unreachable but satisfy match
+            Ok(None) => {} // no commitment at all, proceed normally
             Err(err) => {
                 tracing::warn!("Failed to check commitment status: {err:#}");
-                // Don't block — proceed and let submit_solution handle it
+            }
+        }
+
+        // ── Pre-flight: verify pool has remaining emission before spending CPU ──
+        match live_client.check_pool_emission().await {
+            Ok((remaining, _mined, active)) => {
+                if !active {
+                    tracing::error!("Pool {} is not active! Stopping miner.", config.pool_id);
+                    shutdown.cancel();
+                    continue;
+                }
+                if remaining <= 0.0 {
+                    tracing::error!(
+                        "Pool {} has ZERO remaining emission — cannot mine. \
+                         Create a new pool or switch pool_id in config.",
+                        config.pool_id
+                    );
+                    shutdown.cancel();
+                    continue;
+                }
+                tracing::info!("Pool {} has {remaining:.2} TGBT remaining", config.pool_id);
+            }
+            Err(err) => {
+                tracing::warn!("Could not verify pool emission: {err:#} — proceeding anyway");
             }
         }
 
@@ -516,11 +580,17 @@ async fn run_live_runtime(
                     }
                 }
                 Err(err) => {
-                    {
+                    let err_msg = format!("{err:#}");
+                    // Only count as "rejected" if the TX actually reached the chain.
+                    // Pre-chain failures (gas estimation, race detection) are retryable.
+                    let is_prechain = err_msg.contains("estimate commitment gas")
+                        || err_msg.contains("Failed to send commitment")
+                        || err_msg.contains("race detected");
+                    if !is_prechain {
                         let mut guard = stats.lock().await;
                         guard.rejected_submissions = guard.rejected_submissions.saturating_add(1);
                     }
-                    warn!("Live submission failed: {err:#}");
+                    warn!("Live submission failed{}: {err:#}", if is_prechain { " (pre-chain, not counted as rejection)" } else { "" });
 
                     if let Err(recovery_err) = try_resume_pending_commitment(
                         &live_client,
@@ -536,6 +606,13 @@ async fn run_live_runtime(
                     }
                 }
             }
+        }
+
+        // ── Throttle: sleep between mining cycles to stay under RPC rate limits ──
+        let delay = config.cycle_delay_secs;
+        if delay > 0 && !shutdown.is_cancelled() {
+            tracing::debug!("Cycle delay: sleeping {delay}s before next mining cycle");
+            tokio::time::sleep(Duration::from_secs(delay)).await;
         }
 
         tokio::task::yield_now().await;

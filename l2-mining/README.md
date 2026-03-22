@@ -12,6 +12,7 @@ This folder isolates the files needed for the Temporal Gradient L2 mining path.
   - modules/RateLimitModule.sol
   - modules/TokenomicsModule.sol
   - modules/ModuleBase.sol
+  - StaleBlockOracle.sol
   - MiningLib.sol
   - GovernanceLib.sol
   - TokenomicsLib.sol
@@ -47,6 +48,7 @@ This workspace is limited to L2 mining only:
 - reward issuance
 - pool configuration
 - rate limiting
+- stale block (Bitcoin orphan) entropy mining
 - miner client runtime
 - mining telemetry
 

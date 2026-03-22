@@ -25,10 +25,36 @@ class FileStore {
 	_load() {
 		try {
 			if (fs.existsSync(this.filePath)) {
-				const raw = fs.readFileSync(this.filePath, 'utf8');
-				const parsed = JSON.parse(raw);
+				const raw = fs.readFileSync(this.filePath, 'utf8').trim();
+				if (!raw) {
+					console.warn('[SolutionStore/File] File is empty, starting fresh.');
+					return;
+				}
+				let parsed;
+				try {
+					parsed = JSON.parse(raw);
+				} catch (parseErr) {
+					// If file starts with '<' it's HTML (proxy error page saved somehow)
+					const isHtml = raw.startsWith('<') || raw.startsWith('<!');
+					console.warn(`[SolutionStore/File] ${isHtml ? 'HTML content' : 'Invalid JSON'} in ${this.filePath}, starting fresh:`, parseErr.message);
+					return;
+				}
 				if (parsed && Array.isArray(parsed.solutions)) {
 					this._data = parsed;
+				} else if (Array.isArray(parsed)) {
+					// Bare array — wrap in expected structure
+					console.warn('[SolutionStore/File] Found bare array in file, wrapping in expected structure.');
+					const solutions = parsed;
+					this._data = {
+						solutions,
+						stats: {
+							totalRewards: solutions.reduce((sum, s) => sum + Number(s.reward || 0), 0),
+							accepted: solutions.filter(s => s.accepted).length,
+							rejected: solutions.filter(s => !s.accepted).length,
+						},
+					};
+				} else {
+					console.warn('[SolutionStore/File] Unexpected data format, starting fresh.');
 				}
 			}
 		} catch (err) {

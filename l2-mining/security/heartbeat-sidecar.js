@@ -324,17 +324,25 @@ function evaluateSnapshots(snapshots, fileSize) {
   }
 
   if (solutionGapMs != null && solutionGapMs > derivedGapMs) {
-    candidateAlerts.push({
-      type: 'heartbeat_gap',
-      severity: solutionGapMs > derivedGapMs * 2 ? 'critical' : 'high',
-      message: `No new mining heartbeat for ${solutionGapMs} ms.`,
-      details: {
-        lastSolutionAt: new Date(lastSolutionAtMs).toISOString(),
-        solutionGapMs,
-        targetGapMs: derivedGapMs,
-        averageSolutionIntervalMs,
-      },
-    });
+    // Suppress gap alerts during phases where the miner is alive but intentionally
+    // not producing solutions (commit-reveal cycle: waiting for clearance, locked, etc.)
+    const currentPhase = latest.mining_phase || null;
+    const waitingPhases = ['waiting_for_clearance', 'commitment_locked', 'committing', 'revealing'];
+    const isWaitingPhase = currentPhase && waitingPhases.includes(currentPhase);
+
+    if (!isWaitingPhase) {
+      candidateAlerts.push({
+        type: 'heartbeat_gap',
+        severity: solutionGapMs > derivedGapMs * 2 ? 'critical' : 'high',
+        message: `No new mining heartbeat for ${solutionGapMs} ms.`,
+        details: {
+          lastSolutionAt: new Date(lastSolutionAtMs).toISOString(),
+          solutionGapMs,
+          targetGapMs: derivedGapMs,
+          averageSolutionIntervalMs,
+        },
+      });
+    }
   }
 
   if (hashrateRatio != null && baselineHashrateHs > 0 && hashrateRatio < HASHRATE_DROP_RATIO) {
@@ -359,11 +367,11 @@ function evaluateSnapshots(snapshots, fileSize) {
     });
   }
 
-  if (rejectedBurst >= REJECT_BURST_THRESHOLD || currentRejected > 0) {
+  if (rejectedBurst >= REJECT_BURST_THRESHOLD) {
     candidateAlerts.push({
       type: 'submission_rejections',
       severity: rejectedBurst >= Math.max(3, REJECT_BURST_THRESHOLD * 2) ? 'high' : 'medium',
-      message: `Rejected submissions increased by ${Math.max(rejectedBurst, currentRejected)}.`,
+      message: `Rejected submissions increased by ${rejectedBurst} in the last ${recentRejectedCounts.length} snapshots.`,
       details: { currentRejected, rejectedBurst, threshold: REJECT_BURST_THRESHOLD },
     });
   }

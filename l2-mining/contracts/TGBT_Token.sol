@@ -39,6 +39,7 @@ contract TGBT is ERC20 {
     error EpochNotStamped();
     error ZeroMerkleRoot();
     error ZeroBitcoinTxHash();
+    error ZeroMiner();
     error NoAuthorizedModules();
 
     // ── Authorization Events ─────────────────────────────────
@@ -111,6 +112,10 @@ contract TGBT is ERC20 {
     //  BatchMiningModule, future StaleBlockOracle, etc.)
     //  Once stable → lockPermissions() → permanent. No going back.
 
+    /**
+     * @notice Authorizes a module to mint tokens and record epoch stamps.
+     * @param module Module address to authorize.
+     */
     function grantAuthorization(address module) external onlyGovernance whenNotLocked {
         if (module == address(0)) revert ZeroAddress();
         if (!isAuthorized[module]) {
@@ -120,6 +125,10 @@ contract TGBT is ERC20 {
         }
     }
 
+    /**
+     * @notice Revokes an existing module authorization.
+     * @param module Module address to revoke.
+     */
     function revokeAuthorization(address module) external onlyGovernance whenNotLocked {
         if (isAuthorized[module]) {
             isAuthorized[module] = false;
@@ -143,12 +152,22 @@ contract TGBT is ERC20 {
     //  Any authorized module can mint (TokenomicsModule enforces
     //  epoch halving, emission caps, difficulty bonuses).
 
+    /**
+     * @notice Mints TGBT to a recipient.
+     * @dev Callable only by an authorized protocol module.
+     * @param to Recipient address.
+     * @param amount Amount to mint.
+     */
     function mint(address to, uint256 amount) external onlyAuthorized {
         if (to == address(0)) revert ZeroAddress();
         if (totalSupply() + amount > MAX_SUPPLY) revert CapExceeded();
         _mint(to, amount);
     }
 
+    /**
+     * @notice Returns the remaining mintable supply under the immutable cap.
+     * @return amount Remaining tokens available to mint.
+     */
     function availableToMint() external view returns (uint256) {
         return MAX_SUPPLY - totalSupply();
     }
@@ -168,6 +187,7 @@ contract TGBT is ERC20 {
         uint32  bitcoinBlock,
         bytes calldata btcInclusionProof
     ) external onlyAuthorized returns (uint256 stampId) {
+        if (miner         == address(0)) revert ZeroMiner();
         if (merkleRoot    == bytes32(0)) revert ZeroMerkleRoot();
         if (bitcoinTxHash == bytes32(0)) revert ZeroBitcoinTxHash();
         if (epochStamped[epochId])       revert EpochAlreadyStamped();
@@ -200,6 +220,11 @@ contract TGBT is ERC20 {
         );
     }
 
+    /**
+     * @notice Returns the stored Bitcoin anchor for a given epoch.
+     * @param epochId Epoch identifier to query.
+     * @return stamp Stored stamp data for that epoch.
+     */
     function getEpochStamp(uint64 epochId) external view returns (Stamp memory) {
         if (!epochStamped[epochId]) revert EpochNotStamped();
         return stamps[epochStamp[epochId]];

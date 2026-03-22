@@ -12,9 +12,48 @@ use ethers::{
     types::{Address, Bytes, H256, TransactionReceipt, U256},
     utils::keccak256,
 };
+use reqwest::header;
 use rand::{rngs::OsRng, RngCore};
+use serde_json::Value;
 use std::{fs, path::Path, sync::Arc, time::Duration};
 use zeroize::{Zeroize, ZeroizeOnDrop};
+
+/// Retry an async operation with exponential backoff.  Useful for transient
+/// RPC errors (429, timeouts, etc.) that resolve after a short wait.
+async fn retry_with_backoff<F, Fut, T>(label: &str, max_retries: usize, mut f: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let mut delay = Duration::from_secs(2);
+    for attempt in 0..=max_retries {
+        match f().await {
+            Ok(v) => return Ok(v),
+            Err(err) if attempt < max_retries => {
+                let msg = format!("{err:#}");
+                if msg.contains("429")
+                    || msg.contains("Too Many Requests")
+                    || msg.contains("rate limit")
+                    || msg.contains("timeout")
+                    || msg.contains("timed out")
+                {
+                    tracing::warn!(
+                        "{label}: transient RPC error (attempt {}/{}), retrying in {}s — {msg}",
+                        attempt + 1,
+                        max_retries,
+                        delay.as_secs(),
+                    );
+                    tokio::time::sleep(delay).await;
+                    delay = delay.saturating_mul(2).min(Duration::from_secs(30));
+                } else {
+                    return Err(err);
+                }
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    unreachable!()
+}
 
 pub const DEFAULT_CONTRACT_PLACEHOLDER: &str = "0xYourContractAddress";
 
@@ -26,6 +65,7 @@ abigen!(
         function minCommitmentAge() external view returns (uint256)
         function maxCommitmentAge() external view returns (uint256)
         function getMiningChallenge(uint8 poolId) external view returns (bytes32[] outputs, uint256 difficulty)
+        function getPoolInfo(uint8 poolId) external view returns (uint256 difficulty, uint256 emission, uint256 mined, bool active)
         function nonces(address miner) external view returns (uint256)
         function minBlockInterval() external view returns (uint8)
         function lastMinerBlock(address miner) external view returns (uint64)
@@ -33,6 +73,16 @@ abigen!(
 );
 
 pub type MiningClient = SignerMiddleware<Provider<Http>, LocalWallet>;
+
+/// On-chain commitment state for the miner address.
+#[derive(Debug, Clone)]
+pub struct OnChainCommitment {
+    pub commit_block: u64,
+    pub revealed: bool,
+    pub pool_id: u8,
+    pub expires_at: u64,
+    pub expired: bool,
+}
 
 #[derive(Debug, Clone)]
 pub struct LiveChallenge {
@@ -68,8 +118,27 @@ impl LiveMiningClient {
             return Ok(None);
         }
 
-        let provider = Provider::<Http>::try_from(config.rpc_url.as_str())?
-            .interval(Duration::from_millis(750));
+        let provider = if let Some(ref api_key) = config.rpc_api_key {
+            let mut headers = header::HeaderMap::new();
+            headers.insert(
+                "x-api-key",
+                header::HeaderValue::from_str(api_key)
+                    .context("invalid rpc_api_key value")?,
+            );
+            let client = reqwest::Client::builder()
+                .default_headers(headers)
+                .build()
+                .context("failed to build HTTP client with API key")?;
+            let http = Http::new_with_client(
+                url::Url::parse(config.rpc_url.as_str())
+                    .context("invalid rpc_url")?,
+                client,
+            );
+            Provider::new(http).interval(Duration::from_millis(750))
+        } else {
+            Provider::<Http>::try_from(config.rpc_url.as_str())?
+                .interval(Duration::from_millis(750))
+        };
         let provider = Arc::new(provider);
         let chain_id = provider.get_chainid().await?.as_u64();
         let wallet = load_or_create_wallet(config)?.with_chain_id(chain_id);
@@ -93,34 +162,69 @@ impl LiveMiningClient {
         self.client.address()
     }
 
+    async fn current_contract_block_number(&self) -> Result<u64> {
+        let latest: Value = retry_with_backoff("current_contract_block_number", 5, || {
+            let provider = Arc::clone(&self.provider);
+            async move {
+                provider
+                    .request("eth_getBlockByNumber", ("latest", false))
+                    .await
+                    .context("Failed to fetch latest block payload")
+            }
+        })
+        .await?;
+
+        if let Some(l1_block_hex) = latest.get("l1BlockNumber").and_then(Value::as_str) {
+            return u64::from_str_radix(l1_block_hex.trim_start_matches("0x"), 16)
+                .with_context(|| format!("Invalid l1BlockNumber value {l1_block_hex}"));
+        }
+
+        Ok(self.provider.get_block_number().await?.as_u64())
+    }
+
     pub fn signer_clone(&self) -> LocalWallet {
         self.client.signer().clone()
     }
 
     pub async fn current_challenge(&self) -> Result<LiveChallenge> {
-        let contract = MiningContract::new(self.contract_address, Arc::clone(&self.provider));
-        let (outputs, difficulty) = contract.get_mining_challenge(self.pool_id).call().await?;
-        let previous_output = *outputs
-            .first()
-            .ok_or_else(|| anyhow!("No outputs returned from getMiningChallenge"))?;
-        let block = self
-            .provider
-            .get_block(ethers::types::BlockNumber::Latest)
-            .await?
-            .ok_or_else(|| anyhow!("Latest block unavailable"))?;
+        let contract_addr = self.contract_address;
+        let provider = Arc::clone(&self.provider);
+        let pool_id = self.pool_id;
+        retry_with_backoff("current_challenge", 5, || {
+            let provider = Arc::clone(&provider);
+            async move {
+                let contract = MiningContract::new(contract_addr, provider.clone());
+                let (outputs, difficulty) = contract.get_mining_challenge(pool_id).call().await?;
+                let previous_output = *outputs
+                    .first()
+                    .ok_or_else(|| anyhow!("No outputs returned from getMiningChallenge"))?;
+                let block = provider
+                    .get_block(ethers::types::BlockNumber::Latest)
+                    .await?
+                    .ok_or_else(|| anyhow!("Latest block unavailable"))?;
 
-        Ok(LiveChallenge {
-            previous_output,
-            difficulty,
-            block_timestamp: block.timestamp.as_u64(),
-            prevrandao: block.mix_hash.unwrap_or_default().0,
-        })
+                Ok(LiveChallenge {
+                    previous_output,
+                    difficulty,
+                    block_timestamp: block.timestamp.as_u64(),
+                    prevrandao: block.mix_hash.unwrap_or_default().0,
+                })
+            }
+        }).await
     }
 
     pub async fn next_commit_nonce(&self) -> Result<u64> {
-        let contract = MiningContract::new(self.contract_address, Arc::clone(&self.provider));
-        let nonce = contract.nonces(self.miner_address()).call().await?;
-        Ok(nonce.as_u64())
+        let contract_addr = self.contract_address;
+        let provider = Arc::clone(&self.provider);
+        let miner = self.miner_address();
+        retry_with_backoff("next_commit_nonce", 5, || {
+            let provider = Arc::clone(&provider);
+            async move {
+                let contract = MiningContract::new(contract_addr, provider);
+                let nonce = contract.nonces(miner).call().await?;
+                Ok(nonce.as_u64())
+            }
+        }).await
     }
 
     pub fn sign_entropy_hash(&self, entropy_hash: [u8; 32]) -> Result<Vec<u8>> {
@@ -146,7 +250,20 @@ impl LiveMiningClient {
         let contract = MiningContract::new(self.contract_address, Arc::clone(&self.client));
 
         // Check for and wait out any existing active commitment
-        self.wait_for_commitment_clearance(&contract, phase).await?;
+        let _ = self.wait_for_commitment_clearance(phase).await?;
+
+        // ── Verify pool has remaining emission before wasting gas ──
+        let (remaining_emission, _, pool_active) = self.check_pool_emission().await?;
+        if !pool_active {
+            return Err(anyhow!("Pool {} is not active — aborting commit", self.pool_id));
+        }
+        if remaining_emission <= 0.0 {
+            return Err(anyhow!(
+                "Pool {} has ZERO remaining emission — aborting commit to avoid wasting gas",
+                self.pool_id
+            ));
+        }
+        tracing::info!("Pool {} has {remaining_emission:.2} TGBT remaining — proceeding with commit", self.pool_id);
 
         // ── Wait for mining cooldown (minBlockInterval) ──────────────
         self.wait_for_mining_cooldown(&contract, phase).await?;
@@ -165,6 +282,22 @@ impl LiveMiningClient {
         crate::pending::save(key_path, &pending)?;
 
         phase.set(MiningPhase::Committing, None);
+
+        // ── Final re-check for active commitment right before sending ──
+        // Guards against race between clearance check and commit TX broadcast.
+        if let Some(c) = self.get_onchain_commitment().await? {
+            if !c.expired {
+                tracing::warn!(
+                    "Active commitment appeared after clearance check (pool {}, block {}) — aborting to avoid revert",
+                    c.pool_id, c.commit_block
+                );
+                crate::pending::clear(key_path)?;
+                return Err(anyhow!(
+                    "ActiveCommitmentExists race detected — previous commitment still on-chain, will retry next cycle"
+                ));
+            }
+        }
+
         let commitment_signature = self.sign_commitment(&submission.commitment).await?;
 
         let commit_tx = contract.submit_mining_commitment(
@@ -174,24 +307,34 @@ impl LiveMiningClient {
             U256::from(submission.commitment.deadline),
             commitment_signature,
         );
-        let commit_gas = commit_tx
-            .estimate_gas()
-            .await
-            .context("Failed to estimate commitment gas")?;
+        let commit_gas = match commit_tx.estimate_gas().await {
+            Ok(gas) => gas,
+            Err(err) => {
+                // Gas estimation failure means the TX would revert — clean up pending
+                tracing::warn!("Commitment gas estimation failed (likely contract revert): {err:#}");
+                crate::pending::clear(key_path)?;
+                return Err(anyhow!("Failed to estimate commitment gas: {err:#}"));
+            }
+        };
         let commit_tx = commit_tx
             .legacy()
             .gas(apply_gas_buffer(commit_gas))
             .gas_price(self.legacy_gas_price().await?);
-        let pending_commit = commit_tx.send().await.context("Failed to send commitment")?;
-        let commit_receipt = pending_commit
+        let pending_commit = match commit_tx.send().await {
+            Ok(pending_tx) => pending_tx,
+            Err(err) => {
+                // TX failed to send — clean up pending since nothing reached the chain
+                tracing::warn!("Commitment TX failed to send: {err:#}");
+                crate::pending::clear(key_path)?;
+                return Err(anyhow!("Failed to send commitment: {err:#}"));
+            }
+        };
+        let _commit_receipt = pending_commit
             .await?
             .ok_or_else(|| anyhow!("No commitment receipt"))?;
 
         // Update pending file with the actual commit block
-        let commit_block = commit_receipt
-            .block_number
-            .ok_or_else(|| anyhow!("Missing commitment block number"))?
-            .as_u64();
+        let commit_block = self.current_contract_block_number().await?;
         pending.commit_block = commit_block;
         crate::pending::save(key_path, &pending)?;
 
@@ -200,7 +343,7 @@ impl LiveMiningClient {
         phase.set(MiningPhase::CommitmentLocked, Some(min_blocks));
 
         loop {
-            let current_block = self.provider.get_block_number().await?.as_u64();
+            let current_block = self.current_contract_block_number().await?;
             if current_block >= target_block {
                 break;
             }
@@ -230,7 +373,7 @@ impl LiveMiningClient {
         let contract = MiningContract::new(self.contract_address, Arc::clone(&self.client));
         let max_age = contract.max_commitment_age().call().await?.as_u64();
         let min_age = contract.min_commitment_age().call().await?.as_u64();
-        let current_block = self.provider.get_block_number().await?.as_u64();
+        let current_block = self.current_contract_block_number().await?;
         let expires_at = pending.commit_block.saturating_add(max_age);
         let reveal_at = pending.commit_block.saturating_add(min_age);
 
@@ -253,7 +396,7 @@ impl LiveMiningClient {
             let blocks_to_wait = reveal_at.saturating_sub(current_block);
             phase.set(MiningPhase::CommitmentLocked, Some(blocks_to_wait));
             loop {
-                let now = self.provider.get_block_number().await?.as_u64();
+                let now = self.current_contract_block_number().await?;
                 if now >= reveal_at {
                     break;
                 }
@@ -332,9 +475,10 @@ impl LiveMiningClient {
             .ok_or_else(|| anyhow!("No reveal receipt"))
     }
 
-    /// Returns `true` if there is an unrevealed, unexpired commitment on chain.
-    /// This is a quick non-blocking check — use before searching to avoid wasted CPU.
-    pub async fn has_pending_commitment(&self) -> Result<bool> {
+    /// Read the full on-chain commitment for this miner, if any active one exists.
+    /// Returns `Ok(None)` when no commitment, already revealed, or zero hash.
+    /// Returns the commitment info including pool_id and whether it's expired.
+    pub async fn get_onchain_commitment(&self) -> Result<Option<OnChainCommitment>> {
         let selector = keccak256("minerCommitments(address)");
         let mut full_calldata = selector[..4].to_vec();
         full_calldata.extend_from_slice(&encode(&[Token::Address(self.miner_address())]));
@@ -344,91 +488,137 @@ impl LiveMiningClient {
             .data(Bytes::from(full_calldata));
         let result = self.provider.call(&tx.into(), None).await?;
 
-        if result.len() < 128 {
-            return Ok(false);
+        // ABI-flattened layout for MiningLib.Commitment:
+        //   word 0 (0..32):    commitHash (bytes32)
+        //   word 1 (32..64):   timestamp  (uint64 → uint256) — commit block
+        //   word 2 (64..96):   flags.revealed (bool)
+        //   word 3 (96..128):  flags.validated (bool)
+        //   word 4 (128..160): flags.revoked (bool)
+        //   word 5 (160..192): flags.emergency (bool)
+        //   word 6 (192..224): revealedValue (bytes32)
+        //   word 7 (224..256): poolId (uint8 → uint256)
+        if result.len() < 256 {
+            return Ok(None);
         }
         let commit_hash = &result[0..32];
         if commit_hash.iter().all(|&b| b == 0) {
-            return Ok(false);
-        }
-        let revealed = U256::from_big_endian(&result[64..96]) != U256::zero();
-        if revealed {
-            return Ok(false);
+            return Ok(None); // no commitment
         }
 
-        let contract = MiningContract::new(self.contract_address, Arc::clone(&self.client));
         let commit_block = U256::from_big_endian(&result[32..64]).as_u64();
+        let revealed = U256::from_big_endian(&result[64..96]) != U256::zero();
+
+        if revealed {
+            return Ok(None); // already revealed
+        }
+
+        let pool_id = U256::from_big_endian(&result[224..256]).as_u64() as u8;
+
+        let contract = MiningContract::new(self.contract_address, Arc::clone(&self.client));
         let max_age = contract.max_commitment_age().call().await?.as_u64();
         let expires_at = commit_block.saturating_add(max_age);
-        let current_block = self.provider.get_block_number().await?.as_u64();
-        Ok(current_block <= expires_at)
+        let current_block = self.current_contract_block_number().await?;
+        let expired = current_block > expires_at;
+
+        Ok(Some(OnChainCommitment {
+            commit_block,
+            revealed,
+            pool_id,
+            expires_at,
+            expired,
+        }))
+    }
+
+    /// Returns `true` if there is an unrevealed, unexpired commitment on chain.
+    pub async fn has_pending_commitment(&self) -> Result<bool> {
+        match self.get_onchain_commitment().await? {
+            Some(c) => Ok(!c.expired),
+            None => Ok(false),
+        }
+    }
+
+    /// Check if the configured pool has remaining TGBT emission.
+    /// Returns `(remaining, total_mined, active)`.
+    pub async fn check_pool_emission(&self) -> Result<(f64, f64, bool)> {
+        let contract = MiningContract::new(self.contract_address, Arc::clone(&self.client));
+        let (_, emission, mined, active) = contract.get_pool_info(self.pool_id).call().await?;
+        let remaining = ethers::utils::format_units(emission, 18)
+            .unwrap_or_default()
+            .parse::<f64>()
+            .unwrap_or(0.0);
+        let total_mined = ethers::utils::format_units(mined, 18)
+            .unwrap_or_default()
+            .parse::<f64>()
+            .unwrap_or(0.0);
+        Ok((remaining, total_mined, active))
     }
 
     /// Checks if there is an existing unrevealed commitment for the miner.
     /// If one exists, waits until it expires (block > timestamp + maxCommitmentAge).
-    pub async fn wait_for_commitment_clearance_public(&self, phase: &PhaseTracker) -> Result<()> {
-        let contract = MiningContract::new(self.contract_address, Arc::clone(&self.client));
-        self.wait_for_commitment_clearance(&contract, phase).await
+    /// Returns the on-chain commitment info if one was found (even if expired).
+    pub async fn wait_for_commitment_clearance_public(&self, phase: &PhaseTracker) -> Result<Option<OnChainCommitment>> {
+        self.wait_for_commitment_clearance(phase).await
     }
 
     /// Internal: checks and waits for commitment clearance.
+    /// Returns `Ok(Some(info))` with the commitment that was cleared/found,
+    /// or `Ok(None)` if no active commitment exists.
     async fn wait_for_commitment_clearance(
         &self,
-        contract: &MiningContract<MiningClient>,
         phase: &PhaseTracker,
-    ) -> Result<()> {
-        // Call minerCommitments(address) and decode raw ABI output
-        let selector = keccak256("minerCommitments(address)");
-        let mut full_calldata = selector[..4].to_vec();
-        full_calldata.extend_from_slice(&encode(&[Token::Address(self.miner_address())]));
+    ) -> Result<Option<OnChainCommitment>> {
+        let commitment = match self.get_onchain_commitment().await? {
+            Some(c) => c,
+            None => return Ok(None), // no commitment at all
+        };
 
-        let tx = ethers::types::TransactionRequest::new()
-            .to(self.contract_address)
-            .data(Bytes::from(full_calldata));
-        let result = self.provider.call(&tx.into(), None).await?;
-
-        if result.len() < 128 {
-            // Not enough data — no commitment exists
-            return Ok(());
+        // Already expired — return immediately, no waiting
+        if commitment.expired {
+            tracing::info!(
+                "On-chain commitment (pool {}, block {}) already expired — proceeding immediately",
+                commitment.pool_id, commitment.commit_block
+            );
+            return Ok(Some(commitment));
         }
 
-        // ABI layout: slot 0 = commitHash (bytes32), slot 1 = timestamp (uint64 packed),
-        // slot 2 = flags struct: revealed is the first bool at offset 64..96
-        let commit_hash = &result[0..32];
-        if commit_hash.iter().all(|&b| b == 0) {
-            return Ok(());
-        }
+        let pool_label = if commitment.pool_id != self.pool_id {
+            format!(" [WRONG POOL: on-chain={}, configured={}]", commitment.pool_id, self.pool_id)
+        } else {
+            String::new()
+        };
 
-        // timestamp is uint64, ABI-encoded as uint256 in slot 1
-        let commit_block = U256::from_big_endian(&result[32..64]).as_u64();
+        let current_block = self.current_contract_block_number().await?;
+        let total_remaining = commitment.expires_at.saturating_sub(current_block);
+        let eta_secs = self.eta_seconds_for_blocks(total_remaining);
 
-        // flags struct starts at slot 2: first element is `revealed` (bool as uint256)
-        let revealed = U256::from_big_endian(&result[64..96]) != U256::zero();
-
-        if revealed {
-            return Ok(());
-        }
-
-        let max_age = contract.max_commitment_age().call().await?.as_u64();
-        let expires_at = commit_block.saturating_add(max_age);
-
-        tracing::info!(
-            "Active unrevealed commitment found (block {commit_block}), waiting for expiry at block {expires_at}"
+        tracing::warn!(
+            "Active unrevealed commitment found (pool {}, block {}){pool_label} — \
+             must wait {total_remaining} blocks (~{eta_secs}s) for expiry at block {}",
+            commitment.pool_id, commitment.commit_block, commitment.expires_at
         );
 
+        // Use a longer sleep interval since L1 blocks are ~12s on Arbitrum
+        let sleep_duration = Duration::from_secs(12).max(self.block_sleep_duration());
+        let mut last_log_block = 0u64;
+
         loop {
-            let current_block = self.provider.get_block_number().await?.as_u64();
-            if current_block > expires_at {
-                tracing::info!("Stale commitment expired at block {current_block}, proceeding");
-                return Ok(());
+            let current_block = self.current_contract_block_number().await?;
+            if current_block > commitment.expires_at {
+                tracing::info!("Stale commitment expired at block {current_block} — proceeding");
+                return Ok(Some(commitment));
             }
-            let remaining = expires_at.saturating_sub(current_block);
+            let remaining = commitment.expires_at.saturating_sub(current_block);
             phase.set(MiningPhase::WaitingForClearance, Some(remaining));
-            tracing::info!(
-                "Waiting for commitment expiry: {remaining} blocks remaining (~{}s)",
-                self.eta_seconds_for_blocks(remaining)
-            );
-            tokio::time::sleep(self.block_sleep_duration()).await;
+
+            // Only log every ~10 blocks to avoid log spam
+            if last_log_block == 0 || current_block.saturating_sub(last_log_block) >= 10 {
+                tracing::info!(
+                    "Waiting for commitment expiry: {remaining} blocks remaining (~{}s)",
+                    self.eta_seconds_for_blocks(remaining)
+                );
+                last_log_block = current_block;
+            }
+            tokio::time::sleep(sleep_duration).await;
         }
     }
 
@@ -450,7 +640,7 @@ impl LiveMiningClient {
         }
         let ready_at = last_block.saturating_add(interval);
         loop {
-            let current_block = self.provider.get_block_number().await?.as_u64();
+            let current_block = self.current_contract_block_number().await?;
             if current_block >= ready_at {
                 return Ok(());
             }

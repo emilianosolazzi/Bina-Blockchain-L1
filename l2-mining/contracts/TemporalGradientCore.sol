@@ -12,6 +12,7 @@ contract TemporalGradientCore is
     AccessControl,
     ITemporalGradientCore
 {
+    // Governance is role-based bootstrap authority, not a registered module.
     bytes32 public constant GOVERNANCE_ROLE = keccak256("GOVERNANCE_ROLE");
     uint256 public constant OUTPUT_HISTORY_SIZE = 32;
 
@@ -19,7 +20,6 @@ contract TemporalGradientCore is
     bytes32 public constant BATCH_MINING_MODULE = keccak256("BATCH_MINING_MODULE");
     bytes32 public constant RANDOMNESS_MODULE = keccak256("RANDOMNESS_MODULE");
     bytes32 public constant TOKENOMICS_MODULE = keccak256("TOKENOMICS_MODULE");
-    bytes32 public constant GOVERNANCE_MODULE = keccak256("GOVERNANCE_MODULE");
     bytes32 public constant RATE_LIMIT_MODULE = keccak256("RATE_LIMIT_MODULE");
     bytes32 public constant STALE_BLOCK_MODULE = keccak256("STALE_BLOCK_MODULE");
 
@@ -27,21 +27,38 @@ contract TemporalGradientCore is
     uint64 public currentOutputIndex;
     uint64 public lastOutputTimestamp;
     bytes32 public genesisOutput;
+    uint256 public moduleCount;
+    uint256 public governanceRoleCount;
+    uint256 public defaultAdminRoleCount;
+    bool public modulesLocked;
+    bool public governanceLocked;
+    bool public pausePermanentlyDisabled;
 
     mapping(bytes32 => address) private modules;
-    mapping(address => bool) private moduleEnabled;
+    mapping(address => uint256) private moduleRefCount;
 
     event ModuleUpdated(bytes32 indexed moduleId, address indexed previousModule, address indexed newModule);
+    event ModuleRemoved(bytes32 indexed moduleId, address indexed previousModule);
     event CoreOutputRecorded(bytes32 indexed newOutput, address indexed miner, uint8 indexed poolId, uint256 reward, uint64 nonce);
     event GenesisOutputInitialized(bytes32 indexed genesisOutput, uint64 timestamp);
+    event ModuleRegistryLocked(uint256 moduleCount);
+    event GovernanceLockedForever();
+    event PauseDisabledForever();
 
     error ZeroAddress();
     error InvalidModule();
+    error InvalidModuleId();
     error NotModule();
     error ZeroOutput();
+    error ModulesAreLocked();
+    error GovernanceIsLocked();
+    error PauseDisabled();
+    error NoModulesConfigured();
+    error UnpauseBeforeFinalizing();
+    error UnexpectedGovernanceTopology();
 
     modifier onlyModule() {
-        if (!moduleEnabled[msg.sender]) revert NotModule();
+        if (moduleRefCount[msg.sender] == 0) revert NotModule();
         _;
     }
 
@@ -50,6 +67,8 @@ contract TemporalGradientCore is
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(GOVERNANCE_ROLE, admin);
+        defaultAdminRoleCount = 1;
+        governanceRoleCount = 1;
 
         bytes32 genesis = initialGenesisOutput == bytes32(0)
             ? keccak256(abi.encodePacked("TEMPORAL_GRADIENT_CORE", admin, block.timestamp, block.prevrandao))
@@ -65,25 +84,84 @@ contract TemporalGradientCore is
     }
 
     function setModule(bytes32 moduleId, address module) external onlyRole(GOVERNANCE_ROLE) {
+        if (modulesLocked) revert ModulesAreLocked();
+        if (moduleId == bytes32(0)) revert InvalidModuleId();
         if (module == address(0)) revert ZeroAddress();
-        if (
-            moduleId != MINING_MODULE &&
-            moduleId != BATCH_MINING_MODULE &&
-            moduleId != RANDOMNESS_MODULE &&
-            moduleId != TOKENOMICS_MODULE &&
-            moduleId != GOVERNANCE_MODULE &&
-            moduleId != RATE_LIMIT_MODULE &&
-            moduleId != STALE_BLOCK_MODULE
-        ) revert InvalidModule();
 
         address previous = modules[moduleId];
+        if (previous == module) {
+            return;
+        }
+
         if (previous != address(0)) {
-            moduleEnabled[previous] = false;
+            unchecked { --moduleRefCount[previous]; }
+        } else {
+            unchecked { ++moduleCount; }
         }
 
         modules[moduleId] = module;
-        moduleEnabled[module] = true;
+        unchecked { ++moduleRefCount[module]; }
         emit ModuleUpdated(moduleId, previous, module);
+    }
+
+    function removeModule(bytes32 moduleId) external onlyRole(GOVERNANCE_ROLE) {
+        if (modulesLocked) revert ModulesAreLocked();
+        if (moduleId == bytes32(0)) revert InvalidModuleId();
+
+        address previous = modules[moduleId];
+        if (previous == address(0)) revert InvalidModule();
+
+        delete modules[moduleId];
+        unchecked {
+            --moduleRefCount[previous];
+            --moduleCount;
+        }
+
+        emit ModuleRemoved(moduleId, previous);
+    }
+
+    function lockModuleRegistry() external onlyRole(GOVERNANCE_ROLE) {
+        if (modulesLocked) revert ModulesAreLocked();
+        if (moduleCount == 0) revert NoModulesConfigured();
+
+        modulesLocked = true;
+        emit ModuleRegistryLocked(moduleCount);
+    }
+
+    function disablePauseForever() external onlyRole(GOVERNANCE_ROLE) {
+        if (pausePermanentlyDisabled) revert PauseDisabled();
+        if (paused()) revert UnpauseBeforeFinalizing();
+
+        pausePermanentlyDisabled = true;
+        emit PauseDisabledForever();
+    }
+
+    function ossify() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (moduleCount == 0) revert NoModulesConfigured();
+        if (paused()) revert UnpauseBeforeFinalizing();
+        if (
+            defaultAdminRoleCount != 1 ||
+            governanceRoleCount != 1 ||
+            !hasRole(DEFAULT_ADMIN_ROLE, msg.sender) ||
+            !hasRole(GOVERNANCE_ROLE, msg.sender)
+        ) revert UnexpectedGovernanceTopology();
+
+        if (!modulesLocked) {
+            modulesLocked = true;
+            emit ModuleRegistryLocked(moduleCount);
+        }
+        if (!pausePermanentlyDisabled) {
+            pausePermanentlyDisabled = true;
+            emit PauseDisabledForever();
+        }
+        governanceLocked = true;
+        emit GovernanceLockedForever();
+
+        _revokeRole(GOVERNANCE_ROLE, msg.sender);
+        _revokeRole(DEFAULT_ADMIN_ROLE, msg.sender);
+        governanceRoleCount = 0;
+        defaultAdminRoleCount = 0;
+        renounceOwnership();
     }
 
     function moduleAddress(bytes32 moduleId) external view returns (address) {
@@ -91,11 +169,53 @@ contract TemporalGradientCore is
     }
 
     function isModule(address account) external view returns (bool) {
-        return moduleEnabled[account];
+        return moduleRefCount[account] != 0;
     }
 
     function isPaused() external view returns (bool) {
         return paused();
+    }
+
+    function isOssified() external view returns (bool) {
+        return modulesLocked && governanceLocked && pausePermanentlyDisabled;
+    }
+
+    function grantRole(bytes32 role, address account)
+        public
+        override
+        onlyRole(getRoleAdmin(role))
+    {
+        if (governanceLocked && _isGovernanceRole(role)) revert GovernanceIsLocked();
+
+        bool hadRole = hasRole(role, account);
+        super.grantRole(role, account);
+        if (!hadRole) {
+            _trackRoleGrant(role);
+        }
+    }
+
+    function revokeRole(bytes32 role, address account)
+        public
+        override
+        onlyRole(getRoleAdmin(role))
+    {
+        if (governanceLocked && _isGovernanceRole(role)) revert GovernanceIsLocked();
+
+        bool hadRole = hasRole(role, account);
+        super.revokeRole(role, account);
+        if (hadRole) {
+            _trackRoleRevoke(role);
+        }
+    }
+
+    function renounceRole(bytes32 role, address callerConfirmation) public override {
+        if (governanceLocked && _isGovernanceRole(role)) revert GovernanceIsLocked();
+
+        bool hadRole = hasRole(role, callerConfirmation);
+        super.renounceRole(role, callerConfirmation);
+        if (hadRole) {
+            _trackRoleRevoke(role);
+        }
     }
 
     function hasRole(bytes32 role, address account)
@@ -139,10 +259,31 @@ contract TemporalGradientCore is
     }
 
     function pause() external onlyRole(GOVERNANCE_ROLE) {
+        if (pausePermanentlyDisabled) revert PauseDisabled();
         _pause();
     }
 
     function unpause() external onlyRole(GOVERNANCE_ROLE) {
         _unpause();
+    }
+
+    function _isGovernanceRole(bytes32 role) private pure returns (bool) {
+        return role == DEFAULT_ADMIN_ROLE || role == GOVERNANCE_ROLE;
+    }
+
+    function _trackRoleGrant(bytes32 role) private {
+        if (role == DEFAULT_ADMIN_ROLE) {
+            unchecked { ++defaultAdminRoleCount; }
+        } else if (role == GOVERNANCE_ROLE) {
+            unchecked { ++governanceRoleCount; }
+        }
+    }
+
+    function _trackRoleRevoke(bytes32 role) private {
+        if (role == DEFAULT_ADMIN_ROLE) {
+            unchecked { --defaultAdminRoleCount; }
+        } else if (role == GOVERNANCE_ROLE) {
+            unchecked { --governanceRoleCount; }
+        }
     }
 }

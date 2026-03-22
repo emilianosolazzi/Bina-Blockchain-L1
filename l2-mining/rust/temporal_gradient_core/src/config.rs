@@ -96,11 +96,23 @@ pub struct MinerConfig {
     #[serde(default)]
     pub relay_hmac_key: Option<String>,
     pub difficulty_zero_bits: u8,
+    /// Optional API key for authenticated RPC endpoints. Sent as an
+    /// `x-api-key` HTTP header on every JSON-RPC request.
+    #[serde(default)]
+    pub rpc_api_key: Option<String>,
+    /// Delay in seconds between mining cycles. Reduces RPC call frequency for
+    /// free/public endpoints. Defaults to 10 seconds when omitted.
+    #[serde(default = "default_cycle_delay")]
+    pub cycle_delay_secs: u64,
     /// Optional stale-block mining config. Only compiled with the `stale-mining` feature.
     /// Operators add this section and set `enabled: true` to opt-in.
     #[cfg(feature = "stale-mining")]
     #[serde(default)]
     pub stale_block: Option<StaleBlockConfig>,
+}
+
+fn default_cycle_delay() -> u64 {
+    10
 }
 
 impl Default for MinerConfig {
@@ -125,6 +137,8 @@ impl Default for MinerConfig {
             relay_pinned_cert_sha256: None,
             relay_hmac_key: None,
             difficulty_zero_bits: 11,
+            rpc_api_key: None,
+            cycle_delay_secs: 10,
             #[cfg(feature = "stale-mining")]
             stale_block: None,
         }

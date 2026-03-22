@@ -1,8 +1,8 @@
 {
   "config_version": 1,
-  "miner_name": "remix-live-miner",
-  "contract_address": "0x9a06eb7106D92829F8d1a375FE87c3C168AAa8bf",
-  "rpc_url": "https://YOUR_RPC_URL_HERE",
+  "miner_name": "arb-live-miner",
+  "contract_address": "0x56C458a06FB104cb31820856fCe42E1f6926CBDD",
+  "rpc_url": "https://arb1.arbitrum.io/rpc",
   "private_key_path": "c:/Users/comar/OneDrive/Documents/Entropy_Randomness/Randomness_Entropy/l2-mining/rust/keys/miner.key",
   "pool_id": 0,
   "threads": 4,
@@ -10,9 +10,9 @@
   "gas_price_multiplier": 1.1,
   "log_level": "INFO",
   "stats_interval_seconds": 5,
-  "block_time_millis": 12000,
+  "block_time_millis": 250,
   "max_retries": 5,
-  "exit_after_solutions": 1,
+  "exit_after_solutions": null,
   "telemetry_file": "c:/Users/comar/OneDrive/Documents/Entropy_Randomness/Randomness_Entropy/l2-mining/rust/miner-telemetry.jsonl",
   "difficulty_zero_bits": 11
 }

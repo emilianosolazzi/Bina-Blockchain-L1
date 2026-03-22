@@ -21,19 +21,22 @@ const RANDOMNESS_HEALTH_PATH = process.env.RANDOMNESS_HEALTH_PATH || '/api/healt
 const RANDOMNESS_LATEST_PATH = process.env.RANDOMNESS_LATEST_PATH || '/api/randomness/latest';
 const RANDOMNESS_FALLBACK_HEALTH_PATH = process.env.RANDOMNESS_FALLBACK_HEALTH_PATH || '/healthz';
 const RANDOMNESS_FALLBACK_LATEST_PATH = process.env.RANDOMNESS_FALLBACK_LATEST_PATH || '/api/v1/latest';
-const RPC_URL = process.env.RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com';
-const CORE_ADDRESS = process.env.CORE_ADDRESS || '0xa1fB393D33819C4ef85f3457FCC339BF56f8AF1F';
-const TGBT_ADDRESS = process.env.TGBT_ADDRESS || '0x496598fDeab78fb2986e89d396249779595418E9';
+const RPC_URL = process.env.RPC_URL || 'https://api.nativebtc.org/v1/arb';
+const CORE_ADDRESS = process.env.CORE_ADDRESS || '0xF6556DDC7CdD3635A05428BD85BCf33A09F752e6';
+const TGBT_ADDRESS = process.env.TGBT_ADDRESS || '0x31228eE520e895DA19f728DE5459b1b317d9b8D8';
 const TOKENOMICS_ADDRESS = process.env.TOKENOMICS_ADDRESS || '0x305393D146e958cbDFda5830506e468984259F28';
-const BATCH_ADDRESS = process.env.BATCH_ADDRESS || '0xd52467e0C442c0817665fdB11f86FC47dC56ef3E';
-const WALLET_ADDRESS = process.env.WALLET_ADDRESS || '0x3058bd411b9ec0dF6C7d0b04914C9bd2934b7fb3';
+const BATCH_ADDRESS = process.env.BATCH_ADDRESS || '0x56C458a06FB104cb31820856fCe42E1f6926CBDD';
+const WALLET_ADDRESS = process.env.WALLET_ADDRESS || '0x5cB4D906f0464b34c44d6555A770BF6aF4A2cEfe';
+const RPC_API_KEY = process.env.RPC_API_KEY || 'fp_2d93df5e6cebe485b69c363a62e237fc9d0f88b9';
 const CHALLENGE_WINDOW = Number(process.env.CHALLENGE_WINDOW || 100);
 const MODULE_IDS = {
 	BATCH_MINING_MODULE: ethers.id('BATCH_MINING_MODULE'),
 	TOKENOMICS_MODULE: ethers.id('TOKENOMICS_MODULE'),
 };
 
-const provider = new ethers.JsonRpcProvider(RPC_URL);
+const fetchReq = new ethers.FetchRequest(RPC_URL);
+if (RPC_API_KEY) fetchReq.setHeader('x-api-key', RPC_API_KEY);
+const provider = new ethers.JsonRpcProvider(fetchReq, 42161, { staticNetwork: true, batchMaxCount: 1 });
 const CORE_ABI = [
 	'function moduleAddress(bytes32 moduleId) view returns (address)',
 ];
@@ -96,7 +99,17 @@ function requestJson(targetUrl, options = {}) {
 				try {
 					json = raw ? JSON.parse(raw) : null;
 				} catch {
-					json = { raw };
+					// Return a structured error instead of silently wrapping HTML/text as {raw: ...}
+					const contentType = (res.headers['content-type'] || '').toLowerCase();
+					const isHtml = contentType.includes('text/html') || raw.trimStart().startsWith('<');
+					json = {
+						error: isHtml
+							? 'Service returned HTML instead of JSON (likely an error page or proxy gateway)'
+							: 'Service returned non-JSON response',
+						_parseError: true,
+						status: res.statusCode,
+					};
+					console.warn(`[requestJson] Non-JSON response from ${targetUrl} (${res.statusCode}): ${raw.slice(0, 200)}`);
 				}
 				resolve({ status: res.statusCode || 500, json, headers: res.headers });
 			});
@@ -215,7 +228,8 @@ async function getSystemStatus() {
 	const core = new ethers.Contract(CORE_ADDRESS, CORE_ABI, provider);
 	const tgbt = new ethers.Contract(TGBT_ADDRESS, TGBT_ABI, provider);
 
-	const [randomnessApi, heartbeatApi, ethBalance, tokenBalance, tokenDecimals, tokenSymbol, coreBatchModule, coreTokenomicsModule, currentBlock, network] = await Promise.all([
+	// Use allSettled so individual RPC failures don't break the entire status response
+	const results = await Promise.allSettled([
 		fetchRandomnessHealth(),
 		requestJson(`${HEARTBEAT_API_URL}/api/health`, { timeoutMs: 4000 }).catch(err => ({
 			status: 503,
@@ -230,6 +244,20 @@ async function getSystemStatus() {
 		provider.getBlockNumber(),
 		provider.getNetwork(),
 	]);
+
+	const val = (i, fallback) => results[i].status === 'fulfilled' ? results[i].value : fallback;
+	const rpcErrors = results.filter(r => r.status === 'rejected').map(r => shortError(r.reason));
+
+	const randomnessApi = val(0, { status: 503, json: { error: 'Unreachable' } });
+	const heartbeatApi = val(1, { status: 503, json: { error: 'Unreachable' } });
+	const ethBalance = val(2, 0n);
+	const tokenBalance = val(3, 0n);
+	const tokenDecimals = val(4, 18);
+	const tokenSymbol = val(5, 'TGBT');
+	const coreBatchModule = val(6, ethers.ZeroAddress);
+	const coreTokenomicsModule = val(7, ethers.ZeroAddress);
+	const currentBlock = val(8, 0);
+	const network = val(9, { chainId: 42161n });
 
 	const liveBatchAddress = toChecksumOrNull(coreBatchModule);
 	const batchWiredCorrectly = liveBatchAddress?.toLowerCase() === BATCH_ADDRESS.toLowerCase();
@@ -313,6 +341,7 @@ async function getSystemStatus() {
 			nextEpochId: Number(nextEpochId),
 			latestOnChainEpoch,
 		},
+		_rpcErrors: rpcErrors.length ? rpcErrors : undefined,
 	};
 }
 
@@ -740,19 +769,29 @@ function readSnapshots(limit = 120) {
 	}
 
 	const text = fs.readFileSync(TELEMETRY_FILE, 'utf8');
-	return text
+	const lines = text
 		.split(/\r?\n/)
 		.map((line) => line.trim())
 		.filter(Boolean)
-		.slice(-limit)
+		.slice(-limit);
+
+	let parseErrors = 0;
+	const snapshots = lines
 		.map((line) => {
 			try {
 				return JSON.parse(line);
 			} catch {
+				parseErrors++;
 				return null;
 			}
 		})
 		.filter(Boolean);
+
+	if (parseErrors > 0 && parseErrors === lines.length) {
+		console.warn(`[readSnapshots] All ${parseErrors} lines failed JSON parse — telemetry file may be corrupted or contain non-JSON data`);
+	}
+
+	return snapshots;
 }
 
 function latestSnapshot() {

@@ -58,6 +58,7 @@ venv/
 
 # Local miner secrets / machine-specific configs
 l2-mining/rust/package/keys/
+l2-mining/rust/keys/
 l2-mining/rust/miner-config.local-live.json
 l2-mining/rust/package/local-smoke-config.json
 l2-mining/rust/miner-run.log.err
