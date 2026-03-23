@@ -103,7 +103,7 @@ The epoch pipeline turns raw miner solutions into on-chain commitments:
 3. Accumulates solutions in `pendingLeaves` (stored in `epoch-state.json`)
 4. At `SOLUTIONS_PER_EPOCH` (default 10) leaves → builds Merkle tree
 5. Pushes epoch data to randomness API → commits `epochRoot` on-chain via `BatchMiningModule.commitEpochRoot()` with EIP-712 signature
-6. After 100-block challenge window → `finalizeEpoch()` called automatically
+6. After 28,800 L1-block challenge window (~96 hours) → `finalizeEpoch()` called automatically
 7. Optionally anchors finalized epoch root to Bitcoin via OP_RETURN
 
 ### Key Files
@@ -140,7 +140,7 @@ PORT=4271
 ### BatchMiningModule.sol Constraints
 
 - **Sequential epoch IDs:** `epochId != _nextEpochId` → `revert EpochNotFound(epochId)`. Epochs must be committed in strict order (0, 1, 2, …).
-- **Challenge window:** 100 blocks must pass between `commitEpochRoot()` and `finalizeEpoch()`. Premature finalize → `ChallengeWindowActive`.
+- **Challenge window:** 28,800 **L1 Ethereum** blocks (~96 hours) must pass between `commitEpochRoot()` and `finalizeEpoch()`. Premature finalize → `CooldownNotElapsed()`. Note: Arbitrum Solidity's `block.number` returns the L1 mainnet block number, NOT the L2 number.
 - **Cooldown:** `EPOCH_COOLDOWN_BLOCKS` enforced between commits from same operator.
 - **Leaf cap:** `MAX_LEAVES_PER_EPOCH` limits solutions per epoch.
 
@@ -192,7 +192,7 @@ Wallet: `0x5cB4D906f0464b34c44d6555A770BF6aF4A2cEfe`, Pool ID: 3
 7. **Epoch IDs are strictly sequential** — the contract enforces `epochId == _nextEpochId`. If `epoch-state.json` gets out of sync with the on-chain counter, reset `nextEpochId` to match `_nextEpochId` on-chain.
 8. **RPC URL needs API key** — NativeBTC RPC requires `?key=<api_key>` query parameter. Without it → `NETWORK_ERROR: could not detect network`.
 9. **Epoch Builder has no port** — unlike other services, it uses a PID file (`.runtime-logs/stack/epoch-builder.pid`) for process tracking, not a TCP port.
-10. **Challenge window** — `finalizeEpoch()` will revert with `ChallengeWindowActive` until 100 Arbitrum blocks (~200 s) have passed since `commitEpochRoot()`.
+10. **Challenge window** — `finalizeEpoch()` will revert with `CooldownNotElapsed()` until 28,800 **L1 Ethereum** blocks (~96 hours) have passed since `commitEpochRoot()`. Arbitrum's Solidity `block.number` returns the L1 mainnet block number, not L2. The epoch-builder uses `l1BlockNumber` from the raw Arbitrum block to track progress.
 
 ## Testing
 

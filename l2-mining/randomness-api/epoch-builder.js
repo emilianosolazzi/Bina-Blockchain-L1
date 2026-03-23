@@ -466,7 +466,29 @@ async function processEpoch() {
 				const provider = new ethers.providers.JsonRpcProvider(RPC_URL);
 				const wallet = new ethers.Wallet(MINER_PRIVATE_KEY, provider);
 				epochData.operator = wallet.address;
-				await commitEpochOnChain(provider, wallet, epochId, root, batch.length);
+
+				// Check if this epoch was already committed on-chain
+				const contract = new ethers.Contract(BATCH_CONTRACT, BATCH_ABI, provider);
+				const onChainNextId = Number(await contract.currentEpochId());
+				if (epochId < onChainNextId) {
+					console.log(`[EpochBuilder] Epoch ${epochId} already committed on-chain (currentEpochId=${onChainNextId}), skipping commit`);
+				} else {
+					// Check cooldown (50 L1 blocks) before attempting commit
+					if (onChainNextId > 0) {
+						const prevEpoch = await contract.getEpochInfo(onChainNextId - 1);
+						const lastCommitL1 = Number(prevEpoch.startBlock);
+						const l1Block = await getL1BlockNumber(provider);
+						const COOLDOWN_BLOCKS = 50;
+						if (l1Block < lastCommitL1 + COOLDOWN_BLOCKS) {
+							const remain = lastCommitL1 + COOLDOWN_BLOCKS - l1Block;
+							console.log(`[EpochBuilder] Cooldown: ${remain} L1 blocks remaining before epoch ${epochId} can be committed (~${remain * 12}s)`);
+							state.pendingLeaves.unshift(...batch);
+							saveState();
+							return;
+						}
+					}
+					await commitEpochOnChain(provider, wallet, epochId, root, batch.length);
+				}
 			} catch (err) {
 				console.error(`[EpochBuilder] On-chain commit failed:`, err.message);
 				// Re-queue leaves so they aren't lost
@@ -486,6 +508,23 @@ async function processEpoch() {
 	saveState();
 }
 
+// ── L1 block helper ─────────────────────────────────────
+// On Arbitrum, Solidity `block.number` returns the L1 (Ethereum mainnet) block number,
+// but ethers' provider.getBlockNumber() returns the L2 block number.
+// We must compare against L1 blocks when checking the challenge window.
+
+async function getL1BlockNumber(provider) {
+	try {
+		const raw = await provider.send('eth_getBlockByNumber', ['latest', false]);
+		if (raw && raw.l1BlockNumber) {
+			return parseInt(raw.l1BlockNumber, 16);
+		}
+	} catch { /* fall through */ }
+	// Fallback: use provider block number (will be wrong on Arbitrum, but safe)
+	console.warn('[EpochBuilder] Warning: could not fetch L1 block number, using L2 as fallback');
+	return await provider.getBlockNumber();
+}
+
 // ── Finalisation sweep ──────────────────────────────────
 
 async function finalizePendingEpochs() {
@@ -494,9 +533,10 @@ async function finalizePendingEpochs() {
 	const provider = new ethers.providers.JsonRpcProvider(RPC_URL);
 	const wallet = new ethers.Wallet(MINER_PRIVATE_KEY, provider);
 	const contract = new ethers.Contract(BATCH_CONTRACT, BATCH_ABI, provider);
-	const currentBlock = await provider.getBlockNumber();
+	const l1Block = await getL1BlockNumber(provider);
 
-	const CHALLENGE_WINDOW = 100; // must match contract
+	// Must match contract: CHALLENGE_WINDOW = 28_800 L1 blocks (~96 hours on Ethereum mainnet)
+	const CHALLENGE_WINDOW = 28_800;
 
 	for (let epId = 0; epId < state.nextEpochId; epId++) {
 		try {
@@ -506,7 +546,7 @@ async function finalizePendingEpochs() {
 			if (info.finalized && info.storageAttested && epochRecord?.bitcoinAnchor?.anchorId) continue;
 
 			const readyBlock = Number(info.startBlock) + CHALLENGE_WINDOW;
-			if (currentBlock >= readyBlock) {
+			if (l1Block >= readyBlock) {
 				const verification = await verifyEpochStorageWithApi(epId);
 				console.log(`[EpochBuilder] Storage verified for epoch ${epId} via ${verification.report.provider}`);
 
@@ -526,7 +566,9 @@ async function finalizePendingEpochs() {
 					console.log(`[EpochBuilder] ✓ Epoch ${epId} Bitcoin-anchored via ${anchorReport.anchor_id}`);
 				}
 			} else {
-				console.log(`[EpochBuilder] Epoch ${epId} waiting for block ${readyBlock} (current: ${currentBlock})`);
+				const remain = readyBlock - l1Block;
+				const etaH = ((remain * 12) / 3600).toFixed(1);
+				console.log(`[EpochBuilder] Epoch ${epId} challenge window: ${remain} L1 blocks remaining (~${etaH} h), ready at L1 block ${readyBlock} (current: ${l1Block})`);
 			}
 		} catch (err) {
 			// Epoch might not be on-chain yet (local-only mode)
