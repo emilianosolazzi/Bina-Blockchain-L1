@@ -84,14 +84,24 @@ impl FilterConfig {
     }
 
     /// Optimal bit-array size for `expected_items` at `fp_rate`.
+    ///
+    /// Returns at least 64 (the smallest useful power-of-two filter).
     pub fn optimal_size(expected_items: usize, fp_rate: f64) -> usize {
+        if expected_items == 0 {
+            return 64;
+        }
         let ln2 = std::f64::consts::LN_2;
         let size = (-(expected_items as f64) * fp_rate.ln() / (ln2 * ln2)).ceil() as usize;
-        size.next_power_of_two()
+        size.max(64).next_power_of_two()
     }
 
     /// Optimal hash count for the given size and expected item count.
+    ///
+    /// Guards against zero `expected_items` (returns 2).
     pub fn optimal_hashes(size: usize, expected_items: usize) -> u8 {
+        if expected_items == 0 {
+            return 2;
+        }
         let k = (size as f64 / expected_items as f64) * std::f64::consts::LN_2;
         k.round().clamp(2.0, 7.0) as u8
     }
@@ -276,7 +286,7 @@ impl RateLimiter {
     pub fn allow(&self) -> bool {
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or(Duration::ZERO)
             .as_millis() as u64;
         let last = self.last_op.load(Ordering::Relaxed);
         if now_ms >= last + self.min_interval_ms {
@@ -297,7 +307,13 @@ struct Core {
     bits: BitVec<u64, Lsb0>,
     config: FilterConfig,
     seeds: [u32; 8],
+    /// Pre-computed 32-byte key for the hot-path hash function.
+    hash_key: [u8; 32],
+    /// Number of items currently considered "active" (decremented by GC).
     item_count: AtomicU64,
+    /// Total items ever inserted — used for the FP rate formula because
+    /// bloom-filter bits are never cleared.
+    total_ever_inserted: AtomicU64,
     rate_limiter: RateLimiter,
 }
 
@@ -317,11 +333,20 @@ impl Core {
             );
         }
 
+        // Pre-compute the 32-byte key used by `two_hashes()` so we
+        // don't rebuild it on every hot-path call.
+        let mut hash_key = [0u8; 32];
+        for i in 0..8 {
+            hash_key[i * 4..(i + 1) * 4].copy_from_slice(&seeds[i].to_le_bytes());
+        }
+
         Ok(Self {
             bits,
             config,
             seeds,
+            hash_key,
             item_count: AtomicU64::new(0),
+            total_ever_inserted: AtomicU64::new(0),
             rate_limiter: RateLimiter::new(Duration::from_micros(100)),
         })
     }
@@ -329,14 +354,7 @@ impl Core {
     // Double-blake3 for two independent hash values
     #[inline]
     fn two_hashes(&self, data: &[u8]) -> [u64; 2] {
-        let key: [u8; 32] = {
-            let mut k = [0u8; 32];
-            for i in 0..8 {
-                k[i * 4..(i + 1) * 4].copy_from_slice(&self.seeds[i].to_le_bytes());
-            }
-            k
-        };
-        let mut h = blake3::Hasher::new_keyed(&key);
+        let mut h = blake3::Hasher::new_keyed(&self.hash_key);
         h.update(data);
         let h1 = h.finalize();
         h.reset();
@@ -370,18 +388,26 @@ impl Core {
         positions.iter().all(|&pos| self.bits[pos])
     }
 
-    /// Insert `data` into the filter. Returns true if it was NOT previously present.
+    /// Insert `data` into the filter (rate-limited).
+    /// Returns true if it was NOT previously present.
     pub fn insert(&mut self, data: &[u8]) -> Result<bool, FilterError> {
         if !self.rate_limiter.allow() {
             return Err(FilterError::RateLimitExceeded);
         }
+        Ok(self.insert_bypass_rate_limit(data))
+    }
+
+    /// Insert without rate-limit check.  Used by `build()` to replay
+    /// persisted records where throttling would drop legitimate entries.
+    fn insert_bypass_rate_limit(&mut self, data: &[u8]) -> bool {
         let positions = self.bit_positions(data);
         let is_new = !self.check_bits(&positions);
         self.set_bits(&positions);
         if is_new {
             self.item_count.fetch_add(1, Ordering::Relaxed);
+            self.total_ever_inserted.fetch_add(1, Ordering::Relaxed);
         }
-        Ok(is_new)
+        is_new
     }
 
     /// Check if `data` might be present (probabilistic).
@@ -391,7 +417,9 @@ impl Core {
     }
 
     pub fn false_positive_rate(&self) -> f64 {
-        let n = self.item_count.load(Ordering::Relaxed) as f64;
+        // Use total_ever_inserted (not item_count) because bloom-filter
+        // bits are never cleared — GC removes records but not bits.
+        let n = self.total_ever_inserted.load(Ordering::Relaxed) as f64;
         let m = self.config.size as f64;
         let k = self.config.num_hashes as f64;
         let exp = (-k * n / m).max(-20.0);
@@ -570,7 +598,7 @@ impl TgOutputFilter<Uninitialized> {
         // Replay persisted hashes into the bit array
         let hashes = store.load_from_storage(&core.config)?;
         for hash in &hashes {
-            let _ = core.insert(hash); // errors only on rate limit; safe to ignore here
+            core.insert_bypass_rate_limit(hash);
         }
 
         if !hashes.is_empty() {
@@ -718,7 +746,7 @@ impl TgOutputFilter<Ready> {
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or(Duration::ZERO)
         .as_secs()
 }
 
