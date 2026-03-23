@@ -1512,15 +1512,220 @@
                 <div style="font-weight:700;color:var(--accent);margin-bottom:6px;">The simple version</div>
                 <p style="margin:0;color:var(--text);font-size:13px;line-height:1.7;">Imagine you're building a lottery, a game, or an NFT drop and you need a random number that <em>nobody</em> can cheat — not even you. That's what this miner produces. It's like a public dice roll that's recorded on the blockchain forever, and anyone can mathematically prove it wasn't rigged. You grab the random number from our API, pass it into your smart contract along with a short proof, and the blockchain confirms it's legit. No middleman, no subscription fees, no trust required.</p>
               </div>
-              <div style="font-weight:600;color:var(--text);margin-bottom:6px;">Technical steps (for developers):</div>
-              <p style="margin:4px 0;"><strong>If you currently use Chainlink VRF</strong>, you're paying per-request for a single oracle's randomness. With Temporal Gradient, the randomness is already on-chain — you just verify it:</p>
-              <ol style="margin:4px 0;padding-left:20px;">
-                <li><strong>Fetch the output hash</strong> from <code style="font-size:11px;">GET /api/randomness/latest</code></li>
-                <li><strong>Fetch the Merkle proof</strong> from <code style="font-size:11px;">GET /api/randomness/{hash}/proof</code></li>
-                <li><strong>Verify on-chain</strong> by calling <code style="font-size:11px;">verifyRandomnessLeaf(epochId, leafIndex, outputHash, proof)</code> on the Core contract</li>
-                <li><strong>Use the hash as your random seed</strong> — it's a 256-bit uniform random value</li>
-              </ol>
-              <p style="margin:4px 0;">Unlike Chainlink VRF, there's no subscription fee, no LINK token required, and the randomness is backed by 3 physical entropy sources instead of 1 oracle key.</p>
+
+              <!-- ── Code Examples ── -->
+              <div style="font-weight:700;color:var(--accent);margin-bottom:8px;font-size:13px;">Show me the code — how do I actually use it?</div>
+
+              <details open style="margin:0 0 10px;font-size:12px;">
+                <summary style="cursor:pointer;color:var(--gold);font-weight:600;">📜 Solidity — Lottery that picks a winner using Temporal Gradient randomness</summary>
+                <pre style="background:#0d1117;border:1px solid rgba(56,189,248,.15);border-radius:8px;padding:14px;margin:8px 0 0;overflow-x:auto;font-size:11px;line-height:1.6;color:#e6edf3;"><code>// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+interface IBatchMining {
+    function verifyRandomnessLeaf(
+        uint256 epochId,
+        uint256 leafIndex,
+        bytes32 outputHash,
+        bytes32[] calldata proof
+    ) external view returns (bool);
+}
+
+contract FairLottery {
+    IBatchMining constant BEACON =
+        IBatchMining(0x6eb6D03A8E98c79E89B98ce19AcAefB865817Db2); // Arbitrum
+
+    address[] public players;
+
+    function enter() external payable {
+        require(msg.value == 0.01 ether, "Entry is 0.01 ETH");
+        players.push(msg.sender);
+    }
+
+    /// @notice Anyone calls this with a verified random number to pick the winner.
+    ///         The random number comes from the Temporal Gradient miner — not Chainlink.
+    function pickWinner(
+        uint256 epochId,
+        uint256 leafIndex,
+        bytes32 outputHash,      // ← the random number from the dashboard above
+        bytes32[] calldata proof  // ← the Merkle proof from the Proof Inspector
+    ) external {
+        require(players.length >= 2, "Need players");
+
+        // ✅ Verify the randomness is real and finalized on-chain
+        require(BEACON.verifyRandomnessLeaf(epochId, leafIndex, outputHash, proof),
+                "Invalid randomness proof");
+
+        // 🎲 Use the hash to pick a winner (modulo player count)
+        uint256 winnerIndex = uint256(outputHash) % players.length;
+        address winner = players[winnerIndex];
+
+        // 💰 Pay the winner
+        delete players;
+        payable(winner).transfer(address(this).balance);
+    }
+}</code></pre>
+              </details>
+
+              <details style="margin:0 0 10px;font-size:12px;">
+                <summary style="cursor:pointer;color:var(--gold);font-weight:600;">🖼️ Solidity — NFT with random traits (rarity) at mint</summary>
+                <pre style="background:#0d1117;border:1px solid rgba(56,189,248,.15);border-radius:8px;padding:14px;margin:8px 0 0;overflow-x:auto;font-size:11px;line-height:1.6;color:#e6edf3;"><code>// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
+
+interface IBatchMining {
+    function verifyRandomnessLeaf(
+        uint256, uint256, bytes32, bytes32[] calldata
+    ) external view returns (bool);
+}
+
+contract RandomTraitNFT is ERC721 {
+    IBatchMining constant BEACON =
+        IBatchMining(0x6eb6D03A8E98c79E89B98ce19AcAefB865817Db2);
+
+    uint256 public nextTokenId;
+    mapping(uint256 => uint8) public rarity; // 0=common, 1=rare, 2=legendary
+
+    constructor() ERC721("RandomNFT", "RNFT") {}
+
+    function mint(
+        uint256 epochId,
+        uint256 leafIndex,
+        bytes32 outputHash,
+        bytes32[] calldata proof
+    ) external {
+        // Verify the random number is legit
+        require(BEACON.verifyRandomnessLeaf(epochId, leafIndex, outputHash, proof),
+                "Bad proof");
+
+        uint256 tokenId = nextTokenId++;
+        uint256 roll = uint256(outputHash) % 100;
+
+        // 🎨 Assign rarity based on the random number
+        if (roll < 60)      rarity[tokenId] = 0;  // 60% common
+        else if (roll < 90) rarity[tokenId] = 1;  // 30% rare
+        else                rarity[tokenId] = 2;  // 10% legendary
+
+        _mint(msg.sender, tokenId);
+    }
+}</code></pre>
+              </details>
+
+              <details style="margin:0 0 10px;font-size:12px;">
+                <summary style="cursor:pointer;color:var(--gold);font-weight:600;">🌐 JavaScript — Fetch randomness from the API (off-chain)</summary>
+                <pre style="background:#0d1117;border:1px solid rgba(56,189,248,.15);border-radius:8px;padding:14px;margin:8px 0 0;overflow-x:auto;font-size:11px;line-height:1.6;color:#e6edf3;"><code>// 1. Get the latest random number
+const latest = await fetch("https://your-beacon-api/api/randomness/latest")
+    .then(r => r.json());
+
+console.log(latest.outputHash);  // "0x000d8a2dc892..."  ← your random number
+console.log(latest.epochId);     // 4
+console.log(latest.leafIndex);   // 9
+
+// 2. Get the Merkle proof (needed for on-chain verification)
+const proof = await fetch(`https://your-beacon-api/api/randomness/${latest.outputHash}/proof`)
+    .then(r => r.json());
+
+console.log(proof.verifyOnChain);
+// {
+//   method: "verifyRandomnessLeaf(uint256,uint256,bytes32,bytes32[])",
+//   args: [4, 9, "0x000d8a...", ["0xc8d9...", "0xab12..."]]
+// }
+
+// 3. Call the contract with ethers.js
+import { ethers } from "ethers";
+
+const provider = new ethers.JsonRpcProvider("https://arb1.arbitrum.io/rpc");
+const beacon = new ethers.Contract(
+    "0x6eb6D03A8E98c79E89B98ce19AcAefB865817Db2",
+    ["function verifyRandomnessLeaf(uint256,uint256,bytes32,bytes32[]) view returns (bool)"],
+    provider
+);
+
+const isValid = await beacon.verifyRandomnessLeaf(
+    latest.epochId,
+    latest.leafIndex,
+    latest.outputHash,
+    proof.verifyOnChain.args[3]  // the Merkle proof array
+);
+console.log("Randomness is valid:", isValid);  // true ✓
+
+// 4. Use it! Convert the hash to a number for your app
+const randomBigInt = BigInt(latest.outputHash);
+const diceRoll = Number(randomBigInt % 6n) + 1;  // 1-6
+console.log("Fair dice roll:", diceRoll);</code></pre>
+              </details>
+
+              <details style="margin:0 0 10px;font-size:12px;">
+                <summary style="cursor:pointer;color:var(--gold);font-weight:600;">🦀 Rust — Verify randomness off-chain</summary>
+                <pre style="background:#0d1117;border:1px solid rgba(56,189,248,.15);border-radius:8px;padding:14px;margin:8px 0 0;overflow-x:auto;font-size:11px;line-height:1.6;color:#e6edf3;"><code>use alloy::primitives::{B256, U256};
+use alloy::providers::ProviderBuilder;
+use alloy::sol;
+
+sol! {
+    #[sol(rpc)]
+    interface IBatchMining {
+        function verifyRandomnessLeaf(
+            uint256 epochId,
+            uint256 leafIndex,
+            bytes32 outputHash,
+            bytes32[] proof
+        ) external view returns (bool valid);
+    }
+}
+
+#[tokio::main]
+async fn main() -> eyre::Result&lt;()&gt; {
+    let provider = ProviderBuilder::new()
+        .on_http("https://arb1.arbitrum.io/rpc".parse()?);
+
+    let beacon = IBatchMining::new(
+        "0x6eb6D03A8E98c79E89B98ce19AcAefB865817Db2".parse()?,
+        provider,
+    );
+
+    // These values come from the API or the dashboard
+    let epoch_id = U256::from(4);
+    let leaf_index = U256::from(9);
+    let output_hash: B256 = "0x000d8a2dc892...".parse()?;
+    let proof: Vec&lt;B256&gt; = vec!["0xc8d9...".parse()?, "0xab12...".parse()?];
+
+    let valid = beacon.verifyRandomnessLeaf(epoch_id, leaf_index, output_hash, proof)
+        .call().await?.valid;
+
+    println!("Randomness verified: {valid}");  // true ✓
+
+    // Use it: convert to a number
+    let roll = (U256::from_be_bytes(output_hash.0) % U256::from(100)) + U256::from(1);
+    println!("Random 1-100: {roll}");
+    Ok(())
+}</code></pre>
+              </details>
+
+              <details style="margin:0 0 10px;font-size:12px;">
+                <summary style="cursor:pointer;color:var(--gold);font-weight:600;">🐍 Python — Quick randomness fetch for backends</summary>
+                <pre style="background:#0d1117;border:1px solid rgba(56,189,248,.15);border-radius:8px;padding:14px;margin:8px 0 0;overflow-x:auto;font-size:11px;line-height:1.6;color:#e6edf3;"><code>import requests
+
+# Grab the latest random number
+r = requests.get("https://your-beacon-api/api/randomness/latest").json()
+random_hash = r["outputHash"]    # "0x000d8a2dc892..."
+epoch_id    = r["epochId"]       # 4
+leaf_index  = r["leafIndex"]     # 9
+
+# Use it directly — this is a cryptographically secure 256-bit random value
+random_int = int(random_hash, 16)
+winner = random_int % number_of_participants
+
+# Or convert to a float between 0 and 1
+random_float = random_int / (2**256 - 1)
+
+# For on-chain verification, grab the proof too
+proof = requests.get(f"https://your-beacon-api/api/randomness/{random_hash}/proof").json()
+print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code></pre>
+              </details>
+
+              <div style="background:rgba(34,197,94,.06);border:1px solid rgba(34,197,94,.18);border-radius:8px;padding:10px 14px;margin:6px 0 0;font-size:12px;line-height:1.6;">
+                <strong style="color:var(--accent-2);">Key idea:</strong> The random number is the <code style="font-size:11px;">outputHash</code> shown above. The proof is fetched from the API. Together they let any smart contract verify — <em>on-chain, trustlessly</em> — that this randomness was really produced by the mining network. No subscription, no oracle fees, no LINK tokens.
+              </div>
             </div>
           </details>
         </div>
