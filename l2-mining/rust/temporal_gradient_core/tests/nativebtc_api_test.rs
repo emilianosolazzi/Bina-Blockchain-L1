@@ -174,8 +174,8 @@ async fn test_websocket_stream() {
 
             let (mut tx, mut rx) = ws_stream.split();
 
-            // Subscribe to stats and blocks
-            for cmd in ["subscribe:stats", "subscribe:blocks"] {
+            // Subscribe to stats (only valid WS commands: subscribe:stats, subscribe:txs, filter:address:<addr>)
+            for cmd in ["subscribe:stats"] {
                 println!("[ws] sending '{cmd}'");
                 if let Err(e) = tx.send(Message::Text(cmd.to_string())).await {
                     eprintln!("[ws] ✗ failed to send {cmd}: {e}");

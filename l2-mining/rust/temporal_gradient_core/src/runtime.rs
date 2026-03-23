@@ -1314,9 +1314,10 @@ fn xor_round_constant(mut input: [u8; 32], value: u8) -> [u8; 32] {
 // Optional stale-block mining loop (only compiled with `stale-mining`)
 //
 // PRIMARY MODE: WebSocket stream from NativeBTC API.
-//   - Subscribes to `subscribe:blocks` and `subscribe:stats`.
-//   - Receives real-time new-block and mempool stats push notifications.
-//   - Zero-latency orphan detection — no 30s polling delay.
+//   - Subscribes to `subscribe:stats` (live mempool fee/congestion updates).
+//   - NOTE: The NativeBTC API has NO block-push event; `subscribe:blocks`
+//     is not a valid command and causes the server to close immediately.
+//   - Block detection happens via the HTTP polling fallback below.
 //
 // FALLBACK MODE: HTTP polling at `poll_interval_secs` if WS drops.
 //   - Uses lightweight `/v1/block-height` for tip height.
@@ -1365,7 +1366,7 @@ async fn run_stale_block_loop(
         match connect_ws_stream(&ws_url, &shutdown).await {
             Ok(ws_stream) => {
                 ws_failures = 0; // reset on successful connect
-                info!("Stale-block: WebSocket connected — subscribing to blocks + stats");
+                info!("Stale-block: WebSocket connected — subscribing to stats");
                 run_ws_event_loop(
                     ws_stream,
                     &client,
@@ -1495,9 +1496,10 @@ async fn run_ws_event_loop(
 
     let (mut ws_tx, mut ws_rx) = ws_stream.split();
 
-    // Subscribe to block events and mempool stats
-    let subscribe_cmds = ["subscribe:blocks", "subscribe:stats"];
-    for cmd in subscribe_cmds {
+    // Subscribe to mempool stats push events.
+    // Valid NativeBTC WS commands: subscribe:stats, subscribe:txs, filter:address:<addr>
+    // There is NO subscribe:blocks — block detection uses HTTP polling (see fallback loop).
+    for cmd in ["subscribe:stats"] {
         if let Err(err) = ws_tx.send(Message::Text(cmd.to_string())).await {
             warn!("Stale-block WS: failed to send '{cmd}': {err}");
             return;

@@ -178,6 +178,17 @@ function Ensure-MinerBinary {
     }
 
     if (-not $needsBuild) {
+        # Even when no build is needed, sync to AppData if the build binary is newer
+        $deployDir = Join-Path $env:LOCALAPPDATA "entropy\TemporalGradientMiner\data\bin"
+        $deployBin = Join-Path $deployDir "temporal-gradient-miner.exe"
+        if ((Test-Path $BinaryPath) -and (Test-Path $deployBin)) {
+            $buildTs = (Get-Item $BinaryPath).LastWriteTimeUtc
+            $deployTs = (Get-Item $deployBin).LastWriteTimeUtc
+            if ($buildTs -gt $deployTs) {
+                Copy-Item -Path $BinaryPath -Destination $deployBin -Force
+                Write-Host "  [OK] Synced newer build binary to $deployBin" -ForegroundColor Green
+            }
+        }
         return $true
     }
 

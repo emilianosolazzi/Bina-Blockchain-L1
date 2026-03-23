@@ -174,6 +174,10 @@ impl MinerConfig {
         #[cfg(feature = "stale-mining")]
         if let Some(ref mut sb) = self.stale_block {
             sb.normalize();
+            // Inherit top-level rpc_api_key when stale_block.api_key is missing.
+            if sb.api_key.is_none() {
+                sb.api_key = self.rpc_api_key.clone();
+            }
         }
     }
 
