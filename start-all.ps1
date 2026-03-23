@@ -212,7 +212,8 @@ function Ensure-MinerBinary {
     # Also sync the build to the AppData deploy location used by the installer
     $deployDir = Join-Path $env:LOCALAPPDATA "entropy\TemporalGradientMiner\data\bin"
     $deployBin = Join-Path $deployDir "temporal-gradient-miner.exe"
-    if ((Test-Path $BinaryPath) -and (Test-Path $deployDir)) {
+    if (Test-Path $BinaryPath) {
+        New-Item -ItemType Directory -Force -Path $deployDir | Out-Null
         Copy-Item -Path $BinaryPath -Destination $deployBin -Force
         Write-Host "  [OK] Synced patched binary to $deployBin" -ForegroundColor Green
     }
@@ -225,7 +226,7 @@ Write-Host "=== TGBT Mining Stack - Starting All Services ===" -ForegroundColor 
 Write-Host ""
 
 # ---- 1. Redis ----
-Write-Host "[1/5] Redis" -ForegroundColor Yellow
+Write-Host "[1/7] Redis" -ForegroundColor Yellow
 $redisProc = Get-Process redis-server -ErrorAction SilentlyContinue
 if ($redisProc) {
     Write-Host "  [OK] Redis already running (PID $($redisProc.Id))" -ForegroundColor Green
@@ -249,7 +250,7 @@ else {
 }
 
 # ---- 2. PostgreSQL ----
-Write-Host "[2/5] PostgreSQL" -ForegroundColor Yellow
+Write-Host "[2/7] PostgreSQL" -ForegroundColor Yellow
 $pgService = Get-Service postgresql-x64-17 -ErrorAction SilentlyContinue
 if (-not $pgService) {
     $pgService = Get-Service postgresql* -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -273,7 +274,7 @@ else {
 }
 
 # ---- 3. Beacon API (port 3100) ----
-Write-Host "[3/6] Beacon API" -ForegroundColor Yellow
+Write-Host "[3/7] Beacon API" -ForegroundColor Yellow
 $apiPort = 3100
 $apiUp = Wait-ForPort -Port $apiPort -TimeoutSeconds 1
 if ($apiUp) {

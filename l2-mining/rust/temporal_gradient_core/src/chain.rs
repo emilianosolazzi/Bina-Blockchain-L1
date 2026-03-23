@@ -595,11 +595,23 @@ impl LiveMiningClient {
         }
 
         phase.set(MiningPhase::Revealing, None);
-        let receipt = self.send_reveal(&contract, submission).await?;
-
-        // Reveal succeeded — clear the pending file
-        crate::pending::clear(key_path)?;
-        Ok(receipt)
+        match self.send_reveal(&contract, submission).await {
+            Ok(receipt) => {
+                // Reveal succeeded — clear the pending file
+                crate::pending::clear(key_path)?;
+                Ok(receipt)
+            }
+            Err(err) => {
+                let msg = format!("{err:#}");
+                if msg.contains("Reveal landed on-chain but receipt unavailable") {
+                    // The reveal DID succeed on-chain but we didn't get a receipt.
+                    // Clear pending and bubble the error so the caller can handle
+                    // it as a receipt-loss rather than a real failure.
+                    crate::pending::clear(key_path)?;
+                }
+                Err(err)
+            }
+        }
     }
 
     /// Attempt to reveal a commitment that was saved to disk from a previous
@@ -667,6 +679,18 @@ impl LiveMiningClient {
                 ));
             }
             None => {
+                // get_onchain_commitment returns None for BOTH "no commitment"
+                // AND "already revealed".  Check the revealed flag directly so
+                // we don't mistake a successful reveal for a missing commit.
+                if self.is_commitment_revealed().await.unwrap_or(false) {
+                    tracing::info!(
+                        "Pending commitment from block {} was already revealed on-chain — clearing pending",
+                        pending.commit_block
+                    );
+                    crate::pending::clear(key_path)?;
+                    return Ok(None);
+                }
+
                 // If commitment has definitely expired, clear it; otherwise keep
                 // pending and retry next cycle.
                 let contract = MiningContract::new(self.contract_address, Arc::clone(&self.client));
@@ -805,9 +829,83 @@ impl LiveMiningClient {
             .gas(apply_gas_buffer(reveal_gas))
             .gas_price(self.legacy_gas_price().await?);
         let pending_reveal = reveal_tx.send().await.context("Failed to send reveal")?;
-        pending_reveal
-            .await?
-            .ok_or_else(|| anyhow!("No reveal receipt"))
+        let tx_hash = pending_reveal.tx_hash();
+        match pending_reveal.await? {
+            Some(receipt) => Ok(receipt),
+            None => {
+                // Receipt was None — TX sent but RPC dropped the response.
+                // Poll for the receipt before giving up (mirrors commit receipt
+                // recovery logic).
+                tracing::warn!(
+                    "Reveal TX receipt was None (tx={:?}) — polling for confirmation",
+                    tx_hash
+                );
+                for attempt in 0..8u8 {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    if let Some(receipt) = self
+                        .provider
+                        .get_transaction_receipt(tx_hash)
+                        .await
+                        .unwrap_or(None)
+                    {
+                        tracing::info!(
+                            "Reveal receipt recovered on poll attempt {} (tx={:?})",
+                            attempt + 1,
+                            tx_hash
+                        );
+                        return Ok(receipt);
+                    }
+                }
+                // Last resort: check if the commitment was already revealed
+                // on-chain. get_onchain_commitment returns None for revealed
+                // commitments, so we use the raw check.
+                if self.is_commitment_revealed().await.unwrap_or(false) {
+                    tracing::info!(
+                        "Reveal TX receipt lost but commitment is revealed on-chain — treating as success"
+                    );
+                    // Build a minimal synthetic receipt so callers can proceed
+                    // (reward extraction will fall back to estimate).
+                    let receipt = self
+                        .provider
+                        .get_transaction_receipt(tx_hash)
+                        .await
+                        .ok()
+                        .flatten();
+                    if let Some(r) = receipt {
+                        return Ok(r);
+                    }
+                    // Even without a receipt, the reveal DID land.  Return an
+                    // error that is recognised as non-rejection so the pending
+                    // file gets cleared by the caller.
+                    return Err(anyhow!(
+                        "Reveal landed on-chain but receipt unavailable"
+                    ));
+                }
+                Err(anyhow!("No reveal receipt"))
+            }
+        }
+    }
+
+    /// Check whether this miner's current commitment has been revealed,
+    /// without filtering out revealed commitments like `get_onchain_commitment`
+    /// does.
+    async fn is_commitment_revealed(&self) -> Result<bool> {
+        let selector = keccak256("minerCommitments(address)");
+        let mut calldata = selector[..4].to_vec();
+        calldata.extend_from_slice(&encode(&[Token::Address(self.miner_address())]));
+
+        let tx = ethers::types::TransactionRequest::new()
+            .to(self.contract_address)
+            .data(Bytes::from(calldata));
+        let result = self.provider.call(&tx.into(), None).await?;
+        if result.len() < 96 {
+            return Ok(false);
+        }
+        // word 0: commitHash, word 1: timestamp, word 2: revealed flag
+        let commit_hash_zero = result[0..32].iter().all(|&b| b == 0);
+        let revealed = U256::from_big_endian(&result[64..96]) != U256::zero();
+        // If there IS a commit hash and it's marked revealed, the reveal landed
+        Ok(!commit_hash_zero && revealed)
     }
 
     /// Read the full on-chain commitment for this miner, if any active one exists.

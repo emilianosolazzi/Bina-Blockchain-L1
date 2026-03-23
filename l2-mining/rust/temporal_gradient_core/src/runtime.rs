@@ -587,12 +587,17 @@ async fn run_live_runtime(
                 }
                 Err(err) => {
                     let err_msg = format!("{err:#}");
-                    // Only count as "rejected" if the TX actually reached the chain.
-                    // Pre-chain failures (gas estimation, race detection) are retryable.
+                    // Only count as "rejected" if the TX actually reached the chain
+                    // AND was provably reverted.  Pre-chain failures (gas
+                    // estimation, race detection) and receipt-loss scenarios
+                    // are transient and should not inflate the rejection counter.
                     let is_prechain = err_msg.contains("estimate commitment gas")
                         || err_msg.contains("Failed to send commitment")
                         || err_msg.contains("race detected")
-                        || err_msg.contains("No commitment receipt");
+                        || err_msg.contains("No commitment receipt")
+                        || err_msg.contains("No reveal receipt")
+                        || err_msg.contains("Reveal landed on-chain but receipt unavailable")
+                        || err_msg.contains("not yet visible on-chain");
                     if !is_prechain {
                         let mut guard = stats.lock().await;
                         guard.rejected_submissions = guard.rejected_submissions.saturating_add(1);
@@ -1343,13 +1348,23 @@ async fn run_stale_block_loop(
 
     info!("Stale-block mining loop started (WebSocket primary)");
 
+    let mut ws_failures: u32 = 0;
+
     loop {
         // ── Try WebSocket stream first ──────────────────────────────
         let ws_url = build_ws_url(&config);
-        info!("Stale-block: connecting WebSocket stream → {}", redact_key(&ws_url));
+        if ws_failures < 2 {
+            info!("Stale-block: connecting WebSocket stream → {}", redact_key(&ws_url));
+        } else {
+            tracing::debug!("Stale-block: reconnecting WebSocket (attempt {})", ws_failures + 1);
+        }
+
+        // Exponential backoff: 5s, 10s, 20s, 30s, capped at 30s
+        let backoff_secs = std::cmp::min(5u64 * 2u64.saturating_pow(ws_failures), 30);
 
         match connect_ws_stream(&ws_url, &shutdown).await {
             Ok(ws_stream) => {
+                ws_failures = 0; // reset on successful connect
                 info!("Stale-block: WebSocket connected — subscribing to blocks + stats");
                 run_ws_event_loop(
                     ws_stream,
@@ -1364,14 +1379,20 @@ async fn run_stale_block_loop(
                 if shutdown.is_cancelled() {
                     break;
                 }
-                warn!("Stale-block: WebSocket disconnected — will reconnect in 5s");
+                warn!("Stale-block: WebSocket disconnected — will reconnect in {backoff_secs}s");
                 tokio::select! {
                     _ = shutdown.cancelled() => break,
-                    _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                    _ = tokio::time::sleep(Duration::from_secs(backoff_secs)) => {}
                 }
+                ws_failures = ws_failures.saturating_add(1);
             }
             Err(err) => {
-                warn!("Stale-block: WebSocket connection failed: {err:#} — falling back to HTTP polling");
+                ws_failures = ws_failures.saturating_add(1);
+                if ws_failures <= 2 {
+                    warn!("Stale-block: WebSocket connection failed: {err:#} — falling back to HTTP polling");
+                } else {
+                    tracing::debug!("Stale-block: WebSocket still unavailable (attempt {ws_failures}) — HTTP fallback");
+                }
                 run_http_fallback_loop(
                     &client,
                     &config,
@@ -1386,7 +1407,7 @@ async fn run_stale_block_loop(
                 // After poll loop exits (e.g. repeated failures), retry WS
                 tokio::select! {
                     _ = shutdown.cancelled() => break,
-                    _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                    _ = tokio::time::sleep(Duration::from_secs(backoff_secs)) => {}
                 }
             }
         }

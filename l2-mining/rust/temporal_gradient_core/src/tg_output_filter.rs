@@ -306,7 +306,6 @@ impl RateLimiter {
 struct Core {
     bits: BitVec<u64, Lsb0>,
     config: FilterConfig,
-    seeds: [u32; 8],
     /// Pre-computed 32-byte key for the hot-path hash function.
     hash_key: [u8; 32],
     /// Number of items currently considered "active" (decremented by GC).
@@ -343,7 +342,6 @@ impl Core {
         Ok(Self {
             bits,
             config,
-            seeds,
             hash_key,
             item_count: AtomicU64::new(0),
             total_ever_inserted: AtomicU64::new(0),
