@@ -111,6 +111,104 @@ function Get-LogHint {
     return "logs: $(Join-Path $LOGS "$LogPrefix.err.log")"
 }
 
+function Get-MinerConfigObject {
+    param([string]$ConfigPath)
+
+    if (-not (Test-Path $ConfigPath)) {
+        return $null
+    }
+
+    try {
+        return Get-Content $ConfigPath -Raw | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        return $null
+    }
+}
+
+function Get-LatestRustSourceWriteTime {
+    param([string]$RustRoot)
+
+    $latest = Get-ChildItem -Path $RustRoot -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Extension -in '.rs', '.toml' } |
+        Sort-Object LastWriteTimeUtc -Descending |
+        Select-Object -First 1
+
+    if ($latest) {
+        return $latest.LastWriteTimeUtc
+    }
+
+    return [datetime]::MinValue
+}
+
+function Ensure-MinerBinary {
+    param(
+        [string]$RustRoot,
+        [string]$BinaryPath,
+        [string]$ConfigPath
+    )
+
+    $config = Get-MinerConfigObject -ConfigPath $ConfigPath
+    $staleEnabled = $false
+    $staleApi = $null
+
+    if ($config -and $config.stale_block -and $config.stale_block.enabled) {
+        $staleEnabled = $true
+        $staleApi = $config.stale_block.bitcoin_api_url
+    }
+
+    if ($staleEnabled) {
+        Write-Host "  [INFO] Stale-block harvesting enabled ($staleApi)" -ForegroundColor DarkCyan
+    }
+
+    $binaryExists = Test-Path $BinaryPath
+    $binaryItem = if ($binaryExists) { Get-Item $BinaryPath } else { $null }
+    $featureStamp = Join-Path $RustRoot "target\release\temporal-gradient-miner.stale-mining.stamp"
+    $latestSourceWrite = Get-LatestRustSourceWriteTime -RustRoot $RustRoot
+
+    $needsBuild = (-not $binaryExists)
+    if (-not $needsBuild -and $binaryItem.LastWriteTimeUtc -lt $latestSourceWrite) {
+        $needsBuild = $true
+    }
+    if (-not $needsBuild -and $staleEnabled -and -not (Test-Path $featureStamp)) {
+        $needsBuild = $true
+    }
+
+    if (-not $needsBuild) {
+        return $true
+    }
+
+    $cargo = Get-Command cargo -ErrorAction SilentlyContinue
+    if (-not $cargo) {
+        Write-Host "  [FAIL] cargo is required to build the miner" -ForegroundColor Red
+        return $binaryExists
+    }
+
+    $buildArgs = @("build", "--release", "-p", "temporal-gradient-miner-installer", "--bin", "temporal-gradient-miner")
+    if ($staleEnabled) {
+        $buildArgs += @("--features", "stale-mining")
+    }
+
+    Write-Host "  [WAIT] Building miner binary$(if ($staleEnabled) { ' with stale-mining support' } else { '' })..." -ForegroundColor DarkYellow
+    Push-Location $RustRoot
+    try {
+        & $cargo.Source @buildArgs
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "  [FAIL] Miner build failed" -ForegroundColor Red
+            return $false
+        }
+    }
+    finally {
+        Pop-Location
+    }
+
+    if ($staleEnabled) {
+        Set-Content -Path $featureStamp -Value ([DateTimeOffset]::UtcNow.ToString("o")) -Encoding ascii
+    }
+
+    return (Test-Path $BinaryPath)
+}
+
 Write-Host ""
 Write-Host "=== TGBT Mining Stack - Starting All Services ===" -ForegroundColor Cyan
 Write-Host ""
@@ -269,7 +367,8 @@ if ($minerProc) {
     Write-Host "  [OK] Miner already running (PID $($minerProc.Id))" -ForegroundColor Green
 }
 else {
-    if (Test-Path $MINER_EXE) {
+    $minerReady = Ensure-MinerBinary -RustRoot $RUST -BinaryPath $MINER_EXE -ConfigPath $MINER_CONFIG
+    if ($minerReady -and (Test-Path $MINER_EXE)) {
         $minerProc = Start-BackgroundProcess -Name "Miner" -FilePath $MINER_EXE -Arguments @("--config", $MINER_CONFIG) -WorkingDirectory $ROOT -LogPrefix "miner"
         Start-Sleep -Seconds 2
         $minerProc = Get-Process temporal-gradient-miner -ErrorAction SilentlyContinue

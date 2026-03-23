@@ -17,6 +17,10 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "si
 temporal_gradient_core = { path = "../temporal_gradient_core" }
 tracing = "0.1"
 
+[features]
+default = []
+stale-mining = ["temporal_gradient_core/stale-mining"]
+
 [[bin]]
 name = "tg-miner-installer"
 path = "src/main.rs"

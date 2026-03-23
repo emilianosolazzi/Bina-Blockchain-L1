@@ -854,6 +854,13 @@ impl StaleBlockMiner {
         self.pending_proofs.drain(..).collect()
     }
 
+    /// Requeue proofs that could not be submitted yet.
+    pub fn requeue_pending_proofs(&mut self, proofs: Vec<StaleWorkProof>) {
+        for proof in proofs.into_iter().rev() {
+            self.pending_proofs.push_front(proof);
+        }
+    }
+
     /// Get the number of pending proofs.
     pub fn pending_count(&self) -> usize {
         self.pending_proofs.len()

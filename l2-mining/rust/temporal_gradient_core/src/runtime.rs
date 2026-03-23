@@ -14,6 +14,8 @@ use ethers::signers::LocalWallet;
 use ethers::types::U256;
 use k256::ecdsa::SigningKey;
 use rand::rngs::OsRng;
+#[cfg(feature = "stale-mining")]
+use serde_json::Value;
 use sha3::{Digest, Keccak256};
 use std::collections::VecDeque;
 use std::fs;
@@ -235,6 +237,8 @@ async fn run_runtime(
     telemetry_tx: broadcast::Sender<TelemetrySnapshot>,
     shutdown: CancellationToken,
 ) -> Result<()> {
+    let live_client = LiveMiningClient::connect(&config).await?;
+
     // ── Optional stale-block mining sidecar ──────────────────────
     #[cfg(feature = "stale-mining")]
     let _stale_handle: Option<JoinHandle<()>> = if config.stale_mining_enabled() {
@@ -244,13 +248,13 @@ async fn run_runtime(
             "Stale-block mining enabled — polling {} every {}s",
             sb_cfg.bitcoin_api_url, sb_cfg.poll_interval_secs
         );
-        Some(tokio::spawn(run_stale_block_loop(sb_cfg, sb_shutdown)))
+        Some(tokio::spawn(run_stale_block_loop(sb_cfg, live_client.clone(), sb_shutdown)))
     } else {
         debug!("Stale-block mining disabled (not configured or enabled: false)");
         None
     };
 
-    if let Some(live_client) = LiveMiningClient::connect(&config).await? {
+    if let Some(live_client) = live_client {
         info!("Live chain submission mode enabled for contract {}", config.contract_address);
         return run_live_runtime(
             config,
@@ -585,7 +589,8 @@ async fn run_live_runtime(
                     // Pre-chain failures (gas estimation, race detection) are retryable.
                     let is_prechain = err_msg.contains("estimate commitment gas")
                         || err_msg.contains("Failed to send commitment")
-                        || err_msg.contains("race detected");
+                        || err_msg.contains("race detected")
+                        || err_msg.contains("No commitment receipt");
                     if !is_prechain {
                         let mut guard = stats.lock().await;
                         guard.rejected_submissions = guard.rejected_submissions.saturating_add(1);
@@ -1304,16 +1309,23 @@ fn xor_round_constant(mut input: [u8; 32], value: u8) -> [u8; 32] {
 #[cfg(feature = "stale-mining")]
 async fn run_stale_block_loop(
     config: crate::stale_block_miner::StaleBlockMinerConfig,
+    live_client: Option<LiveMiningClient>,
     shutdown: CancellationToken,
 ) {
-    use crate::stale_block_miner::{ChainTip, StaleBlockMiner};
+    use crate::stale_block_miner::StaleBlockMiner;
 
     let mut miner = StaleBlockMiner::new(config.clone());
-    let poll = Duration::from_secs(config.poll_interval_secs);
+    let mut poll = time::interval(Duration::from_secs(config.poll_interval_secs));
+    poll.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
+        .user_agent("TGBT-StaleBlockMiner/0.1")
         .build()
         .expect("failed to build HTTP client for stale mining");
+
+    if config.auto_submit && live_client.is_none() {
+        warn!("Stale-block auto-submit is enabled, but no live mining client is available; proofs will be queued only");
+    }
 
     info!("Stale-block mining loop started");
 
@@ -1323,28 +1335,43 @@ async fn run_stale_block_loop(
                 info!("Stale-block mining loop shutting down");
                 break;
             }
-            _ = time::sleep(poll) => {
-                let url = format!("{}/v1/mining/pool/blocksaudit", config.bitcoin_api_url.trim_end_matches('/'));
-                match client.get(&url).send().await {
-                    Ok(resp) if resp.status().is_success() => {
-                        match resp.json::<Vec<ChainTip>>().await {
-                            Ok(tips) => {
-                                let proofs = miner.process_tips(tips);
-                                if !proofs.is_empty() {
-                                    info!("Stale-block mining produced {} new proof(s)", proofs.len());
-                                }
-                            }
-                            Err(e) => {
-                                warn!("Stale-block: failed to parse chain tips: {e}");
-                            }
+            _ = poll.tick() => {
+                match harvest_mempool_stale_proofs(&client, &config, &mut miner).await {
+                    Ok(new_count) => {
+                        if new_count > 0 {
+                            info!("Stale-block mining harvested {new_count} new mempool proof(s)");
                         }
                     }
-                    Ok(resp) => {
-                        debug!("Stale-block: API returned status {}", resp.status());
+                    Err(err) => {
+                        warn!("Stale-block: mempool harvesting failed: {err:#}");
                     }
-                    Err(e) => {
-                        warn!("Stale-block: failed to reach Bitcoin API: {e}");
+                }
+
+                let pending = miner.drain_pending_proofs();
+                if pending.is_empty() {
+                    continue;
+                }
+
+                if config.auto_submit {
+                    if let Some(live_client) = &live_client {
+                        let mut retry = Vec::new();
+                        for proof in pending {
+                            if let Err(err) = live_client.submit_stale_proof(&proof).await {
+                                warn!(proof_id = %proof.proof_id, "Stale-block: failed to auto-submit proof: {err:#}");
+                                retry.push(proof);
+                            }
+                        }
+
+                        if !retry.is_empty() {
+                            warn!("Stale-block: requeued {} proof(s) after submission failures", retry.len());
+                            miner.requeue_pending_proofs(retry);
+                        }
+                    } else {
+                        miner.requeue_pending_proofs(pending);
                     }
+                } else {
+                    info!("Stale-block mining queued {} proof(s) for manual submission", pending.len());
+                    miner.requeue_pending_proofs(pending);
                 }
             }
         }
@@ -1357,9 +1384,148 @@ async fn run_stale_block_loop(
     }
 }
 
+#[cfg(feature = "stale-mining")]
+fn decode_bitcoin_display_hash(value: &str) -> Option<[u8; 32]> {
+    let trimmed = value.trim();
+    if trimmed.len() != 64 {
+        return None;
+    }
+
+    let mut bytes = [0u8; 32];
+    bytes.copy_from_slice(&hex::decode(trimmed).ok()?);
+    bytes.reverse();
+    Some(bytes)
+}
+
+#[cfg(feature = "stale-mining")]
+fn parse_mempool_orphans(block: &Value) -> Vec<(String, Option<String>, Option<u64>)> {
+    block
+        .get("extras")
+        .and_then(|extras| extras.get("orphans"))
+        .and_then(Value::as_array)
+        .map(|orphans| {
+            orphans
+                .iter()
+                .filter_map(|orphan| {
+                    if let Some(id) = orphan.as_str() {
+                        return Some((id.to_string(), None, None));
+                    }
+
+                    let id = orphan.get("id").and_then(Value::as_str)?;
+                    let header = orphan
+                        .get("header")
+                        .and_then(Value::as_str)
+                        .map(|value| value.to_string());
+                    let height = orphan.get("height").and_then(Value::as_u64);
+                    Some((id.to_string(), header, height))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(feature = "stale-mining")]
+async fn fetch_mempool_block_header(
+    client: &reqwest::Client,
+    base_url: &str,
+    block_id: &str,
+) -> Result<Vec<u8>> {
+    let url = format!("{}/block/{}/header", base_url.trim_end_matches('/'), block_id);
+    let header_hex = client
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
+
+    Ok(hex::decode(header_hex.trim())?)
+}
+
+#[cfg(feature = "stale-mining")]
+async fn harvest_mempool_stale_proofs(
+    client: &reqwest::Client,
+    config: &crate::stale_block_miner::StaleBlockMinerConfig,
+    miner: &mut crate::stale_block_miner::StaleBlockMiner,
+) -> Result<usize> {
+    let url = format!("{}/v1/blocks", config.bitcoin_api_url.trim_end_matches('/'));
+    let blocks = client
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Vec<Value>>()
+        .await?;
+
+    let mut harvested = 0usize;
+
+    for block in blocks {
+        let Some(canonical_id) = block.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(height) = block.get("height").and_then(Value::as_u64) else {
+            continue;
+        };
+        let Some(canonical_hash) = decode_bitcoin_display_hash(canonical_id) else {
+            debug!("Stale-block: skipping block with invalid canonical hash {canonical_id}");
+            continue;
+        };
+
+        for (orphan_id, inline_header, orphan_height) in parse_mempool_orphans(&block) {
+            let raw_header = match inline_header {
+                Some(header_hex) => match hex::decode(header_hex.trim()) {
+                    Ok(bytes) => bytes,
+                    Err(err) => {
+                        warn!("Stale-block: invalid inline orphan header for {orphan_id}: {err}");
+                        continue;
+                    }
+                },
+                None => match fetch_mempool_block_header(client, &config.bitcoin_api_url, &orphan_id).await {
+                    Ok(bytes) => bytes,
+                    Err(err) => {
+                        warn!("Stale-block: failed to fetch orphan header for {orphan_id}: {err:#}");
+                        continue;
+                    }
+                }
+            };
+
+            match miner.submit_stale_header(&raw_header, orphan_height.unwrap_or(height), canonical_hash, 1) {
+                Ok(proof) => {
+                    harvested += 1;
+                    info!(
+                        proof_id = %proof.proof_id,
+                        height = proof.height,
+                        leading_zeros = proof.leading_zeros,
+                        "Harvested stale block proof from mempool"
+                    );
+                }
+                Err(crate::stale_block_miner::StaleBlockError::AlreadyHarvested(_)) => {}
+                Err(crate::stale_block_miner::StaleBlockError::NotStale(_)) => {
+                    debug!("Stale-block: orphan candidate {orphan_id} matched canonical chain after fetch");
+                }
+                Err(err) => {
+                    warn!("Stale-block: failed to convert orphan {orphan_id} into proof: {err}");
+                }
+            }
+        }
+    }
+
+    Ok(harvested)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "stale-mining")]
+    #[test]
+    fn decode_bitcoin_display_hash_reverses_bytes() {
+        let decoded = decode_bitcoin_display_hash("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
+            .expect("hash should decode");
+
+        assert_eq!(decoded[0], 0x1f);
+        assert_eq!(decoded[31], 0x00);
+    }
 
     #[test]
     fn quantum_resistant_hash_live_is_deterministic() {

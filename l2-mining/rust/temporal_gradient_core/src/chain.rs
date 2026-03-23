@@ -72,11 +72,37 @@ abigen!(
     ]"#
 );
 
+abigen!(
+    ModuleWithCore,
+    r#"[
+        function core() external view returns (address)
+    ]"#
+);
+
+abigen!(
+    TemporalGradientCoreView,
+    r#"[
+        function moduleAddress(bytes32 moduleId) external view returns (address)
+    ]"#
+);
+
+#[cfg(feature = "stale-mining")]
+abigen!(
+    StaleBlockOracleContract,
+    r#"[
+        function submitStaleBlock(bytes rawHeader, uint64 height, bytes32 canonicalHash, uint32 reorgDepth) external
+        function claimReward(bytes32 blockHash) external
+        function pendingReward(bytes32 blockHash) external view returns (uint256)
+        function isSubmitted(bytes32 blockHash) external view returns (bool)
+    ]"#
+);
+
 pub type MiningClient = SignerMiddleware<Provider<Http>, LocalWallet>;
 
 /// On-chain commitment state for the miner address.
 #[derive(Debug, Clone)]
 pub struct OnChainCommitment {
+    pub commit_hash: [u8; 32],
     pub commit_block: u64,
     pub revealed: bool,
     pub pool_id: u8,
@@ -113,6 +139,136 @@ pub struct LiveMiningClient {
 }
 
 impl LiveMiningClient {
+    #[cfg(feature = "stale-mining")]
+    async fn stale_block_oracle_address(&self) -> Result<Address> {
+        let module = ModuleWithCore::new(self.contract_address, Arc::clone(&self.provider));
+        let core_address = module
+            .core()
+            .call()
+            .await
+            .context("Failed to resolve TemporalGradientCore from mining module")?;
+        if core_address == Address::zero() {
+            return Err(anyhow!("Mining module returned zero core() address"));
+        }
+
+        let core = TemporalGradientCoreView::new(core_address, Arc::clone(&self.provider));
+        let stale_module_id = keccak256("STALE_BLOCK_MODULE");
+        let stale_oracle = core
+            .module_address(stale_module_id)
+            .call()
+            .await
+            .context("Failed to resolve STALE_BLOCK_MODULE address")?;
+        if stale_oracle == Address::zero() {
+            return Err(anyhow!("STALE_BLOCK_MODULE is not configured in TemporalGradientCore"));
+        }
+
+        Ok(stale_oracle)
+    }
+
+    #[cfg(feature = "stale-mining")]
+    pub async fn submit_stale_proof(
+        &self,
+        proof: &crate::stale_block_miner::StaleWorkProof,
+    ) -> Result<()> {
+        proof
+            .verify_self()
+            .map_err(|err| anyhow!("Invalid stale proof {}: {err}", proof.proof_id))?;
+
+        let stale_oracle = self.stale_block_oracle_address().await?;
+        let oracle_view = StaleBlockOracleContract::new(stale_oracle, Arc::clone(&self.provider));
+        let oracle = StaleBlockOracleContract::new(stale_oracle, Arc::clone(&self.client));
+
+        let already_submitted = oracle_view
+            .is_submitted(proof.block_hash)
+            .call()
+            .await
+            .with_context(|| format!("Failed to query stale proof state for {}", proof.proof_id))?;
+
+        if !already_submitted {
+            let submit_call = oracle.submit_stale_block(
+                Bytes::from(proof.raw_header.clone()),
+                proof.height,
+                proof.canonical_hash,
+                proof.reorg_depth,
+            );
+            let pending_tx = submit_call
+                .send()
+                .await
+                .with_context(|| format!("Failed to submit stale proof {}", proof.proof_id))?;
+
+            let receipt = pending_tx
+                .await
+                .with_context(|| format!("Failed while awaiting stale proof transaction {}", proof.proof_id))?
+                .ok_or_else(|| anyhow!("Stale proof submission returned no receipt for {}", proof.proof_id))?;
+
+            tracing::info!(
+                tx_hash = ?receipt.transaction_hash,
+                proof_id = %proof.proof_id,
+                block_hash = %hex::encode(proof.block_hash),
+                "Submitted stale block proof on-chain"
+            );
+        } else {
+            tracing::debug!(proof_id = %proof.proof_id, "Stale block proof already present on-chain");
+        }
+
+        let pending_reward = oracle_view
+            .pending_reward(proof.block_hash)
+            .call()
+            .await
+            .with_context(|| format!("Failed to query pending stale reward for {}", proof.proof_id))?;
+
+        if pending_reward > U256::zero() {
+            let claim_call = oracle.claim_reward(proof.block_hash);
+            let pending_tx = claim_call
+                .send()
+                .await
+                .with_context(|| format!("Failed to claim stale reward for {}", proof.proof_id))?;
+
+            let receipt = pending_tx
+                .await
+                .with_context(|| format!("Failed while awaiting stale reward transaction {}", proof.proof_id))?
+                .ok_or_else(|| anyhow!("Stale reward claim returned no receipt for {}", proof.proof_id))?;
+
+            tracing::info!(
+                tx_hash = ?receipt.transaction_hash,
+                proof_id = %proof.proof_id,
+                reward_wei = %pending_reward,
+                "Claimed stale block reward"
+            );
+        }
+
+        Ok(())
+    }
+
+    async fn recover_pending_commit_block(
+        &self,
+        pending: &mut crate::pending::PendingCommitment,
+        key_path: &str,
+    ) -> Result<bool> {
+        if pending.commit_block != 0 {
+            return Ok(true);
+        }
+
+        let Some(onchain) = self.get_onchain_commitment().await? else {
+            return Ok(false);
+        };
+
+        if onchain.expired
+            || onchain.pool_id != pending.pool_id
+            || onchain.commit_hash != pending.commit_hash
+        {
+            return Ok(false);
+        }
+
+        pending.commit_block = onchain.commit_block;
+        crate::pending::save(key_path, pending)?;
+        tracing::warn!(
+            "Recovered missing commitment receipt from on-chain state at block {}",
+            onchain.commit_block
+        );
+        Ok(true)
+    }
+
     pub async fn connect(config: &MinerConfig) -> Result<Option<Self>> {
         if !config.has_live_target() {
             return Ok(None);
@@ -329,12 +485,23 @@ impl LiveMiningClient {
                 return Err(anyhow!("Failed to send commitment: {err:#}"));
             }
         };
-        let _commit_receipt = pending_commit
-            .await?
-            .ok_or_else(|| anyhow!("No commitment receipt"))?;
+        let commit_receipt = pending_commit.await?;
 
-        // Update pending file with the actual commit block
-        let commit_block = self.current_contract_block_number().await?;
+        // Update pending file with the actual commit block. If the RPC loses
+        // the receipt but the commitment did reach the chain, recover it from
+        // the miner's on-chain commitment instead of treating it as a failure.
+        let commit_block = if let Some(receipt) = commit_receipt {
+            receipt
+                .block_number
+                .map(|block| block.as_u64())
+                .unwrap_or(self.current_contract_block_number().await?)
+        } else if self.recover_pending_commit_block(&mut pending, key_path).await? {
+            pending.commit_block
+        } else {
+            crate::pending::clear(key_path)?;
+            return Err(anyhow!("No commitment receipt"));
+        };
+
         pending.commit_block = commit_block;
         crate::pending::save(key_path, &pending)?;
 
@@ -370,6 +537,17 @@ impl LiveMiningClient {
         phase: &PhaseTracker,
         key_path: &str,
     ) -> Result<Option<TransactionReceipt>> {
+        let mut pending = pending.clone();
+        if pending.commit_block == 0 {
+            if !self.recover_pending_commit_block(&mut pending, key_path).await? {
+                tracing::warn!(
+                    "Saved pending commitment has no commit block and no matching on-chain commitment — discarding"
+                );
+                crate::pending::clear(key_path)?;
+                return Ok(None);
+            }
+        }
+
         let contract = MiningContract::new(self.contract_address, Arc::clone(&self.client));
         let max_age = contract.max_commitment_age().call().await?.as_u64();
         let min_age = contract.min_commitment_age().call().await?.as_u64();
@@ -504,6 +682,8 @@ impl LiveMiningClient {
         if commit_hash.iter().all(|&b| b == 0) {
             return Ok(None); // no commitment
         }
+        let mut commit_hash_bytes = [0u8; 32];
+        commit_hash_bytes.copy_from_slice(commit_hash);
 
         let commit_block = U256::from_big_endian(&result[32..64]).as_u64();
         let revealed = U256::from_big_endian(&result[64..96]) != U256::zero();
@@ -521,6 +701,7 @@ impl LiveMiningClient {
         let expired = current_block > expires_at;
 
         Ok(Some(OnChainCommitment {
+            commit_hash: commit_hash_bytes,
             commit_block,
             revealed,
             pool_id,
