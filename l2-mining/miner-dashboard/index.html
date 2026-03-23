@@ -1479,14 +1479,31 @@
             <button class="action-btn" id="loadLatestProof">Load latest proof</button>
           </div>
         </div>
-        <p class="helper" style="margin:0 0 12px;"><strong>This is what consumers use.</strong> The output hash below is the latest verifiable random number produced by the mining network. Any dApp (lottery, NFT mint, game) can use this instead of Chainlink VRF — it's cheaper, decentralized, and backed by physical entropy.</p>
+        <p class="helper" style="margin:0 0 12px;"><strong>This is what consumers use.</strong> The output hash below is the latest verifiable random number produced by the mining network. Any dApp (lottery, NFT mint, game) can use this instead of Chainlink VRF — it’s cheaper, decentralized, and backed by physical entropy.</p>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
+          <div style="flex:1;min-width:180px;background:rgba(56,189,248,.06);border:1px solid rgba(56,189,248,.15);border-radius:8px;padding:10px 12px;font-size:11px;line-height:1.5;">
+            <strong style="color:var(--accent);">Refresh randomness</strong> — pulls the newest random number from the network. The miner produces new outputs every few minutes as PoW solutions are found.
+          </div>
+          <div style="flex:1;min-width:180px;background:rgba(56,189,248,.06);border:1px solid rgba(56,189,248,.15);border-radius:8px;padding:10px 12px;font-size:11px;line-height:1.5;">
+            <strong style="color:var(--accent);">Load latest proof</strong> — opens the Proof Inspector (right panel) with the cryptographic proof for this random number, so you can verify it on-chain.
+          </div>
+        </div>
         <div class="stack">
           <div class="kv" style="grid-template-columns: 160px 1fr;">
-            <div class="label" title="The random number — a 256-bit hash derived from the miner's PoW solution. Use this as your random seed.">Latest output</div><div id="latestRandomnessHash" class="hash">—</div>
-            <div class="label" title="Which epoch batch this randomness belongs to. Each epoch groups multiple solutions into a Merkle tree.">Epoch</div><div id="latestRandomnessEpoch">—</div>
-            <div class="label" title="Position of this output within the epoch's Merkle tree. Needed for on-chain verification.">Leaf index</div><div id="latestRandomnessLeaf">—</div>
-            <div class="label">Timestamp</div><div id="latestRandomnessTime">—</div>
-            <div class="label" title="Cryptographic signature proving this output was produced by an authorized miner.">Signature</div><div id="latestRandomnessSignature" class="hash">—</div>
+            <div class="label" title="The random number — a 256-bit hash derived from the miner's PoW solution. Use this as your random seed.">Latest output <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></div><div id="latestRandomnessHash" class="hash">—</div>
+            <div class="label" title="Which epoch batch this randomness belongs to. Each epoch groups multiple solutions into a Merkle tree.">Epoch <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></div><div id="latestRandomnessEpoch">—</div>
+            <div class="label" title="Position of this output within the epoch’s Merkle tree. Each leaf is a different random number — leaf 0 is the first, leaf 9 is the tenth.">Leaf index <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></div><div id="latestRandomnessLeaf">—</div>
+            <div class="label" title="When this random number was produced by the miner.">Timestamp <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></div><div id="latestRandomnessTime">—</div>
+            <div class="label" title="Cryptographic signature proving this output was produced by an authorized miner. 'No signature available' means the output is verified via Merkle proof instead.">Signature <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></div><div id="latestRandomnessSignature" class="hash">—</div>
+          </div>
+          <div style="margin:14px 0 6px;background:rgba(251,191,36,.06);border:1px solid rgba(251,191,36,.18);border-radius:10px;padding:12px 14px;font-size:12px;line-height:1.6;">
+            <div style="font-weight:700;color:var(--gold);margin-bottom:4px;">📦 Need more than one random number?</div>
+            <p style="margin:0;color:var(--text);">This section only shows the <em>latest</em> output. Every epoch contains <strong>10 random numbers</strong> (leaves 0–9). To browse all of them:</p>
+            <ul style="margin:6px 0 0;padding-left:20px;color:var(--text);">
+              <li><strong>Scroll down to Epoch Explorer</strong> — the table shows all epochs with their Merkle roots. Click <strong>"Details"</strong> on any epoch to see all 10 leaves.</li>
+              <li><strong>API access</strong> — call <code style="font-size:11px;">GET /api/epochs/{epochId}</code> to get any epoch’s full data including all leaf hashes.</li>
+              <li><strong>Verify any past output</strong> — paste any output hash (from any epoch, any leaf) into the Proof Inspector on the right to get its Merkle proof.</li>
+            </ul>
           </div>
           <details style="margin:8px 0 0;font-size:12px;color:var(--muted);">
             <summary style="cursor:pointer;color:var(--accent);font-weight:600;">How to use this randomness in your smart contract</summary>
@@ -1568,21 +1585,32 @@
           <table class="sol-table epoch-table">
             <thead>
               <tr>
-                <th>Epoch</th>
-                <th>Created</th>
-                <th>Leaves</th>
-                <th>Reward</th>
-                <th>Finalized</th>
-                <th>Storage verification</th>
-                <th>On-chain attestation</th>
-                <th>Merkle root</th>
-                <th>Actions</th>
+                <th title="Sequential epoch number. Epochs are committed in strict order (0, 1, 2…). Each epoch is one batch of 10 random numbers.">Epoch <span style="cursor:help;font-size:9px;">ⓘ</span></th>
+                <th title="When this epoch was created by the epoch builder.">Created <span style="cursor:help;font-size:9px;">ⓘ</span></th>
+                <th title="Number of random outputs (leaves) in this epoch. Default target is 10 per epoch.">Leaves <span style="cursor:help;font-size:9px;">ⓘ</span></th>
+                <th title="Total TGBT tokens earned for this epoch's solutions. '(est)' means calculated locally; '✓' means confirmed on-chain.">Reward <span style="cursor:help;font-size:9px;">ⓘ</span></th>
+                <th title="'Pending' = committed on-chain but still in the 96-hour challenge window. 'Yes' = finalized and immutable. 'No' = not yet committed.">Finalized <span style="cursor:help;font-size:9px;">ⓘ</span></th>
+                <th title="Whether the epoch's data can be independently verified from storage. 'Verified' = a hash of the stored data matches what's on-chain. 'epoch-store-local' = stored on this machine.">Storage verification <span style="cursor:help;font-size:9px;">ⓘ</span></th>
+                <th title="Whether the full epoch data has been attested on-chain via a separate transaction. 'Recorded' = the attestation hash is on-chain. This proves the data is stored and retrievable.">On-chain attestation <span style="cursor:help;font-size:9px;">ⓘ</span></th>
+                <th title="The Merkle root — a single hash that represents all 10 random numbers in this epoch. This is what gets committed on-chain.">Merkle root <span style="cursor:help;font-size:9px;">ⓘ</span></th>
+                <th title="Actions you can perform on this epoch — see legend below the table.">Actions <span style="cursor:help;font-size:9px;">ⓘ</span></th>
               </tr>
             </thead>
             <tbody id="epochBody">
               <tr><td class="sol-empty" colspan="9">Loading epochs…</td></tr>
             </tbody>
           </table>
+        </div>
+        <div style="margin-top:10px;display:flex;gap:10px;flex-wrap:wrap;font-size:11px;">
+          <div style="flex:1;min-width:160px;background:rgba(56,189,248,.06);border:1px solid rgba(56,189,248,.12);border-radius:8px;padding:8px 10px;line-height:1.5;">
+            <strong style="color:var(--accent);">Verify storage</strong> — checks that the epoch’s full data (all 10 leaves + Merkle tree) is correctly stored and matches the on-chain root. Result appears in the status bar below.
+          </div>
+          <div style="flex:1;min-width:160px;background:rgba(56,189,248,.06);border:1px solid rgba(56,189,248,.12);border-radius:8px;padding:8px 10px;line-height:1.5;">
+            <strong style="color:var(--accent);">Latest proof</strong> — loads the most recent random number from this epoch into the Proof Inspector (above), so you can inspect its Merkle proof and copy the on-chain verification call.
+          </div>
+          <div style="flex:1;min-width:160px;background:rgba(56,189,248,.06);border:1px solid rgba(56,189,248,.12);border-radius:8px;padding:8px 10px;line-height:1.5;">
+            <strong style="color:var(--accent);">Details</strong> — opens a side panel showing the full epoch: all 10 leaf hashes, Merkle root, finalization status, challenge window progress, storage attestation, and wallet actions (finalize/attest via MetaMask).
+          </div>
         </div>
         <div id="epochStatus" class="helper" style="margin-top:12px;">—</div>
       </div>
