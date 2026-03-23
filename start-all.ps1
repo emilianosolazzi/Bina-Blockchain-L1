@@ -11,7 +11,10 @@ $SEC  = Join-Path $ROOT "l2-mining\security"
 $RUST = Join-Path $ROOT "l2-mining\rust"
 $LOGS = Join-Path $ROOT ".runtime-logs\stack"
 $MINER_CONFIG = Join-Path $env:APPDATA "entropy\TemporalGradientMiner\config\miner-config.json"
-$MINER_EXE = Join-Path $RUST "target\release\temporal-gradient-miner.exe"
+$MINER_EXE_BUILD = Join-Path $RUST "target\release\temporal-gradient-miner.exe"
+$MINER_EXE_DEPLOY = Join-Path $env:LOCALAPPDATA "entropy\TemporalGradientMiner\data\bin\temporal-gradient-miner.exe"
+# Prefer the deployed binary (matches running process path); fall back to build output
+$MINER_EXE = if (Test-Path $MINER_EXE_DEPLOY) { $MINER_EXE_DEPLOY } else { $MINER_EXE_BUILD }
 $TELEMETRY_FILE = Join-Path $env:LOCALAPPDATA "entropy\TemporalGradientMiner\data\logs\telemetry.jsonl"
 
 New-Item -ItemType Directory -Force -Path $LOGS | Out-Null
@@ -206,6 +209,14 @@ function Ensure-MinerBinary {
         Set-Content -Path $featureStamp -Value ([DateTimeOffset]::UtcNow.ToString("o")) -Encoding ascii
     }
 
+    # Also sync the build to the AppData deploy location used by the installer
+    $deployDir = Join-Path $env:LOCALAPPDATA "entropy\TemporalGradientMiner\data\bin"
+    $deployBin = Join-Path $deployDir "temporal-gradient-miner.exe"
+    if ((Test-Path $BinaryPath) -and (Test-Path $deployDir)) {
+        Copy-Item -Path $BinaryPath -Destination $deployBin -Force
+        Write-Host "  [OK] Synced patched binary to $deployBin" -ForegroundColor Green
+    }
+
     return (Test-Path $BinaryPath)
 }
 
@@ -367,7 +378,7 @@ if ($minerProc) {
     Write-Host "  [OK] Miner already running (PID $($minerProc.Id))" -ForegroundColor Green
 }
 else {
-    $minerReady = Ensure-MinerBinary -RustRoot $RUST -BinaryPath $MINER_EXE -ConfigPath $MINER_CONFIG
+    $minerReady = Ensure-MinerBinary -RustRoot $RUST -BinaryPath $MINER_EXE_BUILD -ConfigPath $MINER_CONFIG
     if ($minerReady -and (Test-Path $MINER_EXE)) {
         $minerProc = Start-BackgroundProcess -Name "Miner" -FilePath $MINER_EXE -Arguments @("--config", $MINER_CONFIG) -WorkingDirectory $ROOT -LogPrefix "miner"
         Start-Sleep -Seconds 2

@@ -232,6 +232,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Create a StaleBlockMiner with relaxed settings for demo
         let config = StaleBlockMinerConfig {
             bitcoin_api_url: API_BASE.to_string(),
+            api_key: None,
             poll_interval_secs: 30,
             min_leading_zeros: 0,    // Accept any PoW for demo
             max_stale_age_secs: 365 * 24 * 3600, // 1 year for demo

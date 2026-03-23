@@ -37,7 +37,9 @@ sled = "0.34"
 thiserror = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time", "net", "io-util"] }
 tokio-rustls = "0.24"
+tokio-tungstenite = { version = "0.21", features = ["rustls-tls-webpki-roots"] }
 tokio-util = "0.7"
+futures-util = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 url = "2"

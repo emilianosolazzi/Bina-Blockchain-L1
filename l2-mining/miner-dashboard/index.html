@@ -1988,15 +1988,34 @@
         ? `${fmtEth(sys.chain?.ethBalance || 0)} ETH`
         : 'Loading…';
 
-      const batchEnabled = !!sys.chain?.contracts?.batchEnabled;
-      const batchWiring = batchEnabled
-        ? statusFromBool(sys.chain?.contracts?.batchWiredCorrectly, 'Correct', 'Mismatch')
-        : { label: 'Not wired', kind: 'warn' };
-      const tokenomicsWiring = statusFromBool(sys.chain?.contracts?.tokenomicsWiredCorrectly, 'Correct', 'Mismatch');
+      const contracts = sys.chain?.contracts || {};
+      const hasWiringData =
+        contracts.coreBatchModule !== undefined &&
+        contracts.coreTokenomicsModule !== undefined &&
+        contracts.batchWiredCorrectly !== undefined &&
+        contracts.tokenomicsWiredCorrectly !== undefined;
+
+      const batchEnabled = hasWiringData ? !!contracts.batchEnabled : null;
+      const batchWiring = !hasWiringData
+        ? { label: 'Unknown', kind: 'warn' }
+        : batchEnabled
+          ? statusFromBool(contracts.batchWiredCorrectly, 'Correct', 'Mismatch')
+          : { label: 'Not wired', kind: 'warn' };
+
+      const tokenomicsWiring = !hasWiringData
+        ? { label: 'Unknown', kind: 'warn' }
+        : statusFromBool(contracts.tokenomicsWiredCorrectly, 'Correct', 'Mismatch');
+
       setBadge(els.batchWireBadge, batchWiring.label, batchWiring.kind);
       setBadge(els.tokenomicsWireBadge, tokenomicsWiring.label, tokenomicsWiring.kind);
-      els.liveBatchAddress.textContent = batchEnabled ? (sys.chain?.contracts?.coreBatchModule || '—') : 'No live batch module on this Core';
-      els.liveTokenomicsAddress.textContent = sys.chain?.contracts?.coreTokenomicsModule || '—';
+      els.liveBatchAddress.textContent = !hasWiringData
+        ? 'Unknown (RPC unavailable)'
+        : batchEnabled
+          ? (contracts.coreBatchModule || '—')
+          : 'No live batch module on this Core';
+      els.liveTokenomicsAddress.textContent = !hasWiringData
+        ? 'Unknown (RPC unavailable)'
+        : (contracts.coreTokenomicsModule || '—');
 
       els.nextEpochId.textContent = sys.chain?.nextEpochId ?? '—';
       const latestOnChain = sys.chain?.latestOnChainEpoch;

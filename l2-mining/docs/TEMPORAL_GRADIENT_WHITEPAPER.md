@@ -2,20 +2,24 @@
 
 ## Continuous Mining as a Security Primitive
 
-Version 0.2  
-March 22, 2026
+Version 0.3  
+March 23, 2026
 
 ---
 
 ## Abstract
 
-Most digital security systems are built on static trust.
+No institution today can continuously prove that its critical devices are still alive, still authentic, and still connected — without trusting a central observer.
 
-A device is trusted because it holds a certificate, a credential, a VPN session, or an endpoint agent. Those mechanisms prove that a device was authorized at some earlier point in time, but they do not prove that the device is genuinely alive, healthy, and behaving consistently right now.
+Certificates get stolen. Machines get cloned. Agents get disabled. Logs get tampered with. Monitoring servers fail. Every static credential is a snapshot of trust that was true once, at some earlier point in time. None of them answer the question that actually matters: **is this device alive and behaving consistently right now?**
+
+This is not a theoretical gap. It is the structural weakness beneath every major breach, every supply-chain compromise, and every undetected infrastructure outage. The missing capability is not more logs — it is stronger proof.
 
 Temporal Gradient proposes a different trust primitive: continuous computational work.
 
-In the Temporal Gradient model, mining is not only a way to generate randomness or secure token issuance. Mining also acts as a continuous cryptographic heartbeat. Every legitimate miner continuously performs CPU work, emits signed outputs, contributes to Merkle-rooted epochs, and anchors proofs to chain. Over time, that stream becomes a tamper-evident record of machine liveness, continuity, and identity.
+In the Temporal Gradient model, mining is not only a way to generate randomness or secure token issuance. Mining acts as a continuous cryptographic heartbeat. Every legitimate miner continuously performs CPU work, emits signed outputs, contributes to Merkle-rooted epochs, and anchors proofs to chain. Over time, that stream becomes a tamper-evident record of machine liveness, continuity, and identity.
+
+The system also harvests entropy from Bitcoin itself — capturing the proof-of-work embedded in orphaned and stale blocks that Bitcoin discards. This turns wasted computation from the most secure network on Earth into a scarce, high-quality entropy source anchored on-chain.
 
 This makes mining useful beyond incentives. It turns miners into sensors, witnesses, and trust anchors. A gap in work becomes a signal. A mismatch in identity becomes a signal. Large-scale silence across regions becomes a signal. The same infrastructure that secures randomness can become the basis for device attestation, passive intrusion detection, continuity assurance, and eventually a decentralized verified egress network.
 
@@ -244,7 +248,129 @@ Unlike ordinary monitoring systems, miners are economically rewarded to remain o
 
 ---
 
-## 7. Security Properties Provided Today
+## 7. Bitcoin Entropy Harvesting
+
+Temporal Gradient does not only generate entropy internally. It harvests entropy from Bitcoin — the most computationally secured network in existence.
+
+### 7.1 The insight: wasted proof-of-work
+
+Bitcoin occasionally produces stale blocks — valid blocks with real proof-of-work that lose the chain-tip race to a competing block at the same height. From Bitcoin's perspective, this work is "wasted." From Temporal Gradient's perspective, it is an exceptionally high-quality entropy source.
+
+Every stale block contains:
+
+- an unpredictable block hash (valid PoW, but not on the canonical chain),
+- a nonce that diverges from the canonical block,
+- a Merkle root over a different transaction set,
+- a timestamp that differs from the winner,
+- the outcome of a propagation race that is itself random.
+
+Stale blocks are rare (roughly 1–2 per day on Bitcoin mainnet), making them scarce. They cannot be manufactured — producing one requires real SHA-256 work at Bitcoin-level difficulty. And the divergence between the stale block and the canonical winner at the same height is fundamentally unpredictable.
+
+### 7.2 Stale block mining
+
+The miner includes a stale-block harvesting sidecar that:
+
+1. **Monitors Bitcoin chain tips** for forks and reorganizations by polling mempool and block explorer APIs.
+2. **Detects stale blocks** when a competing chain tip loses — the orphaned block becomes harvestable.
+3. **Extracts entropy from every field** of the 80-byte stale block header: version, previous block hash, Merkle root, timestamp, difficulty bits, and nonce. These are mixed through a domain-tagged SHA-256 to produce a 32-byte entropy digest.
+4. **Builds a StaleWorkProof** containing the raw header, block hash, canonical hash, reorg depth, leading zero count, entropy quality score, and submitter address.
+5. **Submits the proof on-chain** to a StaleBlockOracle contract, which verifies the header, confirms it differs from the canonical chain, and triggers a TGBT reward through the TokenomicsModule.
+
+### 7.3 Quality scoring
+
+Not all stale blocks carry equal entropy value. The system assigns a quality score (0–100) based on:
+
+- **Leading zero bits**: more PoW = higher quality. A stale block must meet a minimum of 32 leading zero bits (standard Bitcoin difficulty) to qualify.
+- **Reorg depth**: deeper reorganizations (where multiple blocks were orphaned) produce richer fork-divergence entropy.
+- **Timestamp divergence**: greater difference between the stale and canonical timestamps increases unpredictability.
+- **Header field divergence**: differing Merkle roots, nonces, and version fields each contribute additional entropy dimensions.
+
+### 7.4 Fork divergence entropy
+
+When a fork resolves, the system also extracts **fork divergence entropy** — the XOR of the stale block hash with the canonical block hash at the same height. This captures the pure randomness of the propagation race outcome: which miner's block reached enough of the network first.
+
+This three-layer entropy extraction (primary header entropy, secondary field-mix entropy, fork divergence entropy) makes stale blocks one of the highest-quality external entropy sources available to any on-chain system.
+
+### 7.5 Why this matters
+
+Most randomness systems rely entirely on internal computation or on-chain state. Temporal Gradient is, to our knowledge, the first system to systematically harvest the entropy embedded in Bitcoin's orphaned proof-of-work and anchor it to a separate chain.
+
+This means every miner is not only generating local entropy through CPU work — it is also acting as a bridge, importing Bitcoin-grade computational entropy into the Temporal Gradient beacon. The two entropy streams (internal mining and external Bitcoin harvesting) are independent, which makes the combined output strictly stronger than either source alone.
+
+---
+
+## 8. TGBT Tokenomics
+
+TGBT (Temporal Gradient Beacon Token) is the native ERC-20 token that incentivizes mining, rewards entropy contributions, and aligns economic behavior with network security.
+
+### 8.1 Supply structure
+
+| Parameter | Value |
+|---|---|
+| **Hard cap** | 2,000,000,000 TGBT |
+| **Mining allocation** | 700,000,000 TGBT (35%) |
+| **Stale block allocation** | 25,000,000 TGBT (1.25%) |
+| **Token standard** | ERC-20 (immutable, no proxy, no pause) |
+
+The token contract enforces the hard cap at the protocol level. No admin mint exists. Once the module set is finalized, governance permissions can be permanently locked — irreversible, Bitcoin-style ossification.
+
+### 8.2 Mining pools
+
+Mining rewards are distributed through discrete **mining pools**, each with:
+
+- a **target difficulty** that determines how hard a valid solution must be,
+- an **emission bucket** — the total TGBT allocated to that pool,
+- a **total mined** counter that tracks how much has been paid out,
+- an **active** flag.
+
+Pools are created by governance and are immutable after creation (no parameter changes — Bitcoin-style). When a pool's emission bucket is exhausted, miners must switch to another pool or await new pool creation.
+
+At genesis, Pool 0 is created with the initial difficulty and emission. Additional pools (e.g., Pool 3, the current canonical mining pool) can target different difficulty levels and emission sizes, allowing the system to segment miners by capability.
+
+### 8.3 Emission schedule and halving
+
+Block rewards follow a **deterministic, block-number-anchored emission schedule**:
+
+- Rewards are set at initialization (e.g., a base reward per accepted solution).
+- After a fixed **halving interval** (measured in L2 blocks), the reward reduces by 35% (multiplied by 65/100).
+- Halvings repeat until the reward reaches a protocol minimum floor (1e-12 TGBT), after which it remains constant.
+- The halving interval supports up to ~5 years on Arbitrum (~630M blocks at 0.25s block time).
+
+The emission is fully deterministic from the initialization block — no governance intervention, no manual adjustment.
+
+### 8.4 Bonus rewards
+
+Solutions that significantly exceed the pool's target difficulty receive a bonus:
+
+- If a solution's effective difficulty exceeds `bonusThreshold × targetDifficulty`, the reward is multiplied by `bonusMultiplier / 100` (default: 125%, i.e., a 25% bonus).
+- This rewards miners who find exceptionally strong solutions, incentivizing honest high-throughput work.
+
+### 8.5 Stale block rewards
+
+The stale-block allocation (25M TGBT) is a separate budget managed by the TokenomicsModule. When a miner submits a valid StaleWorkProof, the StaleBlockOracle requests a reward from the TokenomicsModule, which mints TGBT from the stale allocation — capped by both the stale budget and the global supply cap.
+
+### 8.6 Commit-reveal mining
+
+Mining uses a two-phase **commit-reveal** scheme to prevent front-running:
+
+1. **Commit**: the miner submits a hash commitment (binding the solution, pool, nonce, and deadline) with an EIP-712 signature. The commitment is locked on-chain.
+2. **Maturation**: the commitment must age at least `minCommitmentAge` blocks (currently 2) before it can be revealed. This prevents same-block front-running.
+3. **Reveal**: the miner reveals the full solution (previous output, temporal seed, nonce, signature, secret value). The contract verifies the commitment hash matches, checks difficulty, and if valid, triggers the TokenomicsModule to mint the reward.
+
+Commitments expire after `maxCommitmentAge` blocks (currently 500). A `minBlockInterval` cooldown (currently 1 block) prevents rapid sequential submissions.
+
+### 8.7 Economic alignment
+
+The tokenomics structure aligns miner incentives with network goals:
+
+- **Uptime is rewarded**: miners must be continuously running to find solutions and submit before commitments expire.
+- **Difficulty is self-selecting**: pools with harder targets attract stronger miners; pools with easier targets allow broader participation.
+- **Stale harvesting is separately funded**: Bitcoin entropy collection does not compete with regular mining rewards.
+- **No hold requirement**: genesis miners can mine with zero TGBT balance, removing the bootstrap problem.
+
+---
+
+## 9. Security Properties Provided Today
 
 The current architecture already provides real security value.
 
@@ -289,7 +415,7 @@ A miner can see:
 
 ---
 
-## 8. Security Properties Not Yet Fully Implemented
+## 10. Security Properties Not Yet Fully Implemented
 
 Temporal Gradient is not yet a complete replacement for traditional network security or privacy tooling.
 
@@ -320,7 +446,7 @@ These capabilities are future layers built on top of the current trust foundatio
 
 ---
 
-## 9. Zero-Trust Device Attestation
+## 11. Zero-Trust Device Attestation
 
 Traditional zero-trust trusts a certificate.
 
@@ -345,7 +471,7 @@ Potential institutional use cases include:
 
 ---
 
-## 10. Passive Intrusion Detection
+## 12. Passive Intrusion Detection
 
 The system does not need to inspect payloads to be useful.
 
@@ -363,7 +489,7 @@ This creates a passive intrusion and disruption detection surface that is orthog
 
 ---
 
-## 11. National and Regional Continuity Sensing
+## 13. National and Regional Continuity Sensing
 
 As node count grows, the network becomes a distributed continuity map.
 
@@ -389,7 +515,7 @@ A dense and diverse miner network can become a passive sensor grid without centr
 
 ---
 
-## 12. Verified Egress and Peer-to-Peer Relay Networks
+## 14. Verified Egress and Peer-to-Peer Relay Networks
 
 A future extension of Temporal Gradient is a verified egress network built on top of the existing miner mesh.
 
@@ -409,58 +535,25 @@ Temporal Gradient relay nodes **cannot fake liveness**. The heartbeat chain and 
 
 The current system already exposes a relay-readiness profile per miner. The forwarding plane itself is the next major development phase.
 
-### 12.1 Core transport layer
+### 14.1 Planned capabilities
 
-The relay foundation consists of:
+The relay mesh is designed to support multiple capability layers, each building on the trust foundation of attested miners:
 
-- **Encrypted tunnel transport.** End-to-end encrypted circuits between miners with Double Ratchet key rotation. Each session is bound to the miner's on-chain identity.
-- **Packet forwarding plane.** Raw TCP/UDP relay through the miner mesh. Multi-hop onion routing where every hop is a cryptographically attested healthy node.
-- **Peer discovery and signed node directory.** On-chain registry of relay-ready miners with region, operator address, capability set, intrusion score, and current relay profile. Clients discover relays by querying the contract or a cached DHT.
-- **Relay admission control.** Only miners whose relay-readiness profile meets threshold criteria (uptime, intrusion score, heartbeat freshness) are admitted to the forwarding plane. Unhealthy nodes are automatically excluded.
+**Core transport**: encrypted tunnel transport with Double Ratchet key rotation, multi-hop onion-routed packet forwarding, peer discovery via on-chain signed node directory, relay admission control based on intrusion score and uptime thresholds.
 
-### 12.2 Privacy and communication
+**Privacy and communication**: end-to-end encrypted private messaging, mixnet batching using natural heartbeat cadence windows, whistleblower dead drops with Merkle-proven integrity, censorship-resistant publishing and data pinning.
 
-The relay mesh enables privacy-preserving communication primitives:
+**Financial services**: private transaction relay (IP-unlinkable tx submission), MEV-protected order flow through attested multi-hop paths, cross-chain atomic swap negotiation, entropy-as-a-service marketplace with TGBT payment channels.
 
-- **Private messaging.** End-to-end encrypted messages routed through the miner mesh. No central server. Miners earn TGBT for bandwidth. Cover traffic makes traffic analysis resistant.
-- **Mixnet batching.** Miners batch, delay, and reorder packets before forwarding. The heartbeat cadence creates natural batching windows. Cover traffic (already modeled in the relay profile) further obscures patterns.
-- **Whistleblower dead drops.** One-way anonymous message submission through multi-hop relay. The receiver can prove message integrity via Merkle proof. The sender is untraceable because every hop is a different attested miner.
-- **Censorship-resistant publishing.** Critical messages, governance proposals, or emergency keys can be pinned across the relay mesh with redundancy. Every storage node is health-attested.
+**Infrastructure**: decentralized VPN (dVPN) verified egress, RPC load balancing and failover mesh, oracle data relay (building on the existing Bitcoin header fetching), decentralized CDN and edge caching, decentralized DNS resolution via DHT.
 
-### 12.3 Financial and DeFi applications
+**Security and monitoring**: passive threat sensing grid (distributed IDS), canary network with on-chain alerting, decentralized key escrow with Shamir secret shares, proof-of-presence attestation for compliance and SLA enforcement.
 
-The combination of verified relay transport and on-chain randomness opens financial use cases:
+**Compute and coordination**: verifiable computation relay (VDF, ZK delegation), MPC transport with per-hop integrity attestation, consensus gossip layer for future L3/appchain.
 
-- **Private transaction relay.** Forward signed transactions to different RPC endpoints through the miner mesh, breaking the link between sender IP and transaction origin. Decentralized Flashbots Protect through health-attested nodes.
-- **MEV-protected order flow.** Transactions routed through multi-hop relay before reaching the mempool. Each relay hop is attested — if a relay node front-runs a transaction, its intrusion score spikes and it loses relay admission.
-- **Cross-chain atomic swap negotiation.** The relay carries swap negotiation messages between chains. The randomness beacon provides shared random seeds for fair ordering. Both parties can verify relay node integrity before committing.
-- **Entropy-as-a-service marketplace.** Miners sell randomness outputs directly to consumers through the relay with TGBT payment channels. No API middleman.
+*A detailed technical specification for Phase 4 relay capabilities will be published separately.*
 
-### 12.4 Infrastructure services
-
-The relay mesh can serve as decentralized infrastructure:
-
-- **Decentralized VPN (dVPN).** Verified egress where every exit node is continuously proving liveness, health, and identity. Users select routes based on intrusion score, region, and latency.
-- **RPC load balancing and failover.** Clients connect to the relay mesh instead of a single RPC endpoint. The mesh routes to the healthiest, lowest-latency miners who proxy the calls.
-- **Oracle data relay.** Miners relay off-chain data — prices, events, block headers from other chains — through the mesh. The stale-block mining infrastructure already fetches Bitcoin block headers; this extends naturally to arbitrary oracle feeds.
-- **Decentralized CDN and edge cache.** Frequently requested randomness proofs, Merkle roots, and epoch data are cached at relay nodes closest to the consumer. Miners earn TGBT for cache hits.
-- **Decentralized DNS resolution.** Relay nodes resolve names through distributed hash tables. Liveness-proven nodes prevent DNS poisoning attacks.
-
-### 12.5 Security and monitoring services
-
-- **Passive threat sensing grid.** Miners detect anomalies (network scans, DDoS patterns, BGP hijacks) and report through the relay. A global intrusion detection network where every sensor is identity-bound and on-chain attested.
-- **Canary network.** Relay nodes that go silent or whose intrusion score spikes serve as automatic canaries for infrastructure problems. Smart contracts can trigger alerts when relay liveness drops below a threshold.
-- **Decentralized key escrow and recovery.** Shamir secret shares distributed across health-attested relay nodes. Recovery requires a threshold of nodes that are all provably alive and untampered.
-- **Proof-of-presence attestation service.** Third parties can verify that a device was online, healthy, and reachable at a specific time through the relay heartbeat chain. Useful for compliance, insurance, and SLA enforcement.
-
-### 12.6 Compute and coordination
-
-- **Verifiable computation relay.** Small compute tasks (VDF computation, ZK proof generation) are delegated through the mesh with results relayed back. Health attestation ensures the compute node was not tampered with.
-- **Multi-party computation (MPC) transport.** MPC protocols require secure channels between participants. The relay provides those channels with continuous integrity attestation on every hop.
-- **Decentralized lottery and fair selection.** On-chain randomness combined with relay transport enables provably fair selection protocols where the relay itself cannot bias the outcome.
-- **Consensus messaging layer.** If a custom L3 or appchain is built on top of Temporal Gradient, the relay mesh is a natural gossip layer for block propagation with built-in Sybil resistance through staked and attested miners.
-
-### 12.7 The structural differentiator
+### 14.2 The structural differentiator
 
 Every capability above exists in isolation in other projects. What makes Temporal Gradient relay unique is the trust foundation beneath it:
 
@@ -470,7 +563,7 @@ No other relay network, VPN, mixnet, or mesh has this property. Tor nodes can be
 
 ---
 
-## 13. Institutional Value Proposition
+## 15. Institutional Value Proposition
 
 For institutions, the missing capability is not more logs. It is stronger proof.
 
@@ -500,34 +593,22 @@ That is valuable to:
 
 ---
 
-## 14. Economic Model
-
-The mining layer is important not only for security signal generation, but also for sustainability.
-
-Mining incentives encourage:
-
-- uptime,
-- participation,
-- geographic spread,
-- continuity,
-- long-lived node behavior.
-
-This matters because most security telemetry systems are cost centers. Temporal Gradient can become partially self-funding through mining economics.
-
-That gives it a structural advantage over purely centralized monitoring architectures.
-
----
-
-## 15. Current Implementation Status
+## 16. Current Implementation Status
 
 The current system includes:
 
-- miner runtime with live telemetry,
+- miner runtime with live telemetry and commit-reveal mining,
+- deterministic block-anchored tokenomics with halving and bonus rewards,
+- multi-pool mining with governance-created immutable pools,
+- Bitcoin stale-block entropy harvesting sidecar,
+- on-chain StaleBlockOracle with separate reward allocation,
 - solution batching into Merkle epochs,
 - randomness API,
 - proof inspection,
 - signed latest randomness outputs,
+- EIP-712 commitment signatures with replay protection,
 - on-chain epoch anchoring and finalization,
+- TGBT token with immutable hard cap and permission ossification,
 - storage verification and on-chain attestation recording,
 - heartbeat sidecar for personal threat monitoring,
 - dashboard support for threat posture and verified egress readiness.
@@ -552,15 +633,20 @@ However, the following remain roadmap items:
 
 ---
 
-## 16. Roadmap
+## 17. Roadmap
 
-### Phase 1 — Mining-backed trust foundation
+### Phase 1 — Mining-backed trust foundation *(current)*
 
-- stabilize miner telemetry,
-- signed output identity binding,
-- Merkle epochs and proofs,
-- threat dashboard,
-- storage attestation.
+- commit-reveal mining with EIP-712 replay protection,
+- deterministic tokenomics with halving and bonus rewards (TGBT),
+- multi-pool mining with governance-created immutable pools,
+- Bitcoin stale-block entropy harvesting sidecar,
+- on-chain StaleBlockOracle with dedicated reward allocation,
+- Merkle epochs, proofs, and on-chain anchoring,
+- randomness API and signed output identity binding,
+- storage verification and on-chain attestation,
+- heartbeat sidecar and threat dashboard,
+- TGBT token with immutable hard cap and permission ossification.
 
 ### Phase 2 — Institutional continuity product
 
@@ -620,7 +706,7 @@ However, the following remain roadmap items:
 
 ---
 
-## 17. Conclusion
+## 18. Conclusion
 
 Temporal Gradient begins as a mining system, but mining is only the surface.
 

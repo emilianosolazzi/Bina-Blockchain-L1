@@ -14,7 +14,6 @@ use ethers::{
 };
 use reqwest::header;
 use rand::{rngs::OsRng, RngCore};
-use serde_json::Value;
 use std::{fs, path::Path, sync::Arc, time::Duration};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -269,6 +268,33 @@ impl LiveMiningClient {
         Ok(true)
     }
 
+    /// Wait briefly for RPC/indexer state to reflect the commitment we just
+    /// submitted. Some providers can temporarily return the previous
+    /// commitment immediately after a successful receipt.
+    async fn wait_for_matching_onchain_commitment(
+        &self,
+        expected_hash: [u8; 32],
+    ) -> Result<Option<OnChainCommitment>> {
+        for attempt in 0..8u8 {
+            if let Some(onchain) = self.get_onchain_commitment().await? {
+                if onchain.commit_hash == expected_hash {
+                    return Ok(Some(onchain));
+                }
+
+                tracing::warn!(
+                    "On-chain commitment hash mismatch right after commit (attempt {}/8): expected={}, got={}",
+                    attempt + 1,
+                    hex::encode(expected_hash),
+                    hex::encode(onchain.commit_hash),
+                );
+            }
+
+            tokio::time::sleep(Duration::from_millis(600)).await;
+        }
+
+        Ok(None)
+    }
+
     pub async fn connect(config: &MinerConfig) -> Result<Option<Self>> {
         if !config.has_live_target() {
             return Ok(None);
@@ -309,7 +335,7 @@ impl LiveMiningClient {
             client,
             contract_address,
             pool_id: config.pool_id,
-            block_time_millis: config.block_time_millis.max(1_000),
+            block_time_millis: config.block_time_millis.max(100),
             gas_price_multiplier: config.gas_price_multiplier,
         }))
     }
@@ -318,8 +344,11 @@ impl LiveMiningClient {
         self.client.address()
     }
 
+    /// Returns the block-number domain used by contract state timestamps.
+    /// On this network, contracts expose timestamps aligned with `l1BlockNumber`
+    /// in the RPC payload; fall back to canonical block number when absent.
     async fn current_contract_block_number(&self) -> Result<u64> {
-        let latest: Value = retry_with_backoff("current_contract_block_number", 5, || {
+        let latest: serde_json::Value = retry_with_backoff("current_contract_block_number", 5, || {
             let provider = Arc::clone(&self.provider);
             async move {
                 provider
@@ -330,7 +359,7 @@ impl LiveMiningClient {
         })
         .await?;
 
-        if let Some(l1_block_hex) = latest.get("l1BlockNumber").and_then(Value::as_str) {
+        if let Some(l1_block_hex) = latest.get("l1BlockNumber").and_then(serde_json::Value::as_str) {
             return u64::from_str_radix(l1_block_hex.trim_start_matches("0x"), 16)
                 .with_context(|| format!("Invalid l1BlockNumber value {l1_block_hex}"));
         }
@@ -487,14 +516,35 @@ impl LiveMiningClient {
         };
         let commit_receipt = pending_commit.await?;
 
-        // Update pending file with the actual commit block. If the RPC loses
-        // the receipt but the commitment did reach the chain, recover it from
-        // the miner's on-chain commitment instead of treating it as a failure.
-        let commit_block = if let Some(receipt) = commit_receipt {
-            receipt
-                .block_number
-                .map(|block| block.as_u64())
-                .unwrap_or(self.current_contract_block_number().await?)
+        // Read the authoritative commit block from the on-chain commitment.
+        // CRITICAL: receipt.block_number is an L2 sequence number on Arbitrum,
+        // but the contract stores `block.number` which maps to L1 on this
+        // network — different domains.  Always use the contract as the source
+        // of truth to avoid the L2/L1 block-number mismatch that produces
+        // astronomically wrong ETAs.
+        let commit_block = if commit_receipt.is_some() {
+            if let Some(c) = self
+                .wait_for_matching_onchain_commitment(submission.commitment.commit_hash)
+                .await?
+            {
+                c.commit_block
+            } else {
+                match self.get_onchain_commitment().await? {
+                    Some(c) => {
+                        tracing::warn!(
+                            "Commitment TX confirmed but matching on-chain hash not yet visible; using currently visible commit_block {}",
+                            c.commit_block
+                        );
+                        c.commit_block
+                    }
+                    None => {
+                        // Commitment TX confirmed but nothing readable on-chain;
+                        // fall back to the contract block domain as best effort.
+                        tracing::warn!("Commitment TX confirmed but get_onchain_commitment returned None — using current_contract_block_number");
+                        self.current_contract_block_number().await?
+                    }
+                }
+            }
         } else if self.recover_pending_commit_block(&mut pending, key_path).await? {
             pending.commit_block
         } else {
@@ -545,6 +595,58 @@ impl LiveMiningClient {
                 );
                 crate::pending::clear(key_path)?;
                 return Ok(None);
+            }
+        }
+
+        // Sync commit_block from the on-chain commitment to correct any L2/L1
+        // domain mismatch from previous saves where receipt.block_number (L2)
+        // was stored instead of the contract's block.number (L1).
+        match self.get_onchain_commitment().await? {
+            Some(onchain) if onchain.commit_hash == pending.commit_hash => {
+                if onchain.commit_block != pending.commit_block {
+                    tracing::warn!(
+                        "Correcting saved commit_block {} → {} (on-chain authoritative)",
+                        pending.commit_block, onchain.commit_block
+                    );
+                    pending.commit_block = onchain.commit_block;
+                    crate::pending::save(key_path, &pending)?;
+                }
+            }
+            Some(onchain) => {
+                // This can happen transiently on eventually-consistent RPCs
+                // right after a commit. Do NOT clear pending state here.
+                tracing::warn!(
+                    "No matching on-chain commitment for saved pending (commit_block {}) — keeping pending and retrying later (expected={}, on-chain={})",
+                    pending.commit_block,
+                    hex::encode(pending.commit_hash),
+                    hex::encode(onchain.commit_hash),
+                );
+                return Err(anyhow!(
+                    "Pending reveal hash mismatch (transient RPC race or stale state); will retry"
+                ));
+            }
+            None => {
+                // If commitment has definitely expired, clear it; otherwise keep
+                // pending and retry next cycle.
+                let contract = MiningContract::new(self.contract_address, Arc::clone(&self.client));
+                let max_age = contract.max_commitment_age().call().await?.as_u64();
+                let current_block = self.current_contract_block_number().await?;
+                let expires_at = pending.commit_block.saturating_add(max_age);
+                if pending.commit_block != 0 && current_block > expires_at {
+                    tracing::warn!(
+                        "No matching on-chain commitment and pending is expired (current {current_block} > {expires_at}) — discarding"
+                    );
+                    crate::pending::clear(key_path)?;
+                    return Ok(None);
+                }
+
+                tracing::warn!(
+                    "No on-chain commitment visible yet for pending commit_block {} — keeping pending and retrying later",
+                    pending.commit_block
+                );
+                return Err(anyhow!(
+                    "Pending reveal commitment not yet visible on-chain; will retry"
+                ));
             }
         }
 
@@ -639,10 +741,24 @@ impl LiveMiningClient {
                 .into(),
             submission.commitment.pool_id,
         );
-        let reveal_gas = reveal_tx
-            .estimate_gas()
-            .await
-            .context("Failed to estimate reveal gas")?;
+        let reveal_gas = loop {
+            match reveal_tx.estimate_gas().await {
+                Ok(gas) => break gas,
+                Err(err) => {
+                    let msg = format!("{err:#}");
+                    // 0xc1116db5 == CommitmentTooRecent()
+                    let too_recent = msg.contains("0xc1116db5") || msg.contains("CommitmentTooRecent");
+                    if too_recent {
+                        tracing::warn!(
+                            "Reveal gas estimation hit CommitmentTooRecent — waiting briefly and retrying"
+                        );
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                        continue;
+                    }
+                    return Err(err).context("Failed to estimate reveal gas");
+                }
+            }
+        };
         let reveal_tx = reveal_tx
             .legacy()
             .gas(apply_gas_buffer(reveal_gas))
@@ -853,6 +969,7 @@ impl LiveMiningClient {
     }
 
     fn block_sleep_duration(&self) -> Duration {
+        // Sleep at least 1 s to avoid hammering the RPC, even on fast L2s
         Duration::from_millis(self.block_time_millis.max(1_000))
     }
 

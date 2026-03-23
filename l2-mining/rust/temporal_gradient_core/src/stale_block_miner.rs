@@ -704,12 +704,52 @@ pub struct LoserChainStats {
 // StaleBlockMiner — main orchestrator
 // ─────────────────────────────────────────────────────────────────
 
+/// Real-time mempool fee and congestion snapshot from the NativeBTC API.
+/// Used to prioritize which stale block proofs to submit.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MempoolStats {
+    /// Number of unconfirmed transactions currently in the mempool.
+    pub mempool_size: u64,
+    /// Total virtual bytes of unconfirmed transactions.
+    pub mempool_vbytes: u64,
+    /// Fastest fee estimate (sat/vB).
+    pub fastest_fee: u64,
+    /// Half-hour fee estimate (sat/vB).
+    pub half_hour_fee: u64,
+    /// Hour fee estimate (sat/vB).
+    pub hour_fee: u64,
+    /// Economy fee estimate (sat/vB).
+    pub economy_fee: u64,
+    /// Minimum fee estimate (sat/vB).
+    pub minimum_fee: u64,
+    /// Timestamp when this snapshot was captured.
+    pub captured_at: u64,
+}
+
+impl MempoolStats {
+    /// Congestion ratio: how "full" the mempool looks based on fee pressure.
+    /// Returns 0.0–1.0 where 1.0 means extreme congestion.
+    pub fn congestion_ratio(&self) -> f64 {
+        if self.fastest_fee == 0 {
+            return 0.0;
+        }
+        // When economy fee is close to fastest fee, congestion is low.
+        // When fastest >> economy, congestion is high.
+        let ratio = self.fastest_fee as f64 / self.economy_fee.max(1) as f64;
+        ((ratio - 1.0) / 9.0).clamp(0.0, 1.0) // 1x → 0.0, 10x+ → 1.0
+    }
+}
+
 /// Configuration for the stale block miner.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StaleBlockMinerConfig {
-    /// Bitcoin RPC or API endpoint (e.g. mempool.space).
+    /// Bitcoin RPC or API endpoint (e.g. "https://api.nativebtc.org").
     pub bitcoin_api_url: String,
+    /// API key for authenticated endpoints (appended as `?key=...`).
+    #[serde(default)]
+    pub api_key: Option<String>,
     /// How often to poll for new chain tips (seconds).
+    /// Used as the fallback interval when the WebSocket stream is unavailable.
     pub poll_interval_secs: u64,
     /// Minimum PoW leading zeros required.
     pub min_leading_zeros: u32,
@@ -724,7 +764,8 @@ pub struct StaleBlockMinerConfig {
 impl Default for StaleBlockMinerConfig {
     fn default() -> Self {
         Self {
-            bitcoin_api_url: "https://mempool.space/api".to_string(),
+            bitcoin_api_url: "https://api.nativebtc.org".to_string(),
+            api_key: None,
             poll_interval_secs: 30,
             min_leading_zeros: MIN_LEADING_ZEROS,
             max_stale_age_secs: MAX_STALE_AGE_SECS,

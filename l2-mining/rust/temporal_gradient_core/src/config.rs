@@ -16,9 +16,14 @@ pub struct StaleBlockConfig {
     /// Master switch — must be `true` to activate stale-block mining.
     #[serde(default)]
     pub enabled: bool,
-    /// Bitcoin RPC or API endpoint (e.g. "https://mempool.space/api").
+    /// Bitcoin RPC or API endpoint (e.g. "https://api.nativebtc.org").
     pub bitcoin_api_url: String,
+    /// API key for authenticated endpoints. Appended as `?key=...` for
+    /// REST calls and used in the WebSocket URL.
+    #[serde(default)]
+    pub api_key: Option<String>,
     /// How often to poll for new chain tips (seconds). Minimum 10.
+    /// Used as the fallback interval when the WebSocket stream is unavailable.
     #[serde(default = "default_poll_interval")]
     pub poll_interval_secs: u64,
     /// Minimum PoW leading zeros required for a stale header. Default 11.
@@ -63,6 +68,7 @@ impl StaleBlockConfig {
     pub fn to_miner_config(&self) -> crate::stale_block_miner::StaleBlockMinerConfig {
         crate::stale_block_miner::StaleBlockMinerConfig {
             bitcoin_api_url: self.bitcoin_api_url.clone(),
+            api_key: self.api_key.clone(),
             poll_interval_secs: self.poll_interval_secs,
             min_leading_zeros: self.min_leading_zeros,
             max_stale_age_secs: self.max_stale_age_secs,
