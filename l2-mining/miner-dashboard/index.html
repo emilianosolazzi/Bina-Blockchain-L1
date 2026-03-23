@@ -1287,23 +1287,25 @@
     <!-- ── Persistent Solutions Table ── -->
     <section class="grid" style="margin-top:16px;">
       <div class="panel solutions-panel">
-        <div class="solutions-header">
-          <div style="display:flex;align-items:center;gap:14px;">
-            <h3 title="Every accepted solution becomes a leaf in the epoch Merkle tree. Consumers use these to verify randomness on-chain.">Solution Storage</h3>
-            <div class="sol-storage-badge" id="storageBadge"><span class="dot"></span><span id="storageLabel">File</span></div>
-          </div>
-          <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;">
-            <div class="solutions-filters">
-              <div class="sol-filter active" data-scope="session">Current session</div>
-              <div class="sol-filter" data-scope="all">All history</div>
+        <details open id="solutionStorageDetails">
+          <summary class="solutions-header" style="cursor:pointer;list-style:none;">
+            <div style="display:flex;align-items:center;gap:14px;">
+              <h3 style="display:inline;" title="Every accepted solution becomes a leaf in the epoch Merkle tree. Consumers use these to verify randomness on-chain.">Solution Storage</h3>
+              <span style="font-size:10px;color:var(--muted);">▸ click to hide/show</span>
+              <div class="sol-storage-badge" id="storageBadge" title="Where solutions are stored. FILE = local telemetry.jsonl on disk (default). No database needed — Redis and PostgreSQL are background services for caching and state, not for solution storage."><span class="dot"></span><span id="storageLabel">File</span></div>
             </div>
-            <div class="solutions-filters">
-            <div class="sol-filter active" data-filter="all">All</div>
-            <div class="sol-filter" data-filter="accepted">Accepted</div>
-            <div class="sol-filter" data-filter="rejected">Failed</div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;" onclick="event.stopPropagation()">
+              <div class="solutions-filters">
+                <div class="sol-filter active" data-scope="session">Current session</div>
+                <div class="sol-filter" data-scope="all">All history</div>
+              </div>
+              <div class="solutions-filters">
+              <div class="sol-filter active" data-filter="all">All</div>
+              <div class="sol-filter" data-filter="accepted">Accepted</div>
+              <div class="sol-filter" data-filter="rejected">Failed</div>
+              </div>
             </div>
-          </div>
-        </div>
+          </summary>
         <div style="overflow-x:auto;">
           <table class="sol-table">
             <thead>
@@ -1331,6 +1333,7 @@
             <button id="solNext" style="padding:4px 14px;border-radius:8px;background:var(--panel-2);border:1px solid var(--border);color:var(--muted);cursor:pointer;">Next →</button>
           </div>
         </div>
+        </details>
       </div>
     </section>
 
@@ -1426,8 +1429,8 @@
               <div class="status-item"><span>Dashboard</span><span class="badge ok">Online</span></div>
               <div class="status-item"><span>Randomness API</span><span id="randomnessApiBadge" class="badge">Checking…</span></div>
               <div class="status-item"><span>Heartbeat sidecar</span><span id="heartbeatApiBadge" class="badge">Checking…</span></div>
-              <div class="status-item"><span>Telemetry source</span><span id="telemetryPath" class="mono">—</span></div>
-              <div class="status-item"><span>Solution backend</span><span id="solutionBackend">—</span></div>
+              <div class="status-item"><span title="Where telemetry data is read from. This is the file the Rust miner writes solution data to.">Telemetry source</span><span id="telemetryPath" class="mono">—</span></div>
+              <div class="status-item"><span title="How solutions are stored: 'file' = local JSON lines on disk (default, no database needed). Redis and PostgreSQL run in the background for API caching and epoch state — you don't need to manage them.">Solution backend</span><span id="solutionBackend">—</span></div>
             </div>
           </div>
           <div class="status-card">
