@@ -901,6 +901,20 @@
       .settings-control { gap: 10px; }
       .utxo-scan-summary { gap: 10px; }
     }
+
+    /* ── Quality score in solutions ── */
+    .sol-table th[title] { cursor: help; }
+
+    /* ── Section collapse toggle ── */
+    .section-toggle { cursor: pointer; user-select: none; }
+    .section-toggle::before { content: '▼ '; font-size: 10px; color: var(--muted); transition: transform .2s; }
+    .section-toggle.collapsed::before { content: '▶ '; }
+    .section-toggle.collapsed + *, .section-toggle.collapsed ~ .system-grid,
+    .section-toggle.collapsed ~ .stack, .section-toggle.collapsed ~ div:not(.solutions-header) { display: none; }
+
+    /* ── Info tooltip style ── */
+    .label [style*="cursor:help"] { opacity: 0.6; transition: opacity .15s; }
+    .label:hover [style*="cursor:help"] { opacity: 1; }
   </style>
 </head>
 <body>
@@ -910,6 +924,7 @@
         <div>
           <h1>Temporal Gradient Miner <span class="tgbt-badge">TGBT</span></h1>
           <p class="sub">Real-time local dashboard — continuous mining mode</p>
+          <p class="helper" style="max-width:740px;margin:8px 0 0;line-height:1.5;font-size:12px;">This miner generates <strong>verifiable on-chain randomness</strong> on Arbitrum L2 — a decentralized alternative to Chainlink VRF. Instead of paying a centralized oracle for random numbers, any smart contract can call <code style="font-size:11px;">verifyRandomnessLeaf()</code> to consume provably fair randomness produced by this mining network. Miners earn <strong>TGBT tokens</strong> for every accepted solution.</p>
         </div>
         <div class="status-row">
           <div class="pill"><span class="live-dot" id="liveDot"></span>Connection: <strong id="conn">Connecting…</strong></div>
@@ -997,7 +1012,10 @@
       <!-- ── Chart panel ── -->
       <div class="panel left">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
-          <h3 style="margin:0;color:var(--text);font-size:18px;">History</h3>
+          <div style="display:flex;align-items:center;gap:10px;">
+            <h3 style="margin:0;color:var(--text);font-size:18px;">History</h3>
+            <span class="helper" id="historyCount" style="font-size:11px;">—</span>
+          </div>
           <div class="chart-tabs">
             <div class="chart-tab active" data-chart="hashrate">Hashrate</div>
             <div class="chart-tab" data-chart="rewards">TGBT Rewards</div>
@@ -1018,10 +1036,12 @@
           <div class="label">TGBT earned</div><div class="gold" id="rewardDetail">—</div>
         </div>
           <h3 style="color:var(--text);font-size:16px;margin:20px 0 10px;">Hash details</h3>
+          <p class="helper" style="margin:0 0 10px;">These three hashes represent the commit-reveal mining cycle. Hover each label for more detail.</p>
           <div class="kv" style="grid-template-columns:100px 1fr;row-gap:10px;">
-            <div class="label">Candidate</div><div class="hash" id="lastHash">—</div>
-            <div class="label">Commit</div><div class="hash" id="lastCommitHash">—</div>
-            <div class="label">Output</div><div class="hash" id="lastOutputHash">—</div>
+            <div class="label" title="The raw SHA-256 hash of your nonce attempt. This is the candidate solution before it's committed on-chain.">Candidate <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></div><div class="hash" id="lastHash">—</div>
+            <div class="label" title="The keccak256 commitment hash submitted on-chain. This locks your solution without revealing it, preventing front-running by other miners.">Commit <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></div><div class="hash" id="lastCommitHash">—</div>
+            <div class="label" title="The final revealed output hash recorded on-chain. This becomes a leaf in the epoch Merkle tree and contributes to the randomness beacon.">Output <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></div><div class="hash" id="lastOutputHash">—</div>
+            <div class="label">Quality</div><div id="snapshotQuality">—</div>
           </div>
 
         <h3 style="color:var(--gold);font-size:16px;margin:20px 0 10px;">Reward log</h3>
@@ -1044,7 +1064,19 @@
             <button class="action-btn" id="refreshEntropy">Refresh sources</button>
           </div>
         </div>
-        <p class="helper" style="margin:4px 0 16px;">Three independent entropy streams are harvested and mixed into every beacon output. Currently only <strong>PoW Mining</strong> mints TGBT on Arbitrum L2 (via MiningModule → TokenomicsModule). Stale Block rewards are calculated on-chain but <em>claimReward()</em> does not yet mint. UTXO anchoring contributes entropy only.</p>
+        <p class="helper" style="margin:4px 0 8px;">Three independent entropy streams are harvested and mixed into every beacon output. Currently only <strong>PoW Mining</strong> mints TGBT on Arbitrum L2 (via MiningModule → TokenomicsModule). Stale Block rewards are calculated on-chain but <em>claimReward()</em> does not yet mint. UTXO anchoring contributes entropy only.</p>
+        <details style="margin:0 0 16px;font-size:12px;color:var(--muted);">
+          <summary style="cursor:pointer;color:var(--accent);font-weight:600;">Why three entropy sources?</summary>
+          <div style="margin:8px 0 0 12px;line-height:1.6;">
+            <p style="margin:4px 0;">Unlike Chainlink VRF (which relies on a single oracle's secret key), this beacon mixes <strong>three independent physical entropy sources</strong> to make the randomness impossible to predict or manipulate:</p>
+            <ul style="margin:4px 0;padding-left:20px;">
+              <li><strong>PoW Mining:</strong> CPU-intensive hash search — the nonce solution is inherently unpredictable</li>
+              <li><strong>Dead UTXO Anchoring:</strong> Uses spent Bitcoin transaction outputs as entropy seeds — tied to real-world Bitcoin finality</li>
+              <li><strong>Stale Block Mining:</strong> Harvests orphaned Bitcoin blocks — fork events that are physically impossible to predict</li>
+            </ul>
+            <p style="margin:4px 0;">The three streams are XOR-mixed with multiple rounds, producing randomness that is <em>at least as strong as the strongest individual source</em>.</p>
+          </div>
+        </details>
 
         <!-- ── Node Operator Controls ── -->
         <div class="settings-control">
@@ -1069,13 +1101,15 @@
               <h3 class="source-title" style="color:var(--accent);">⛏️ PoW Mining</h3>
               <span class="badge ok" id="powStatus">Active</span>
             </div>
+            <div class="helper" style="font-size:11px;line-height:1.5;margin:0 0 8px;color:var(--muted);">Your CPU crunches random numbers until it finds one that meets the difficulty target — like rolling dice until you get a specific combination. This is the <strong style="color:var(--accent);">only source that earns TGBT tokens on-chain today</strong>.</div>
             <div class="source-metrics">
-              <div class="source-metric-row"><span>Hashrate</span><span class="val" id="epHashrate">—</span></div>
-              <div class="source-metric-row"><span>Nonces checked</span><span class="val" id="epNonces">—</span></div>
-              <div class="source-metric-row"><span>Solutions found</span><span class="val" id="epSolutions">—</span></div>
-              <div class="source-metric-row"><span>Commit-reveal</span><span class="val" id="epCommitReveal">—</span></div>
-              <div class="source-metric-row"><span>Difficulty bits</span><span class="val" id="epDifficulty">—</span></div>
+              <div class="source-metric-row"><span title="How many hash computations your CPU does per second. Higher = more attempts = more chances to find a valid solution.">Hashrate <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span class="val" id="epHashrate">—</span></div>
+              <div class="source-metric-row"><span title="Total number of random numbers tried so far. Each nonce is a unique guess at finding a valid solution.">Nonces checked <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span class="val" id="epNonces">—</span></div>
+              <div class="source-metric-row"><span title="How many nonces passed the difficulty test and became valid random outputs. These get committed to the blockchain.">Solutions found <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span class="val" id="epSolutions">—</span></div>
+              <div class="source-metric-row"><span title="The commit-reveal stage: first you commit a hidden hash, then reveal the solution. This prevents front-running (nobody can steal your answer).">Commit-reveal <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span class="val" id="epCommitReveal">—</span></div>
+              <div class="source-metric-row"><span title="How hard the puzzle is. More bits = harder to solve = rarer solutions = higher quality randomness.">Difficulty bits <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span class="val" id="epDifficulty">—</span></div>
             </div>
+            <div class="helper" style="font-size:10px;color:var(--muted);margin:6px 0 2px;">↓ Current entropy hash from PoW computation — this feeds into the 3-source mix</div>
             <div class="source-entropy-hash" id="epPowHash">Waiting for mining data…</div>
             <div class="quality-bar"><div id="epPowQuality" style="width:0%;background:linear-gradient(90deg,#38bdf8,#0ea5e9);"></div></div>
             <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-top:4px;">
@@ -1096,13 +1130,15 @@
               </div>
               <button class="utxo-scan-btn" id="utxoScanBtn">⚡ Live Scan</button>
             </div>
+            <div class="helper" style="font-size:11px;line-height:1.5;margin:0 0 8px;color:var(--muted);">Scans Bitcoin for "dead" coins — outputs that can never be spent again (lost wallets, burn addresses). Their unpredictable pattern adds entropy nobody can manipulate. <strong style="color:var(--accent-2);">No TGBT rewards yet</strong> — the reward contract hasn't been deployed, but the entropy still strengthens the beacon.</div>
             <div class="source-metrics">
-              <div class="source-metric-row"><span>Anchored UTXOs</span><span class="val" id="epUtxoCount">—</span></div>
-              <div class="source-metric-row"><span>Dead outputs scanned</span><span class="val" id="epUtxoScanned">—</span></div>
-              <div class="source-metric-row"><span>Anchor height</span><span class="val" id="epUtxoHeight">—</span></div>
-              <div class="source-metric-row"><span>Enterprise entropy</span><span class="val ok" id="epUtxoEnterprise">—</span></div>
-              <div class="source-metric-row"><span>Freshness</span><span class="val" id="epUtxoFreshness">—</span></div>
+              <div class="source-metric-row"><span title="How many dead/unspendable UTXOs have been found and hashed into the entropy pool.">Anchored UTXOs <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span class="val" id="epUtxoCount">—</span></div>
+              <div class="source-metric-row"><span title="Total number of Bitcoin outputs scanned looking for dead/unspendable ones.">Dead outputs scanned <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span class="val" id="epUtxoScanned">—</span></div>
+              <div class="source-metric-row"><span title="The Bitcoin block height at which the last UTXO was anchored. Ties the entropy to a specific point in Bitcoin's timeline.">Anchor height <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span class="val" id="epUtxoHeight">—</span></div>
+              <div class="source-metric-row"><span title="Whether the UTXO data comes from an enterprise-grade Bitcoin node (higher reliability).">Enterprise entropy <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span class="val ok" id="epUtxoEnterprise">—</span></div>
+              <div class="source-metric-row"><span title="Whether the UTXO scan data is recent. 'Fresh' means it's from the latest blocks; stale data reduces entropy quality.">Freshness <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span class="val" id="epUtxoFreshness">—</span></div>
             </div>
+            <div class="helper" style="font-size:10px;color:var(--muted);margin:6px 0 2px;">↓ Hash derived from dead UTXO data — XOR'd into the final beacon output</div>
             <div class="source-entropy-hash" id="epUtxoHash">Scanning dead UTXOs…</div>
             <div class="quality-bar"><div id="epUtxoQuality" style="width:0%;background:linear-gradient(90deg,#22c55e,#16a34a);"></div></div>
             <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-top:4px;">
@@ -1125,20 +1161,22 @@
                 <div class="toggle-track"></div>
               </div>
             </div>
+            <div class="helper" style="font-size:11px;line-height:1.5;margin:0 0 8px;color:var(--muted);">Watches for Bitcoin "orphan" blocks — valid blocks that lost the race when two miners found a block at nearly the same time. The loser block's hash is <em>real</em> proof-of-work that nobody can predict or fake, making it superb entropy. <strong style="color:var(--gold);">Orphans are rare</strong> (a few per day globally), so showing 0 is normal — the scanner runs continuously and will capture them when they happen.</div>
             <div class="source-metrics">
-              <div class="source-metric-row"><span>Orphan blocks found</span><span class="val" id="epStaleCount">—</span></div>
-              <div class="source-metric-row"><span>Fork depth (max)</span><span class="val" id="epStaleForkDepth">—</span></div>
-              <div class="source-metric-row"><span>Leading zero bits</span><span class="val" id="epStaleZeroBits">—</span></div>
-              <div class="source-metric-row"><span>Cumulative XOR pool</span><span class="val ok" id="epStaleXorStatus">—</span></div>
-              <div class="source-metric-row"><span>Bitcoin tip height</span><span class="val" id="epStaleTipHeight">—</span></div>
+              <div class="source-metric-row"><span title="How many orphaned (stale) Bitcoin blocks the scanner has detected. These are valid blocks that lost the chain race. Seeing 0 is normal — orphans only happen a few times per day across the entire Bitcoin network.">Orphan blocks found <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span class="val" id="epStaleCount">—</span></div>
+              <div class="source-metric-row"><span title="The deepest chain reorganization seen — how many blocks deep the fork went before one chain won. Deeper forks = more entropy but are extremely rare.">Fork depth (max) <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span class="val" id="epStaleForkDepth">—</span></div>
+              <div class="source-metric-row"><span title="How many leading zero bits the orphan block's hash has. More zeros = harder proof-of-work = higher-quality entropy. This shows the mining difficulty the orphan satisfied.">Leading zero bits <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span class="val" id="epStaleZeroBits">—</span></div>
+              <div class="source-metric-row"><span title="All discovered orphan block hashes XOR'd together into one cumulative pool. XOR mixing ensures every new orphan changes the entire pool value. 'Scanning for forks…' means listening but no orphans caught yet.">Cumulative XOR pool <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span class="val ok" id="epStaleXorStatus">—</span></div>
+              <div class="source-metric-row"><span title="The latest Bitcoin block height the scanner is monitoring. Confirms the scanner is connected and tracking the live Bitcoin chain.">Bitcoin tip height <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span class="val" id="epStaleTipHeight">—</span></div>
             </div>
+            <div class="helper" style="font-size:10px;color:var(--muted);margin:6px 0 2px;">↓ XOR pool hash — all orphan block hashes mixed together. This entropy is XOR'd into the final beacon output</div>
             <div class="source-entropy-hash" id="epStaleHash">Monitoring loser chain…</div>
             <div class="quality-bar"><div id="epStaleQuality" style="width:0%;background:linear-gradient(90deg,#fbbf24,#f59e0b);"></div></div>
             <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-top:4px;">
-              <span>Loser-chain quality</span><span id="epStaleQualityLabel">—</span>
+              <span title="Quality score (0-100) of the loser-chain entropy. Starts at 0 when no orphans are found. Each orphan block discovered adds quality. 60+ is considered good randomness.">Loser-chain quality <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span id="epStaleQualityLabel">—</span>
             </div>
             <div class="source-tgbt-reward">
-              <div style="font-size:11px;opacity:.7;margin-bottom:2px;">TGBT REWARD (pending)</div>
+              <div style="font-size:11px;opacity:.7;margin-bottom:2px;">TGBT REWARD (pending) <span title="The StaleBlockOracle contract calculates rewards but the mint function isn't deployed yet. When it goes live, each orphan block you find will earn TGBT proportional to its quality and fork depth." style="cursor:help;font-size:10px;">ⓘ why pending?</span></div>
               <span id="epStaleTgbt">0.00 TGBT (pending)</span>
             </div>
           </div>
@@ -1188,39 +1226,41 @@
         <div class="system-grid" style="margin-top:16px;">
           <div style="grid-column: span 7;">
             <div style="font-size:13px;color:var(--muted);font-weight:600;margin-bottom:8px;">Combined Beacon Entropy (3-source mix)</div>
+            <div class="helper" style="font-size:10px;margin-bottom:6px;color:var(--muted);">All three sources (PoW + UTXO + Stale) are XOR’d and hashed together into one final random output — this is the beacon value that consumers use.</div>
             <div class="entropy-combined-hash" id="epCombinedHash">Waiting for all sources to produce entropy…</div>
             <div class="entropy-quality-row">
               <div class="entropy-quality-item">
-                <div class="eq-label">Overall Quality</div>
+                <div class="eq-label" title="Weighted average of all three entropy sources. 80+ is great, 60-79 is acceptable, below 60 means one or more sources are weak.">Overall Quality <span style="cursor:help;color:var(--muted);font-size:9px;">ⓘ</span></div>
                 <div class="eq-val" id="epOverallQuality" style="color:var(--accent-2);">—</div>
               </div>
               <div class="entropy-quality-item">
-                <div class="eq-label">Bit Divergence</div>
+                <div class="eq-label" title="How many of the 256 bits differ between the PoW hash and the combined hash. Higher = the mixing actually changed more bits = more thorough combination.">Bit Divergence <span style="cursor:help;color:var(--muted);font-size:9px;">ⓘ</span></div>
                 <div class="eq-val" id="epBitDivergence">—</div>
               </div>
               <div class="entropy-quality-item">
-                <div class="eq-label">Sources Active</div>
+                <div class="eq-label" title="How many of the 3 entropy sources are currently producing data. 3/3 is ideal — the more sources, the harder it is for anyone to manipulate the output.">Sources Active <span style="cursor:help;color:var(--muted);font-size:9px;">ⓘ</span></div>
                 <div class="eq-val" id="epSourcesActive" style="color:var(--accent);">—</div>
               </div>
               <div class="entropy-quality-item">
-                <div class="eq-label">Mix Rounds</div>
+                <div class="eq-label" title="How many rounds of XOR mixing and hashing are applied. More rounds = more thorough scrambling = harder to reverse-engineer.">Mix Rounds <span style="cursor:help;color:var(--muted);font-size:9px;">ⓘ</span></div>
                 <div class="eq-val" id="epMixRounds">—</div>
               </div>
             </div>
           </div>
           <div style="grid-column: span 5;">
-            <div style="font-size:13px;color:var(--gold);font-weight:600;margin-bottom:8px;">TGBT Reward Breakdown</div>
+            <div style="font-size:13px;color:var(--gold);font-weight:600;margin-bottom:4px;">TGBT Reward Breakdown</div>
+            <div class="helper" style="font-size:10px;margin-bottom:8px;color:var(--muted);">TGBT is the token you earn for contributing randomness. Currently only PoW mining mints real tokens on Arbitrum.</div>
             <div class="tgbt-breakdown-grid">
               <div class="tgbt-breakdown-item">
-                <div class="source-name"><span class="source-dot" style="background:var(--accent);"></span>PoW Mining <span style="font-size:10px;color:var(--accent);opacity:.7;">(on-chain)</span></div>
+                <div class="source-name"><span class="source-dot" style="background:var(--accent);"></span>PoW Mining <span style="font-size:10px;color:var(--accent);opacity:.7;" title="This is the ONLY source currently paying real tokens. Each accepted solution mints ~12.5 TGBT via the on-chain TokenomicsModule.">(on-chain) ⓘ</span></div>
                 <span class="tgbt-val" style="color:var(--accent);" id="epBreakdownPow">—</span>
               </div>
               <div class="tgbt-breakdown-item">
-                <div class="source-name"><span class="source-dot" style="background:var(--accent-2);opacity:.4;"></span>Dead UTXO <span style="font-size:10px;color:var(--muted);">(no contract)</span></div>
+                <div class="source-name"><span class="source-dot" style="background:var(--accent-2);opacity:.4;"></span>Dead UTXO <span style="font-size:10px;color:var(--muted);" title="No smart contract deployed yet to reward UTXO entropy. The entropy still improves beacon quality, but there's no token payment path.">(no contract) ⓘ</span></div>
                 <span class="tgbt-val" style="color:var(--muted);" id="epBreakdownUtxo">—</span>
               </div>
               <div class="tgbt-breakdown-item">
-                <div class="source-name"><span class="source-dot" style="background:var(--gold);opacity:.4;"></span>Stale Blocks <span style="font-size:10px;color:var(--muted);">(pending)</span></div>
+                <div class="source-name"><span class="source-dot" style="background:var(--gold);opacity:.4;"></span>Stale Blocks <span style="font-size:10px;color:var(--muted);" title="The StaleBlockOracle contract can CALCULATE rewards (baseReward × quality × forkDepth) but claimReward() doesn't actually mint TGBT yet — it's a TODO in the contract. Will go live in a future update.">(pending) ⓘ</span></div>
                 <span class="tgbt-val" style="color:var(--muted);" id="epBreakdownStale">—</span>
               </div>
               <div class="tgbt-breakdown-item" style="border-color:rgba(148,163,184,.3);background:rgba(15,23,42,.85);">
@@ -1229,8 +1269,7 @@
               </div>
             </div>
             <div style="margin-top:12px;font-size:11px;color:var(--muted);text-align:center;">
-              Only PoW rewards are live on Arbitrum (12.5 TGBT/solution via MiningModule → TokenomicsModule).<br>
-              Stale block rewards: contract calculates but claimReward() TODO. UTXO: entropy only, no mint path.
+              <strong>TL;DR:</strong> PoW solutions earn TGBT right now (✓ on-chain). UTXO and Stale Block sources make the randomness stronger but don't pay tokens yet — reward contracts are in development.
             </div>
           </div>
         </div>
@@ -1250,7 +1289,7 @@
       <div class="panel solutions-panel">
         <div class="solutions-header">
           <div style="display:flex;align-items:center;gap:14px;">
-            <h3>Solution Storage</h3>
+            <h3 title="Every accepted solution becomes a leaf in the epoch Merkle tree. Consumers use these to verify randomness on-chain.">Solution Storage</h3>
             <div class="sol-storage-badge" id="storageBadge"><span class="dot"></span><span id="storageLabel">File</span></div>
           </div>
           <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;">
@@ -1276,11 +1315,12 @@
                 <th>TGBT Reward</th>
                 <th>Hashrate</th>
                 <th>Phase</th>
+                <th title="Entropy quality score based on hash bit distribution (0–100). Higher = more uniform = better randomness.">Quality</th>
                 <th>Hash</th>
               </tr>
             </thead>
             <tbody id="solBody">
-              <tr><td class="sol-empty" colspan="8">Loading solutions…</td></tr>
+              <tr><td class="sol-empty" colspan="9">Loading solutions…</td></tr>
             </tbody>
           </table>
         </div>
@@ -1303,6 +1343,7 @@
             <button class="copy-btn" id="copyRelayProfile">Copy relay profile</button>
           </div>
         </div>
+        <p class="helper" style="margin:0 0 14px;">Monitors your miner's integrity. Gaps in solution output, unusual hashrate patterns, or tampered telemetry trigger alerts. A clean record here proves your node is honest — required for maximum TGBT rewards.</p>
         <div class="system-grid">
           <div class="status-card">
             <h3>Continuity</h3>
@@ -1375,6 +1416,7 @@
           <h3 class="section-title">System & Chain Status</h3>
           <button class="action-btn" id="refreshSystem">Refresh status</button>
         </div>
+        <p class="helper" style="margin:0 0 14px;">Live status of all services, your wallet balance, smart contract wiring on Arbitrum, and the host machine hardware. If any service shows Offline, run <code style="font-size:11px;">start-all.ps1</code> to restart.</p>
         <div class="system-grid">
           <div class="status-card">
             <h3>Services</h3>
@@ -1413,6 +1455,19 @@
               <div class="status-item"><span>Storage attested</span><span id="latestOnChainAttested">—</span></div>
             </div>
           </div>
+          <div class="status-card">
+            <h3>Hardware</h3>
+            <div class="status-list">
+              <div class="status-item"><span>CPU</span><span id="hwCpuModel" class="mono" style="font-size:11px;">—</span></div>
+              <div class="status-item"><span>Manufacturer</span><span id="hwManufacturer">—</span></div>
+              <div class="status-item"><span>Cores</span><span id="hwCores">—</span></div>
+              <div class="status-item"><span>CPU Speed</span><span id="hwSpeed">—</span></div>
+              <div class="status-item"><span>Memory</span><span id="hwMemory">—</span></div>
+              <div class="status-item"><span>Memory usage</span><span id="hwMemUsage">—</span></div>
+              <div class="status-item"><span>Platform</span><span id="hwPlatform">—</span></div>
+              <div class="status-item"><span>Host uptime</span><span id="hwUptime">—</span></div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -1424,15 +1479,33 @@
             <button class="action-btn" id="loadLatestProof">Load latest proof</button>
           </div>
         </div>
+        <p class="helper" style="margin:0 0 12px;"><strong>This is what consumers use.</strong> The output hash below is the latest verifiable random number produced by the mining network. Any dApp (lottery, NFT mint, game) can use this instead of Chainlink VRF — it's cheaper, decentralized, and backed by physical entropy.</p>
         <div class="stack">
           <div class="kv" style="grid-template-columns: 160px 1fr;">
-            <div class="label">Latest output</div><div id="latestRandomnessHash" class="hash">—</div>
-            <div class="label">Epoch</div><div id="latestRandomnessEpoch">—</div>
-            <div class="label">Leaf index</div><div id="latestRandomnessLeaf">—</div>
+            <div class="label" title="The random number — a 256-bit hash derived from the miner's PoW solution. Use this as your random seed.">Latest output</div><div id="latestRandomnessHash" class="hash">—</div>
+            <div class="label" title="Which epoch batch this randomness belongs to. Each epoch groups multiple solutions into a Merkle tree.">Epoch</div><div id="latestRandomnessEpoch">—</div>
+            <div class="label" title="Position of this output within the epoch's Merkle tree. Needed for on-chain verification.">Leaf index</div><div id="latestRandomnessLeaf">—</div>
             <div class="label">Timestamp</div><div id="latestRandomnessTime">—</div>
-            <div class="label">Signature</div><div id="latestRandomnessSignature" class="hash">—</div>
+            <div class="label" title="Cryptographic signature proving this output was produced by an authorized miner.">Signature</div><div id="latestRandomnessSignature" class="hash">—</div>
           </div>
-          <div class="helper">Consumers can take the output hash and fetch a Merkle proof, then verify it on-chain with <span class="mono">verifyRandomnessLeaf()</span>.</div>
+          <details style="margin:8px 0 0;font-size:12px;color:var(--muted);">
+            <summary style="cursor:pointer;color:var(--accent);font-weight:600;">How to use this randomness in your smart contract</summary>
+            <div style="margin:8px 0 0 12px;line-height:1.6;">
+              <div style="background:rgba(56,189,248,.08);border:1px solid rgba(56,189,248,.2);border-radius:10px;padding:14px 16px;margin-bottom:14px;">
+                <div style="font-weight:700;color:var(--accent);margin-bottom:6px;">The simple version</div>
+                <p style="margin:0;color:var(--text);font-size:13px;line-height:1.7;">Imagine you're building a lottery, a game, or an NFT drop and you need a random number that <em>nobody</em> can cheat — not even you. That's what this miner produces. It's like a public dice roll that's recorded on the blockchain forever, and anyone can mathematically prove it wasn't rigged. You grab the random number from our API, pass it into your smart contract along with a short proof, and the blockchain confirms it's legit. No middleman, no subscription fees, no trust required.</p>
+              </div>
+              <div style="font-weight:600;color:var(--text);margin-bottom:6px;">Technical steps (for developers):</div>
+              <p style="margin:4px 0;"><strong>If you currently use Chainlink VRF</strong>, you're paying per-request for a single oracle's randomness. With Temporal Gradient, the randomness is already on-chain — you just verify it:</p>
+              <ol style="margin:4px 0;padding-left:20px;">
+                <li><strong>Fetch the output hash</strong> from <code style="font-size:11px;">GET /api/randomness/latest</code></li>
+                <li><strong>Fetch the Merkle proof</strong> from <code style="font-size:11px;">GET /api/randomness/{hash}/proof</code></li>
+                <li><strong>Verify on-chain</strong> by calling <code style="font-size:11px;">verifyRandomnessLeaf(epochId, leafIndex, outputHash, proof)</code> on the Core contract</li>
+                <li><strong>Use the hash as your random seed</strong> — it's a 256-bit uniform random value</li>
+              </ol>
+              <p style="margin:4px 0;">Unlike Chainlink VRF, there's no subscription fee, no LINK token required, and the randomness is backed by 3 physical entropy sources instead of 1 oracle key.</p>
+            </div>
+          </details>
         </div>
       </div>
 
@@ -1451,16 +1524,20 @@
           <div id="proofStatus" class="helper">Enter an output hash or click “Load latest proof”.</div>
           <div class="proof-box">
             <div class="status-list">
-              <div class="status-item"><span>Epoch</span><span id="proofEpochId">—</span></div>
-              <div class="status-item"><span>Leaf index</span><span id="proofLeafIndex">—</span></div>
-              <div class="status-item"><span>Finalized</span><span id="proofFinalized">—</span></div>
-              <div class="status-item"><span>Merkle root</span><span id="proofMerkleRoot" class="mono">—</span></div>
-              <div class="status-item"><span>Proof nodes</span><span id="proofNodeCount">—</span></div>
+              <div class="status-item"><span title="Which batch of solutions this randomness belongs to. Like a page number in a book of random numbers.">Epoch <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span id="proofEpochId">—</span></div>
+              <div class="status-item"><span title="The position of this specific random number within the epoch. Like which line on the page.">Leaf index <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span id="proofLeafIndex">—</span></div>
+              <div class="status-item"><span title="Whether this epoch has been permanently locked on the blockchain. 'Yes' means the randomness is fully verified and immutable.">Finalized <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span id="proofFinalized">—</span></div>
+              <div class="status-item"><span title="The single hash that represents ALL random numbers in this epoch. Your proof connects your specific random number back to this root.">Merkle root <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span id="proofMerkleRoot" class="mono">—</span></div>
+              <div class="status-item"><span title="The 'steps' in the proof chain. Each node is a hash that links your random number to the Merkle root, like links in a chain.">Proof nodes <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span id="proofNodeCount">—</span></div>
             </div>
+            <div class="helper" style="margin:10px 0 4px;font-size:11px;line-height:1.5;">Each proof node below is a link in the chain from your random number up to the Merkle root. Together they form a mathematical proof that this randomness is part of the committed epoch — no trust needed.</div>
             <div class="proof-nodes" id="proofNodes"></div>
           </div>
           <div class="proof-box">
-            <div class="helper" style="margin-bottom:8px;">On-chain verification call</div>
+            <div style="margin-bottom:10px;">
+              <div class="helper" style="margin-bottom:4px;font-weight:600;color:var(--text);">On-chain verification call</div>
+              <div class="helper" style="font-size:11px;line-height:1.5;">This is the exact function call a smart contract makes to verify this randomness is real. Think of it as asking the blockchain: <em>"Is this random number actually part of epoch #X?"</em> — the blockchain checks the proof and says yes or no.</div>
+            </div>
             <div id="verifyMethod" class="mono">—</div>
             <div id="verifyArgs" class="proof-nodes"></div>
           </div>
@@ -1472,7 +1549,22 @@
           <h3 class="section-title">Epoch Explorer</h3>
           <button class="action-btn" id="refreshEpochs">Refresh epochs</button>
         </div>
-        <div style="overflow-x:auto;">
+        <details style="margin:0 0 14px;font-size:12px;color:var(--muted);">
+          <summary style="cursor:pointer;color:var(--accent);font-weight:600;">What are epochs and why do they matter?</summary>
+          <div style="margin:8px 0 0 12px;line-height:1.6;">
+            <p style="margin:4px 0;">An <strong>epoch</strong> is a batch of miner solutions grouped into a Merkle tree and committed on-chain. Think of it like a "block" of randomness:</p>
+            <ul style="margin:4px 0;padding-left:20px;">
+              <li><strong>Solutions accumulate</strong> — the miner finds PoW solutions and stores them locally</li>
+              <li><strong>Epoch commitment</strong> — once enough solutions (default: 10) are collected, the epoch builder creates a Merkle tree and commits the root hash on-chain via <code style="font-size:11px;">commitEpochRoot()</code></li>
+              <li><strong>Challenge window</strong> — a 28,800 L1-block (~96 hour) waiting period allows anyone to challenge invalid epochs</li>
+              <li><strong>Finalization</strong> — after the challenge window passes, <code style="font-size:11px;">finalizeEpoch()</code> is called, locking the epoch permanently and minting TGBT rewards</li>
+              <li><strong>Storage attestation</strong> — optionally, the epoch data is attested on-chain to prove the full Merkle tree is stored and retrievable</li>
+            </ul>
+            <p style="margin:4px 0;"><strong>Benefits:</strong> Epochs batch gas costs (one on-chain commit per 10 solutions instead of per-solution), provide a tamper-proof audit trail, and enable consumers to verify any past randomness output via its Merkle proof.</p>
+            <p style="margin:4px 0;"><strong>For Chainlink VRF users:</strong> Each epoch is like a VRF subscription fulfillment — but you can verify <em>any</em> output from <em>any</em> epoch, forever, without paying per-verification.</p>
+          </div>
+        </details>
+        <div style="overflow-x:auto;max-height:500px;overflow-y:auto;">
           <table class="sol-table epoch-table">
             <thead>
               <tr>
@@ -1947,6 +2039,12 @@
       els.lastHash.textContent = snap.last_solution_hash_hex || '—';
 	      els.lastCommitHash.textContent = snap.last_commit_hash_hex || snap.last_solution_hash_hex || '—';
 	      els.lastOutputHash.textContent = snap.last_output_hash_hex || snap.last_solution_hash_hex || '—';
+
+      // Show quality score next to the output hash
+      const snapQuality = hashQualityScore(snap.last_output_hash_hex || snap.last_solution_hash_hex);
+      if (els.snapshotQuality) {
+        els.snapshotQuality.innerHTML = snapQuality != null ? qualityBadge(snapQuality) + '<span class="helper" style="margin-left:6px;">entropy</span>' : '—';
+      }
       els.updatedAt.textContent = new Date(Number(snap.timestamp_unix_ms)).toLocaleTimeString();
 
       // Live dot color
@@ -2045,6 +2143,24 @@
         els.latestOnChainEpoch.textContent = 'None yet';
         els.latestOnChainFinalized.textContent = '—';
         els.latestOnChainAttested.textContent = '—';
+      }
+
+      // ── Hardware info ──
+      const hw = sys.hardware;
+      if (hw) {
+        els.hwCpuModel.textContent = hw.cpu?.model || '—';
+        els.hwManufacturer.textContent = hw.cpu?.manufacturer || '—';
+        els.hwCores.textContent = hw.cpu?.cores ? `${hw.cpu.cores} logical` : '—';
+        els.hwSpeed.textContent = hw.cpu?.speedGhz ? `${hw.cpu.speedGhz} GHz` : '—';
+        els.hwMemory.textContent = hw.memory?.totalGb ? `${hw.memory.totalGb} GB total` : '—';
+        const memPct = hw.memory?.usagePercent ?? 0;
+        els.hwMemUsage.textContent = hw.memory?.usedGb ? `${hw.memory.usedGb} / ${hw.memory.totalGb} GB (${memPct}%)` : '—';
+        els.hwMemUsage.className = memPct > 90 ? 'danger' : memPct > 75 ? 'warn' : '';
+        const platLabel = { win32: 'Windows', darwin: 'macOS', linux: 'Linux' }[hw.platform] || hw.platform;
+        els.hwPlatform.textContent = `${platLabel} (${hw.arch || '—'})`;
+        const uptimeH = hw.uptime ? Math.floor(hw.uptime / 3600) : 0;
+        const uptimeM = hw.uptime ? Math.floor((hw.uptime % 3600) / 60) : 0;
+        els.hwUptime.textContent = hw.uptime ? `${uptimeH}h ${uptimeM}m` : '—';
       }
 
       renderAlerts();
@@ -2188,7 +2304,25 @@
       els.proofNodeCount.textContent = Array.isArray(proof.proof) ? proof.proof.length : 0;
       els.proofNodes.innerHTML = (proof.proof || []).map(node => `<div class="proof-node">${escapeHtml(node)}</div>`).join('') || '<div class="helper">No proof nodes returned.</div>';
       els.verifyMethod.textContent = proof.verifyOnChain?.method || '—';
-      els.verifyArgs.innerHTML = (proof.verifyOnChain?.args || []).map((arg, idx) => `<div class="proof-node"><strong>arg${idx}</strong>: ${escapeHtml(Array.isArray(arg) ? JSON.stringify(arg) : arg)}</div>`).join('');
+      const argLabels = [
+        { name: 'epochId', desc: 'Which batch of solutions (epoch) this belongs to' },
+        { name: 'leafIndex', desc: 'Position of this random number within the epoch' },
+        { name: 'outputHash', desc: 'The actual random number (256-bit hash)' },
+        { name: 'proof', desc: 'Merkle proof chain — the math that proves this number is legit' },
+      ];
+      els.verifyArgs.innerHTML = (proof.verifyOnChain?.args || []).map((arg, idx) => {
+        const label = argLabels[idx] || { name: `arg${idx}`, desc: '' };
+        const value = Array.isArray(arg) ? JSON.stringify(arg) : arg;
+        return `<div class="proof-node">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;">
+            <div>
+              <strong style="color:var(--accent);">${escapeHtml(label.name)}</strong>
+              <span style="color:var(--muted);font-size:11px;margin-left:6px;">${escapeHtml(label.desc)}</span>
+            </div>
+          </div>
+          <div class="mono" style="margin-top:6px;word-break:break-all;">${escapeHtml(String(value))}</div>
+        </div>`;
+      }).join('');
     }
 
     function renderDrawer() {
@@ -2526,6 +2660,11 @@
       ctx.clearRect(0, 0, w, h);
       ctx.fillStyle = 'rgba(2,6,23,0.65)';
       ctx.fillRect(0, 0, w, h);
+
+      // Update history count label
+      if (els.historyCount) {
+        els.historyCount.textContent = `Last ${state.history.length} snapshots (max 120)`;
+      }
 
       const padding = 40;
       const isRewardChart = state.chartMode === 'rewards';
@@ -3203,6 +3342,36 @@
     // ── Persistent Solutions Table ──────────────────────────
     const solState = { filter: 'all', scope: 'session', page: 0, pageSize: 20, total: 0 };
 
+    /**
+     * Compute entropy quality score (0–100) from a hex hash string.
+     * Measures bit uniformity: a perfect 50/50 split of 0s and 1s scores 100.
+     * Real SHA-256 outputs typically score 85–100.
+     */
+    function hashQualityScore(hexHash) {
+      if (!hexHash || hexHash.length < 8) return null;
+      const clean = hexHash.replace(/^0x/i, '');
+      let ones = 0;
+      const totalBits = clean.length * 4;
+      for (let i = 0; i < clean.length; i++) {
+        const nibble = parseInt(clean[i], 16);
+        if (isNaN(nibble)) return null;
+        ones += ((nibble >> 3) & 1) + ((nibble >> 2) & 1) + ((nibble >> 1) & 1) + (nibble & 1);
+      }
+      // Perfect entropy = 50% ones. Score is how close to 50%.
+      const ratio = ones / totalBits;
+      const deviation = Math.abs(ratio - 0.5);
+      // Max deviation = 0.5 (all 0s or all 1s). Scale to 0–100.
+      const score = Math.round(Math.max(0, (1 - deviation * 4) * 100));
+      return Math.min(100, Math.max(0, score));
+    }
+
+    function qualityBadge(score) {
+      if (score == null) return '<span style="color:var(--muted);">—</span>';
+      const color = score >= 85 ? 'var(--accent-2)' : score >= 65 ? 'var(--warn)' : 'var(--danger)';
+      const label = score >= 85 ? 'High' : score >= 65 ? 'OK' : 'Low';
+      return `<span style="color:${color};font-weight:600;" title="${label} entropy quality: ${score}/100 bit uniformity">${score}</span>`;
+    }
+
     document.querySelectorAll('.sol-filter[data-scope]').forEach(f => {
       f.addEventListener('click', () => {
         document.querySelectorAll('.sol-filter[data-scope]').forEach(x => x.classList.remove('active'));
@@ -3248,7 +3417,7 @@
         els.solNext.disabled = solutions.length < solState.pageSize;
 
         if (solutions.length === 0) {
-          els.solBody.innerHTML = '<tr><td class="sol-empty" colspan="8">No solutions stored yet — mines will appear here as they\'re found.</td></tr>';
+          els.solBody.innerHTML = '<tr><td class="sol-empty" colspan="9">No solutions stored yet — mines will appear here as they\'re found.</td></tr>';
           return;
         }
 
@@ -3264,6 +3433,8 @@
             ? `${fmtNum(s.hashrate || s.totalHashes / s.uptime)} H/s` : '—';
           const phase = s.phase || '—';
             const outputHash = s.outputHash || s.hash || null;
+          const qualityHash = outputHash || s.commitHash || s.hash || null;
+          const quality = hashQualityScore(qualityHash);
           const hash = s.accepted
             ? [
                 s.commitHash ? `<div title="${s.commitHash}"><span style="color:var(--muted);">commit:</span> ${s.commitHash.slice(0, 16)}…</div>` : '',
@@ -3279,11 +3450,12 @@
             <td>${reward}</td>
             <td>${hr}</td>
             <td>${phase}</td>
+            <td style="text-align:center;">${qualityBadge(quality)}</td>
               <td class="sol-hash-cell" title="${outputHash || s.commitHash || s.hash || ''}">${hash}</td>
           </tr>`;
         }).join('');
       } catch (err) {
-        els.solBody.innerHTML = `<tr><td class="sol-empty" colspan="8" style="color:var(--danger);">Error loading solutions: ${err.message}</td></tr>`;
+        els.solBody.innerHTML = `<tr><td class="sol-empty" colspan="9" style="color:var(--danger);">Error loading solutions: ${err.message}</td></tr>`;
       }
     }
 
