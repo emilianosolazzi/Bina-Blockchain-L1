@@ -69,6 +69,20 @@ cargo build --release --features stale-mining
 
 Or just run `stop-all.ps1` then `start-all.ps1` — it auto-builds if sources are newer and syncs the binary.
 
+## Services & Ports
+
+| # | Service           | Port | Process        | Log files                        |
+|---|-------------------|------|----------------|----------------------------------|
+| 1 | Redis             | 6379 | redis-server   | (system)                         |
+| 2 | PostgreSQL        | 5432 | (service)      | (system)                         |
+| 3 | Beacon API        | 3100 | node           | beacon-api.out.log, .err.log     |
+| 4 | Randomness API    | 4271 | node           | randomness-api.out.log, .err.log |
+| 5 | Heartbeat Sidecar | 4380 | node           | heartbeat-sidecar.out.log, .err.log |
+| 6 | Miner Dashboard   | 4173 | node (Vite)    | miner-dashboard.out.log, .err.log |
+| 7 | Miner             | —    | temporal-gradient-miner.exe | miner.out.log, miner.err.log |
+
+All log files are in `.runtime-logs/stack/`. The miner logs to **miner.out.log** (NOT miner.log).
+
 ## Key Config Fields (miner-config.json)
 
 - `rpc_api_key`: NativeBTC API key (e.g. `fp_2d93df5e...`), also inherited by `stale_block.api_key` if absent
@@ -77,6 +91,13 @@ Or just run `stop-all.ps1` then `start-all.ps1` — it auto-builds if sources ar
 - `stale_block.api_key`: optional, falls back to top-level `rpc_api_key`
 - Blockchain: Arbitrum (chain ID 42161)
 - Wallet: `0x5cB4D906f0464b34c44d6555A770BF6aF4A2cEfe`, Pool ID: 3
+
+## Config Inheritance (config.rs)
+
+`MinerConfig::normalize()` handles fallback logic:
+- `rpc_api_key` → `stale_block.api_key` (when stale_block.api_key is absent)
+- `StaleBlockConfig` (JSON-facing, in config.rs) converts to `StaleBlockMinerConfig` (runtime, in stale_block_miner.rs) via `to_miner_config()`
+- Config loaded in `load_or_create_config()` → `load_from_path()` → `normalize()`
 
 ## NativeBTC WebSocket API
 
@@ -88,6 +109,15 @@ Or just run `stop-all.ps1` then `start-all.ps1` — it auto-builds if sources ar
 
 - `stale-mining`: enables stale-block Bitcoin orphan mining (WS stream + REST harvest)
 - Always build with `--features stale-mining` for production
+
+## Common Gotchas
+
+1. **Binary is at workspace level** — `l2-mining/rust/target/release/`, NOT `l2-mining/rust/temporal_gradient_core/target/release/`
+2. **Running process locks the binary** — must `stop-all.ps1` before copying a new build to AppData
+3. **Miner runs from AppData** — the deploy path (`%LOCALAPPDATA%\entropy\...`), not the build dir. If you build manually, you must sync to AppData or the old binary keeps running.
+4. **Arbitrum TX receipts can be None** — chain.rs polls `get_transaction_receipt()` with retries. Don't treat None as failure.
+5. **Log file names** — it's `miner.out.log` and `miner.err.log` (NOT `miner.log`)
+6. **start-all.ps1 auto-syncs** — when the build binary is newer than the deploy binary, it copies automatically (even without rebuilding)
 
 ## Testing
 
