@@ -1510,6 +1510,12 @@ async fn run_ws_event_loop(
     let mut keepalive = time::interval(Duration::from_secs(30));
     keepalive.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
 
+    // Periodic harvest poll — NativeBTC WS has no block push events, so we
+    // must poll /v1/chain/tips ourselves to discover orphan/stale blocks.
+    let mut harvest_poll = time::interval(Duration::from_secs(config.poll_interval_secs));
+    harvest_poll.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+    let mut last_known_height: u64 = 0;
+
     let mut consecutive_errors = 0u32;
 
     loop {
@@ -1523,6 +1529,42 @@ async fn run_ws_event_loop(
                 if let Err(err) = ws_tx.send(Message::Ping(vec![0x54, 0x47])).await {
                     warn!("Stale-block WS: keepalive ping failed: {err}");
                     break; // Let reconnect logic handle it
+                }
+            }
+            _ = harvest_poll.tick() => {
+                // Poll chain tip + harvest orphans while WS stays connected
+                match fetch_block_height(client, config).await {
+                    Ok(h) => {
+                        if h != last_known_height {
+                            if last_known_height > 0 {
+                                info!("Stale-block: new tip height {h} (was {last_known_height})");
+                            }
+                            last_known_height = h;
+
+                            if let Err(err) = refresh_mempool_stats(client, config, latest_mempool).await {
+                                debug!("Stale-block: fee enrichment failed: {err:#}");
+                            }
+                            match harvest_mempool_stale_proofs(client, config, miner).await {
+                                Ok(new_count) => {
+                                    if new_count > 0 {
+                                        info!(
+                                            "Stale-block WS+poll: harvested {new_count} proof(s) | mempool={} txs, fastest_fee={} sat/vB",
+                                            latest_mempool.mempool_size, latest_mempool.fastest_fee,
+                                        );
+                                    } else {
+                                        debug!("Stale-block: tip {h}, no new orphans found");
+                                    }
+                                }
+                                Err(err) => warn!("Stale-block WS+poll: harvest failed: {err:#}"),
+                            }
+                            submit_pending_proofs(miner, live_client, config).await;
+                        } else {
+                            debug!("Stale-block: tip unchanged at {h}");
+                        }
+                    }
+                    Err(err) => {
+                        warn!("Stale-block WS+poll: block-height fetch failed: {err:#}");
+                    }
                 }
             }
             msg = ws_rx.next() => {

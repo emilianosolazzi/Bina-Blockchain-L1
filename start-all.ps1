@@ -237,7 +237,7 @@ Write-Host "=== TGBT Mining Stack - Starting All Services ===" -ForegroundColor 
 Write-Host ""
 
 # ---- 1. Redis ----
-Write-Host "[1/7] Redis" -ForegroundColor Yellow
+Write-Host "[1/8] Redis" -ForegroundColor Yellow
 $redisProc = Get-Process redis-server -ErrorAction SilentlyContinue
 if ($redisProc) {
     Write-Host "  [OK] Redis already running (PID $($redisProc.Id))" -ForegroundColor Green
@@ -261,7 +261,7 @@ else {
 }
 
 # ---- 2. PostgreSQL ----
-Write-Host "[2/7] PostgreSQL" -ForegroundColor Yellow
+Write-Host "[2/8] PostgreSQL" -ForegroundColor Yellow
 $pgService = Get-Service postgresql-x64-17 -ErrorAction SilentlyContinue
 if (-not $pgService) {
     $pgService = Get-Service postgresql* -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -285,7 +285,7 @@ else {
 }
 
 # ---- 3. Beacon API (port 3100) ----
-Write-Host "[3/7] Beacon API" -ForegroundColor Yellow
+Write-Host "[3/8] Beacon API" -ForegroundColor Yellow
 $apiPort = 3100
 $apiUp = Wait-ForPort -Port $apiPort -TimeoutSeconds 1
 if ($apiUp) {
@@ -315,7 +315,7 @@ else {
 }
 
 # ---- 4. Randomness API (port 4271) ----
-Write-Host "[4/7] Randomness API" -ForegroundColor Yellow
+Write-Host "[4/8] Randomness API" -ForegroundColor Yellow
 $randPort = 4271
 $randUp = Wait-ForPort -Port $randPort -TimeoutSeconds 1
 if ($randUp) {
@@ -336,7 +336,7 @@ else {
 }
 
 # ---- 5. Heartbeat sidecar (port 4380) ----
-Write-Host "[5/7] Heartbeat sidecar" -ForegroundColor Yellow
+Write-Host "[5/8] Heartbeat sidecar" -ForegroundColor Yellow
 $hbPort = 4380
 $hbUp = Wait-ForPort -Port $hbPort -TimeoutSeconds 1
 if ($hbUp) {
@@ -357,7 +357,7 @@ else {
 }
 
 # ---- 6. Miner Dashboard (port 4173) ----
-Write-Host "[6/7] Miner Dashboard" -ForegroundColor Yellow
+Write-Host "[6/8] Miner Dashboard" -ForegroundColor Yellow
 $dashPort = 4173
 $dashUp = Wait-ForPort -Port $dashPort -TimeoutSeconds 1
 if ($dashUp) {
@@ -384,7 +384,7 @@ else {
 }
 
 # ---- 7. Miner ----
-Write-Host "[7/7] Miner" -ForegroundColor Yellow
+Write-Host "[7/8] Miner" -ForegroundColor Yellow
 $minerProc = Get-Process temporal-gradient-miner -ErrorAction SilentlyContinue
 if ($minerProc) {
     Write-Host "  [OK] Miner already running (PID $($minerProc.Id))" -ForegroundColor Green
@@ -404,6 +404,37 @@ else {
     }
     else {
         Write-Host "  [SKIP] Miner binary not found (need cargo build --release)" -ForegroundColor DarkGray
+    }
+}
+
+# ---- 8. Epoch Builder ----
+Write-Host "[8/8] Epoch Builder" -ForegroundColor Yellow
+$epochBuilderPidFile = Join-Path $LOGS "epoch-builder.pid"
+$epochBuilderScript = Join-Path $RAND "epoch-builder.js"
+$epochBuilderRunning = $false
+if (Test-Path $epochBuilderPidFile) {
+    $ebPid = [int](Get-Content $epochBuilderPidFile -Raw).Trim()
+    $ebProc = Get-Process -Id $ebPid -ErrorAction SilentlyContinue
+    if ($ebProc -and $ebProc.ProcessName -eq 'node') {
+        $epochBuilderRunning = $true
+        Write-Host "  [OK] Epoch Builder already running (PID $ebPid)" -ForegroundColor Green
+    }
+}
+if (-not $epochBuilderRunning) {
+    if (Test-Path $epochBuilderScript) {
+        $ebProc = Start-BackgroundProcess -Name "Epoch Builder" -FilePath "node" -Arguments @("epoch-builder.js") -WorkingDirectory $RAND -LogPrefix "epoch-builder"
+        Start-Sleep -Seconds 2
+        $ebCheck = Get-Process -Id $ebProc.Id -ErrorAction SilentlyContinue
+        if ($ebCheck) {
+            Set-Content -Path $epochBuilderPidFile -Value $ebProc.Id
+            Write-Host "  [OK] Epoch Builder started (PID $($ebProc.Id))" -ForegroundColor Green
+        }
+        else {
+            Write-Host "  [FAIL] Epoch Builder exited ($(Get-LogHint -LogPrefix 'epoch-builder'))" -ForegroundColor Red
+        }
+    }
+    else {
+        Write-Host "  [SKIP] epoch-builder.js not found" -ForegroundColor DarkGray
     }
 }
 

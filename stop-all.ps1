@@ -61,6 +61,24 @@ else {
     Write-Host "  [SKIP] Beacon API not running" -ForegroundColor DarkGray
 }
 
+# Epoch Builder
+$epochBuilderPidFile = Join-Path $PSScriptRoot ".runtime-logs\stack\epoch-builder.pid"
+if (Test-Path $epochBuilderPidFile) {
+    $ebPid = [int](Get-Content $epochBuilderPidFile -Raw).Trim()
+    $ebProc = Get-Process -Id $ebPid -ErrorAction SilentlyContinue
+    if ($ebProc) {
+        Stop-Process -Id $ebPid -Force
+        Write-Host "  [STOP] Epoch Builder stopped (PID $ebPid)" -ForegroundColor Yellow
+    }
+    else {
+        Write-Host "  [SKIP] Epoch Builder not running" -ForegroundColor DarkGray
+    }
+    Remove-Item $epochBuilderPidFile -Force -ErrorAction SilentlyContinue
+}
+else {
+    Write-Host "  [SKIP] Epoch Builder not running" -ForegroundColor DarkGray
+}
+
 # Redis
 $redis = Get-Process redis-server -ErrorAction SilentlyContinue
 if ($redis) {

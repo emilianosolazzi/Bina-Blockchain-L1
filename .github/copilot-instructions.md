@@ -23,13 +23,21 @@ Randomness_Entropy/                      ← workspace root
 │   │   │       ├── memory.rs            ← memory hardening
 │   │   │       └── tg_output_filter.rs  ← Bloom filter output dedup
 │   │   ├── package/                     ← installer/packaging crate
+│   │   ├── keys/                        ← miner.key (private key), miner.pending.json
 │   │   └── target/release/              ← ⚠️ BUILD OUTPUT lives here (workspace-level)
 │   │       └── temporal-gradient-miner.exe
 │   ├── js/                              ← beacon-api-server (port 3100)
 │   ├── miner-dashboard/                 ← Vite dashboard (port 4173)
 │   ├── randomness-api/                  ← randomness API (port 4271)
-│   └── security/                        ← heartbeat sidecar (port 4380)
-├── start-all.ps1                        ← starts all 7 services
+│   │   ├── epoch-builder.js             ← batch epoch orchestrator (service #8)
+│   │   ├── bitcoin-anchor.js            ← Bitcoin OP_RETURN anchoring
+│   │   ├── .env                         ← epoch-builder config (NOT committed — secrets)
+│   │   ├── epoch-state.json             ← epoch-builder persistent state
+│   │   └── epoch-store/                 ← local epoch JSON files
+│   ├── security/                        ← heartbeat sidecar (port 4380)
+│   └── contracts/modules/
+│       └── BatchMiningModule.sol        ← on-chain epoch commit/finalize contract
+├── start-all.ps1                        ← starts all 8 services
 ├── stop-all.ps1                         ← stops all services
 └── .runtime-logs/stack/                 ← service logs (miner.out.log, miner.err.log, etc.)
 ```
@@ -59,6 +67,8 @@ cargo build --release --features stale-mining
 | Pending commit  | `l2-mining/rust/keys/miner.pending.json` |
 | Private key     | `l2-mining/rust/keys/miner.key` |
 | Service logs    | `.runtime-logs/stack/*.log` |
+| Epoch state     | `l2-mining/randomness-api/epoch-state.json` |
+| Epoch .env      | `l2-mining/randomness-api/.env` (secrets — not committed) |
 
 ## Deploy Workflow
 
@@ -80,8 +90,59 @@ Or just run `stop-all.ps1` then `start-all.ps1` — it auto-builds if sources ar
 | 5 | Heartbeat Sidecar | 4380 | node           | heartbeat-sidecar.out.log, .err.log |
 | 6 | Miner Dashboard   | 4173 | node (Vite)    | miner-dashboard.out.log, .err.log |
 | 7 | Miner             | —    | temporal-gradient-miner.exe | miner.out.log, miner.err.log |
+| 8 | Epoch Builder     | —    | node           | epoch-builder.out.log, .err.log  |
 
 All log files are in `.runtime-logs/stack/`. The miner logs to **miner.out.log** (NOT miner.log).
+
+## Epoch Pipeline
+
+The epoch pipeline turns raw miner solutions into on-chain commitments:
+
+1. **Miner** writes solutions to `telemetry.jsonl` (one JSON line per solution)
+2. **Epoch Builder** (`epoch-builder.js`) polls `telemetry.jsonl` every 30 s
+3. Accumulates solutions in `pendingLeaves` (stored in `epoch-state.json`)
+4. At `SOLUTIONS_PER_EPOCH` (default 10) leaves → builds Merkle tree
+5. Pushes epoch data to randomness API → commits `epochRoot` on-chain via `BatchMiningModule.commitEpochRoot()` with EIP-712 signature
+6. After 100-block challenge window → `finalizeEpoch()` called automatically
+7. Optionally anchors finalized epoch root to Bitcoin via OP_RETURN
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `l2-mining/randomness-api/epoch-builder.js` | Orchestrator (579 lines) |
+| `l2-mining/randomness-api/epoch-state.json` | Persistent state: `{nextEpochId, processedLines, pendingLeaves}` |
+| `l2-mining/randomness-api/.env` | Config (secrets — NOT committed) |
+| `l2-mining/randomness-api/epoch-store/` | Local epoch JSON snapshots |
+| `l2-mining/contracts/modules/BatchMiningModule.sol` | On-chain contract (279 lines) |
+
+### Epoch Builder .env (l2-mining/randomness-api/.env)
+
+```env
+# Arbitrum production (chain ID 42161)
+RPC_URL=https://api.nativebtc.org/v1/arb?key=<rpc_api_key>   # ⚠️ MUST include API key
+CHAIN_ID=42161
+POOL_ID=3
+MINER_PRIVATE_KEY=<hex_private_key>
+
+# Contracts
+BATCH_CONTRACT=0x6eb6D03A8E98c79E89B98ce19AcAefB865817Db2
+CORE_CONTRACT=0xF6556DDC7CdD3635A05428BD85BCf33A09F752e6
+TGBT_TOKEN=0x31228eE520e895DA19f728DE5459b1b317d9b8D8
+TOKENOMICS_CONTRACT=0xA9f684d709bB46155A252b260dDDE4cb2a37a0E3
+
+# Tuning
+SOLUTIONS_PER_EPOCH=10
+POLL_INTERVAL=30000          # ms between telemetry scans
+PORT=4271
+```
+
+### BatchMiningModule.sol Constraints
+
+- **Sequential epoch IDs:** `epochId != _nextEpochId` → `revert EpochNotFound(epochId)`. Epochs must be committed in strict order (0, 1, 2, …).
+- **Challenge window:** 100 blocks must pass between `commitEpochRoot()` and `finalizeEpoch()`. Premature finalize → `ChallengeWindowActive`.
+- **Cooldown:** `EPOCH_COOLDOWN_BLOCKS` enforced between commits from same operator.
+- **Leaf cap:** `MAX_LEAVES_PER_EPOCH` limits solutions per epoch.
 
 ## Key Config Fields (miner-config.json)
 
@@ -89,8 +150,7 @@ All log files are in `.runtime-logs/stack/`. The miner logs to **miner.out.log**
 - `stale_block.enabled`: must be `true` for stale-block mining
 - `stale_block.bitcoin_api_url`: `https://api.nativebtc.org`
 - `stale_block.api_key`: optional, falls back to top-level `rpc_api_key`
-- Blockchain: Arbitrum (chain ID 42161)
-- Wallet: `0x5cB4D906f0464b34c44d6555A770BF6aF4A2cEfe`, Pool ID: 3
+- Blockchain: Arbitrum (chain ID 42161, hex `0xa4b1`)
 
 ## Config Inheritance (config.rs)
 
@@ -110,6 +170,17 @@ All log files are in `.runtime-logs/stack/`. The miner logs to **miner.out.log**
 - `stale-mining`: enables stale-block Bitcoin orphan mining (WS stream + REST harvest)
 - Always build with `--features stale-mining` for production
 
+## Smart Contracts (Arbitrum)
+
+| Contract | Address |
+|----------|---------|
+| Core (TemporalGradientBeacon) | `0xF6556DDC7CdD3635A05428BD85BCf33A09F752e6` |
+| BatchMiningModule | `0x6eb6D03A8E98c79E89B98ce19AcAefB865817Db2` |
+| TGBT Token | `0x31228eE520e895DA19f728DE5459b1b317d9b8D8` |
+| Tokenomics | `0xA9f684d709bB46155A252b260dDDE4cb2a37a0E3` |
+
+Wallet: `0x5cB4D906f0464b34c44d6555A770BF6aF4A2cEfe`, Pool ID: 3
+
 ## Common Gotchas
 
 1. **Binary is at workspace level** — `l2-mining/rust/target/release/`, NOT `l2-mining/rust/temporal_gradient_core/target/release/`
@@ -118,6 +189,10 @@ All log files are in `.runtime-logs/stack/`. The miner logs to **miner.out.log**
 4. **Arbitrum TX receipts can be None** — chain.rs polls `get_transaction_receipt()` with retries. Don't treat None as failure.
 5. **Log file names** — it's `miner.out.log` and `miner.err.log` (NOT `miner.log`)
 6. **start-all.ps1 auto-syncs** — when the build binary is newer than the deploy binary, it copies automatically (even without rebuilding)
+7. **Epoch IDs are strictly sequential** — the contract enforces `epochId == _nextEpochId`. If `epoch-state.json` gets out of sync with the on-chain counter, reset `nextEpochId` to match `_nextEpochId` on-chain.
+8. **RPC URL needs API key** — NativeBTC RPC requires `?key=<api_key>` query parameter. Without it → `NETWORK_ERROR: could not detect network`.
+9. **Epoch Builder has no port** — unlike other services, it uses a PID file (`.runtime-logs/stack/epoch-builder.pid`) for process tracking, not a TCP port.
+10. **Challenge window** — `finalizeEpoch()` will revert with `ChallengeWindowActive` until 100 Arbitrum blocks (~200 s) have passed since `commitEpochRoot()`.
 
 ## Testing
 
