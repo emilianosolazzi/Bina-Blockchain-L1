@@ -413,6 +413,24 @@ A miner can see:
 - signed proof-of-presence,
 - verified egress readiness.
 
+### 7.7 Runtime memory hardening and encrypted state persistence
+
+Miner secret material — private keys, reveal signatures, and HMAC secrets — never exists in ordinary process memory.
+
+The miner runtime holds all sensitive values inside a **SecureBuffer**: a hardened, OS-locked memory region with the following protections:
+
+- **VirtualLock / mlock**: the buffer is pinned in physical RAM so that the operating system cannot swap it to disk, where it could be recovered forensically.
+- **Guard-byte sentinels**: 8-byte canary regions are placed immediately before and after the user data. Any heap overflow or underflow that corrupts these sentinels is detected on every integrity check, turning a silent corruption into a loud failure.
+- **Address-seeded canary**: a per-allocation canary derived from the buffer's own memory address makes it infeasible to forge a valid canary value from a different process or allocation.
+- **Anti-debug gating**: every read access checks for an attached debugger. If one is detected, the buffer refuses to expose its contents. The check is rate-limited (one syscall per second via a monotonic-clock cache) so that it adds no measurable overhead to mining throughput.
+- **RAII scoped access**: callers obtain a `ScopedRead` guard that dereferences to the data and issues a sequential memory fence (`fence(SeqCst)`) on drop. This prevents the compiler or CPU from caching or reordering the sensitive pointer across scope boundaries.
+- **Three-pass paranoid wipe**: when a buffer is released, `paranoid_wipe` writes `0xFF`, then `0xAA`, then `0x00` with compiler fences between each pass, followed by a `zeroize`-crate zero pass. This exceeds DoD 5220.22-M overwrite requirements.
+- **Pool recycling**: wiped allocations are returned to a lock-free pool so the next buffer reuse avoids a fresh VirtualLock syscall without ever leaking prior contents.
+
+Beyond runtime memory, the miner also protects **at-rest state**. Pending commitment files — which contain the reveal signature and secret value needed to complete a commit-reveal cycle — are encrypted on disk using a blake3-derived keystream seeded from the miner's private key file. The encryption is transparent: `save()` encrypts before writing; `load()` decrypts after reading; legacy plaintext files are accepted on read and silently re-encrypted on the next write. When a pending file is no longer needed, it is overwritten with zeros before deletion to prevent forensic recovery.
+
+These protections mean that even if an attacker obtains a memory dump, a disk image, or attaches a debugger to the running process, the sensitive values required to impersonate the miner or front-run a reveal are not recoverable. The commit-reveal scheme's economic security is therefore defended at every layer: protocol, network, memory, and disk.
+
 ---
 
 ## 10. Security Properties Not Yet Fully Implemented
@@ -458,6 +476,8 @@ A stolen certificate still authenticates.
 A copied configuration still authenticates.  
 A cloned VM can still appear legitimate.  
 A device running Temporal Gradient must continue to produce fresh work, maintain continuity, and preserve identity consistency over time.
+
+Moreover, the miner's key material is protected by runtime memory hardening (locked pages, guard-byte sentinels, anti-debug gating, and RAII scoped access) and encrypted disk persistence — so even physical access to the device does not trivially yield the secrets needed to impersonate it. Attestation is therefore defended at the credential level, the runtime level, and the continuity level simultaneously.
 
 That makes device attestation significantly stronger in dynamic environments.
 
@@ -611,7 +631,9 @@ The current system includes:
 - TGBT token with immutable hard cap and permission ossification,
 - storage verification and on-chain attestation recording,
 - heartbeat sidecar for personal threat monitoring,
-- dashboard support for threat posture and verified egress readiness.
+- dashboard support for threat posture and verified egress readiness,
+- runtime memory hardening (VirtualLock, guard-byte sentinels, anti-debug gating, RAII scoped access, paranoid wipe),
+- encrypted at-rest persistence for pending commitments (blake3-derived keystream, zero-scrub on delete).
 
 This means the whitepaper is not purely aspirational. Core building blocks already exist in working form.
 

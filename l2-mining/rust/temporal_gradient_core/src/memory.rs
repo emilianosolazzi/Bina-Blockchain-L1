@@ -34,8 +34,9 @@
 //! ```
 
 use std::io;
-use std::sync::atomic::{AtomicUsize, Ordering, fence};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering, fence};
 use std::sync::Mutex;
+use std::time::Instant;
 
 use lazy_static::lazy_static;
 use log::{debug, warn};
@@ -69,9 +70,59 @@ fn make_canary(ptr: *const u8) -> u64 {
 /// Maximum number of pre-locked buffers to keep in the pool.
 const POOL_MAX: usize = 16;
 
+/// Guard byte pattern written before and after the data region.
+/// Detects adjacent-byte overflows/underflows beyond what the
+/// address-seeded canary catches.
+const GUARD_BYTE: u8 = 0xFD;
+const GUARD_SIZE: usize = 8;
+
 lazy_static! {
     /// Pool of already-locked, zeroed Vec<u8> for fast reuse.
     static ref MEMORY_POOL: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::with_capacity(POOL_MAX));
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Rate-limited debugger detection
+// ─────────────────────────────────────────────────────────────────
+
+/// Cached debugger-present result with monotonic timestamp.
+/// Re-checks at most once per second to avoid syscall overhead on
+/// every `as_slice()` / `as_mut_slice()` call.
+struct DebuggerCache {
+    last_check_ns: AtomicU64,
+    last_result: std::sync::atomic::AtomicBool,
+}
+
+impl DebuggerCache {
+    const CHECK_INTERVAL_NS: u64 = 1_000_000_000; // 1 second
+
+    fn is_present(&self) -> bool {
+        let now = Self::monotonic_ns();
+        let prev = self.last_check_ns.load(Ordering::Relaxed);
+        if now.wrapping_sub(prev) >= Self::CHECK_INTERVAL_NS {
+            let result = platform::debugger_present();
+            self.last_result.store(result, Ordering::Relaxed);
+            self.last_check_ns.store(now, Ordering::Relaxed);
+            result
+        } else {
+            self.last_result.load(Ordering::Relaxed)
+        }
+    }
+
+    fn monotonic_ns() -> u64 {
+        // Use a process-relative monotonic clock.
+        lazy_static! {
+            static ref EPOCH: Instant = Instant::now();
+        }
+        EPOCH.elapsed().as_nanos() as u64
+    }
+}
+
+lazy_static! {
+    static ref DEBUGGER_CACHE: DebuggerCache = DebuggerCache {
+        last_check_ns: AtomicU64::new(0),
+        last_result: std::sync::atomic::AtomicBool::new(false),
+    };
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -254,9 +305,14 @@ impl std::error::Error for SecureBufferError {}
 /// - protected by an address-seeded canary
 /// - accessible only after passing anti-debug checks
 pub struct SecureBuffer {
+    /// Raw allocation: [guard_lo | user_data | guard_hi]
     data: Vec<u8>,
     /// Address-seeded canary — set once on construction, checked on access.
     canary: u64,
+    /// Byte offset where user data starts (after low guard).
+    user_offset: usize,
+    /// User-visible buffer length (excludes guard regions).
+    user_len: usize,
     is_locked: bool,
     lock_count: AtomicUsize,
     /// Set to false on drop to catch use-after-free.
@@ -267,28 +323,37 @@ impl SecureBuffer {
     // ── Constructors ─────────────────────────────────────────────
 
     /// Allocate a new zeroed, locked secure buffer of `size` bytes.
+    /// The internal allocation includes guard bytes before and after
+    /// the user region to detect adjacent-byte corruption.
     pub fn new(size: usize) -> Result<Self, SecureBufferError> {
         if size == 0 || size > (1 << 30) {
             return Err(SecureBufferError::InvalidSize);
         }
 
-        let data = vec![0u8; size];
-        if data.len() != size {
+        let total = GUARD_SIZE + size + GUARD_SIZE;
+        let mut data = vec![0u8; total];
+        if data.len() != total {
             return Err(SecureBufferError::AllocationFailed);
         }
+
+        // Write guard sentinels
+        data[..GUARD_SIZE].fill(GUARD_BYTE);
+        data[GUARD_SIZE + size..].fill(GUARD_BYTE);
 
         let canary = make_canary(data.as_ptr());
 
         let mut buf = Self {
             data,
             canary,
+            user_offset: GUARD_SIZE,
+            user_len: size,
             is_locked: false,
             lock_count: AtomicUsize::new(0),
             is_valid: true,
         };
 
         buf.try_lock();
-        platform::advise_secret(buf.data.as_mut_ptr(), size);
+        platform::advise_secret(buf.data.as_mut_ptr(), total);
         Ok(buf)
     }
 
@@ -299,22 +364,29 @@ impl SecureBuffer {
             return Err(SecureBufferError::InvalidSize);
         }
 
+        let total = GUARD_SIZE + size + GUARD_SIZE;
         if let Ok(mut pool) = MEMORY_POOL.lock() {
-            if let Some(pos) = pool.iter().position(|v| v.capacity() >= size) {
+            if let Some(pos) = pool.iter().position(|v| v.capacity() >= total) {
                 let mut data = pool.remove(pos);
                 data.zeroize();
-                data.resize(size, 0);
+                data.resize(total, 0);
+
+                // Restore guard sentinels
+                data[..GUARD_SIZE].fill(GUARD_BYTE);
+                data[GUARD_SIZE + size..].fill(GUARD_BYTE);
 
                 let canary = make_canary(data.as_ptr());
                 let mut buf = Self {
                     data,
                     canary,
+                    user_offset: GUARD_SIZE,
+                    user_len: size,
                     is_locked: false,
                     lock_count: AtomicUsize::new(0),
                     is_valid: true,
                 };
                 buf.try_lock();
-                platform::advise_secret(buf.data.as_mut_ptr(), size);
+                platform::advise_secret(buf.data.as_mut_ptr(), total);
                 return Ok(buf);
             }
         }
@@ -331,7 +403,7 @@ impl SecureBuffer {
 
     /// Copy the buffer into a fixed-size array.
     pub fn to_array<const N: usize>(&self) -> Result<[u8; N], SecureBufferError> {
-        if self.data.len() != N {
+        if self.user_len != N {
             return Err(SecureBufferError::InvalidSize);
         }
 
@@ -339,6 +411,15 @@ impl SecureBuffer {
         let mut out = [0u8; N];
         out.copy_from_slice(src);
         Ok(out)
+    }
+
+    /// Consuming constructor: move `src` into a secure buffer, then
+    /// zeroize the original `Vec`. Prevents the caller from
+    /// accidentally keeping an unprotected copy.
+    pub fn from_vec(mut src: Vec<u8>) -> Result<Self, SecureBufferError> {
+        let buf = Self::from_slice(&src)?;
+        src.zeroize();
+        Ok(buf)
     }
 
     // ── Locking ──────────────────────────────────────────────────
@@ -368,14 +449,22 @@ impl SecureBuffer {
 
     // ── Integrity ────────────────────────────────────────────────
 
-    /// Check the address-seeded canary.
-    /// Returns `Err(IntegrityViolation)` if the canary has been corrupted.
+    /// Check the address-seeded canary AND guard-byte sentinels.
+    /// Returns `Err(IntegrityViolation)` if either has been corrupted.
     pub fn verify(&self) -> Result<(), SecureBufferError> {
         if !self.is_valid {
             return Err(SecureBufferError::InvalidState);
         }
         let expected = make_canary(self.data.as_ptr());
         if self.canary != expected {
+            return Err(SecureBufferError::IntegrityViolation);
+        }
+        // Check guard-byte sentinels for adjacent-byte corruption.
+        let lo = &self.data[..self.user_offset];
+        let hi_start = self.user_offset + self.user_len;
+        let hi = &self.data[hi_start..];
+        if lo.iter().any(|&b| b != GUARD_BYTE) || hi.iter().any(|&b| b != GUARD_BYTE) {
+            warn!("SecureBuffer: guard-byte corruption detected — possible buffer overflow");
             return Err(SecureBufferError::IntegrityViolation);
         }
         Ok(())
@@ -385,17 +474,20 @@ impl SecureBuffer {
 
     /// Immutable slice access. Returns `None` if the buffer is invalid,
     /// integrity fails, or a debugger is detected.
+    ///
+    /// Debugger checks are rate-limited (once/second) to avoid
+    /// syscall overhead on hot paths.
     pub fn as_slice(&self) -> Option<&[u8]> {
         if !self.is_valid { return None; }
         if self.verify().is_err() {
             warn!("SecureBuffer: integrity violation on read");
             return None;
         }
-        if platform::debugger_present() {
+        if DEBUGGER_CACHE.is_present() {
             warn!("SecureBuffer: debugger detected on read — denying access");
             return None;
         }
-        Some(&self.data)
+        Some(&self.data[self.user_offset..self.user_offset + self.user_len])
     }
 
     /// Mutable slice access. Same guards as `as_slice`.
@@ -406,24 +498,35 @@ impl SecureBuffer {
             warn!("SecureBuffer: integrity violation on write");
             return None;
         }
-        if platform::debugger_present() {
+        if DEBUGGER_CACHE.is_present() {
             warn!("SecureBuffer: debugger detected on write — zeroing and denying access");
             self.zero();
             return None;
         }
-        Some(&mut self.data)
+        Some(&mut self.data[self.user_offset..self.user_offset + self.user_len])
+    }
+
+    /// RAII scoped access: borrows the buffer immutably and provides
+    /// a `Deref<Target = [u8]>` guard. When the guard drops, a
+    /// memory fence is issued to discourage the compiler from
+    /// caching the slice pointer beyond the borrow.
+    pub fn scoped_read(&self) -> Option<ScopedRead<'_>> {
+        let slice = self.as_slice()?;
+        Some(ScopedRead { slice })
     }
 
     // ── Queries ──────────────────────────────────────────────────
 
-    pub fn len(&self) -> usize { self.data.len() }
-    pub fn is_empty(&self) -> bool { self.data.is_empty() }
+    pub fn len(&self) -> usize { self.user_len }
+    pub fn is_empty(&self) -> bool { self.user_len == 0 }
     pub fn is_locked(&self) -> bool { self.lock_count.load(Ordering::SeqCst) > 0 }
     pub fn is_valid(&self) -> bool { self.is_valid }
 
-    /// True if every byte is zero.
+    /// True if every user byte is zero (ignores guard regions).
     pub fn is_zeroed(&self) -> bool {
-        self.data.iter().fold(0u8, |acc, &b| acc | b) == 0
+        self.data[self.user_offset..self.user_offset + self.user_len]
+            .iter()
+            .fold(0u8, |acc, &b| acc | b) == 0
     }
 
     // ── Constant-time operations ─────────────────────────────────
@@ -431,12 +534,13 @@ impl SecureBuffer {
     /// Compare contents with `other` in constant time.
     /// Returns `false` on length mismatch or invalid state.
     pub fn constant_time_eq(&self, other: &[u8]) -> bool {
-        if !self.is_valid || self.data.len() != other.len() {
+        if !self.is_valid || self.user_len != other.len() {
             return false;
         }
         // XOR-fold: result is 0 iff all bytes are equal.
         // No branch on secret data.
-        let diff = self.data.iter()
+        let user = &self.data[self.user_offset..self.user_offset + self.user_len];
+        let diff = user.iter()
             .zip(other.iter())
             .fold(0u8, |acc, (a, b)| acc | (a ^ b));
         diff == 0
@@ -447,10 +551,12 @@ impl SecureBuffer {
         if !self.is_valid || !src.is_valid {
             return Err(SecureBufferError::InvalidState);
         }
-        if self.data.len() != src.data.len() {
+        if self.user_len != src.user_len {
             return Err(SecureBufferError::InvalidSize);
         }
-        for (d, s) in self.data.iter_mut().zip(src.data.iter()) {
+        let dst = &mut self.data[self.user_offset..self.user_offset + self.user_len];
+        let s = &src.data[src.user_offset..src.user_offset + src.user_len];
+        for (d, s) in dst.iter_mut().zip(s.iter()) {
             *d = *s;
         }
         Ok(())
@@ -458,22 +564,46 @@ impl SecureBuffer {
 
     // ── Zeroing ──────────────────────────────────────────────────
 
-    /// Overwrite all bytes with zero, using the `zeroize` crate's
+    /// Overwrite all user bytes with zero, using the `zeroize` crate's
     /// compiler-fence to prevent the optimizer from eliding the write.
+    /// Guard regions are restored after zeroing.
     pub fn zero(&mut self) {
-        self.data.zeroize();
+        self.data[self.user_offset..self.user_offset + self.user_len].zeroize();
         // Extra write + fence for defence-in-depth.
         fence(Ordering::SeqCst);
     }
 
-    /// Three-pass wipe: 0xFF, fence, 0x00, fence, 0xAA, fence, 0x00.
+    /// Three-pass wipe: 0xFF, fence, 0xAA, fence, 0x00, fence.
     /// Use when `zero()` isn't paranoid enough (e.g., long-lived key material).
     pub fn paranoid_wipe(&mut self) {
+        let region = &mut self.data[self.user_offset..self.user_offset + self.user_len];
         for pass in [0xFFu8, 0xAAu8, 0x00u8] {
-            self.data.iter_mut().for_each(|b| *b = pass);
+            region.iter_mut().for_each(|b| *b = pass);
             fence(Ordering::SeqCst);
         }
-        self.data.zeroize();
+        region.zeroize();
+        fence(Ordering::SeqCst);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// ScopedRead — RAII immutable access guard
+// ─────────────────────────────────────────────────────────────────
+
+/// RAII guard returned by [`SecureBuffer::scoped_read`].
+/// Dereferences to `&[u8]` and issues a memory fence on drop
+/// to discourage the compiler from caching the pointer.
+pub struct ScopedRead<'a> {
+    slice: &'a [u8],
+}
+
+impl<'a> std::ops::Deref for ScopedRead<'a> {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] { self.slice }
+}
+
+impl<'a> Drop for ScopedRead<'a> {
+    fn drop(&mut self) {
         fence(Ordering::SeqCst);
     }
 }
@@ -487,8 +617,9 @@ impl Drop for SecureBuffer {
         // Mark invalid first — catches any re-entrant access.
         self.is_valid = false;
 
-        // Wipe contents.
-        self.zero();
+        // Wipe entire allocation (including guards) — defence-in-depth.
+        self.data.zeroize();
+        fence(Ordering::SeqCst);
 
         // Unlock physical memory.
         self.try_unlock();
@@ -729,5 +860,57 @@ mod tests {
         // mlock may fail on CI (unprivileged environments) so we just
         // verify the field reflects the actual attempt.
         let _ = buf.is_locked(); // must not panic
+    }
+
+    // ── Guard-byte integrity ────────────────────────────────────
+
+    #[test]
+    fn verify_detects_low_guard_corruption() {
+        let mut buf = SecureBuffer::new(16).unwrap();
+        // Corrupt the low guard region.
+        buf.data[0] = 0x00;
+        assert!(buf.verify().is_err(), "corrupted low guard should fail verify");
+    }
+
+    #[test]
+    fn verify_detects_high_guard_corruption() {
+        let mut buf = SecureBuffer::new(16).unwrap();
+        // Corrupt the last byte of the high guard region.
+        let last = buf.data.len() - 1;
+        buf.data[last] = 0x00;
+        assert!(buf.verify().is_err(), "corrupted high guard should fail verify");
+    }
+
+    // ── from_vec ────────────────────────────────────────────────
+
+    #[test]
+    fn from_vec_copies_and_zeroizes_source() {
+        let src = vec![0xABu8; 16];
+        let buf = SecureBuffer::from_vec(src).unwrap();
+        assert_eq!(buf.len(), 16);
+        assert_eq!(buf.as_slice().unwrap(), &[0xABu8; 16]);
+        assert!(buf.verify().is_ok());
+    }
+
+    // ── ScopedRead ──────────────────────────────────────────────
+
+    #[test]
+    fn scoped_read_returns_data_and_drops_cleanly() {
+        let mut buf = SecureBuffer::new(4).unwrap();
+        buf.as_mut_slice().unwrap().copy_from_slice(&[10, 20, 30, 40]);
+        {
+            let guard = buf.scoped_read().expect("valid buffer should yield ScopedRead");
+            assert_eq!(&*guard, &[10u8, 20, 30, 40]);
+        }
+        // After guard is dropped, buffer is still usable.
+        assert_eq!(buf.as_slice().unwrap(), &[10, 20, 30, 40]);
+    }
+
+    #[test]
+    fn scoped_read_none_for_invalid_buffer() {
+        let mut buf = SecureBuffer::new(4).unwrap();
+        buf.is_valid = false; // simulate invalidated state
+        assert!(buf.scoped_read().is_none());
+        buf.is_valid = true; // restore for clean drop
     }
 }

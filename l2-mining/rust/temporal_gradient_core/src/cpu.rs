@@ -59,10 +59,13 @@ use log::{debug, warn};
 static CPU_IDENTITY: OnceCell<CpuIdentity> = OnceCell::new();
 
 /// Temperature cache — avoids hammering sensors on every telemetry tick.
-static LAST_TEMP_TIME_MS: AtomicU64 = AtomicU64::new(0);
+/// Stores elapsed microseconds since first call (via a monotonic `Instant`
+/// anchor) so the cache is immune to wall-clock jumps (NTP, suspend, etc.).
+static TEMP_EPOCH: OnceCell<Instant> = OnceCell::new();
+static LAST_TEMP_US: AtomicU64 = AtomicU64::new(0);
 /// Stores `f32::to_bits()` as `i32` (same bit width) for atomic storage.
 static LAST_TEMP_BITS: AtomicI32 = AtomicI32::new(0);
-const TEMP_CACHE_TTL_MS: u64 = 1_000;
+const TEMP_CACHE_TTL_US: u64 = 1_000_000;
 
 /// Per-platform warning gate — each bit guards one platform warning.
 static WARN_FLAGS: AtomicU64 = AtomicU64::new(0);
@@ -107,6 +110,7 @@ impl CpuIdentity {
         h.update(self.signature.to_le_bytes());
         h.update(self.cores.to_le_bytes());
         h.update(self.threads.to_le_bytes());
+        h.update(self.cache_l3_kb.to_le_bytes());
         for f in &self.features {
             h.update(f.as_bytes());
         }
@@ -172,11 +176,23 @@ pub fn detect_cpu_safely() -> &'static CpuIdentity {
         }
 
         // Family / model / stepping / signature
+        // Apply Intel's extended family/model rules (SDM Vol. 2A, Table 3-20):
+        //   effective_family = base_family + (if base_family == 0xF { ext_family } else { 0 })
+        //   effective_model  = (if base_family in {0x6, 0xF} { ext_model << 4 } else { 0 }) | base_model
         if let Some(fi) = cpuid.get_feature_info() {
-            id.family = fi.family_id() as u32;
-            id.model = fi.model_id() as u32;
-            id.stepping = fi.stepping_id() as u32;
-            id.signature = (id.family << 8) | (id.model << 4) | id.stepping;
+            let base_family = fi.family_id() as u32;
+            let base_model  = fi.model_id() as u32;
+            let ext_family  = fi.extended_family_id() as u32;
+            let ext_model   = fi.extended_model_id() as u32;
+
+            id.family = if base_family == 0xF { base_family + ext_family } else { base_family };
+            id.model  = if base_family == 0x6 || base_family == 0xF {
+                (ext_model << 4) | base_model
+            } else {
+                base_model
+            };
+            id.stepping  = fi.stepping_id() as u32;
+            id.signature = (id.family << 12) | (id.model << 4) | id.stepping;
         }
 
         // Feature flags — collect all known ones
@@ -337,13 +353,11 @@ pub fn has_cpu_feature(feature: CpuFeature) -> bool {
 /// Results are cached for 1 second to avoid hammering the sensor
 /// on every telemetry tick.
 pub fn get_cpu_temperature() -> Option<f32> {
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
+    let epoch = TEMP_EPOCH.get_or_init(Instant::now);
+    let now_us = epoch.elapsed().as_micros() as u64;
 
-    let last = LAST_TEMP_TIME_MS.load(Ordering::Relaxed);
-    if now_ms.saturating_sub(last) < TEMP_CACHE_TTL_MS {
+    let last = LAST_TEMP_US.load(Ordering::Relaxed);
+    if last > 0 && now_us.saturating_sub(last) < TEMP_CACHE_TTL_US {
         let bits = LAST_TEMP_BITS.load(Ordering::Relaxed) as u32;
         return Some(f32::from_bits(bits));
     }
@@ -351,7 +365,7 @@ pub fn get_cpu_temperature() -> Option<f32> {
     let temp = platform_temperature();
 
     if let Some(t) = temp {
-        LAST_TEMP_TIME_MS.store(now_ms, Ordering::Relaxed);
+        LAST_TEMP_US.store(now_us.max(1), Ordering::Relaxed);
         LAST_TEMP_BITS.store(t.to_bits() as i32, Ordering::Relaxed);
     }
 
@@ -791,8 +805,19 @@ pub fn mask_cpu_identity(config: Option<&MaskingConfig>) -> CpuIdentity {
     let mut m = cpu.clone();
 
     // Brand string — keep first N chars, pad rest with '*'
-    let keep = ((cpu.brand.len() as f32 * cfg.brand_retention_pct / 100.0) as usize)
+    let pct = cfg.brand_retention_pct.clamp(0.0, 100.0);
+    let keep_raw = ((cpu.brand.len() as f32 * pct / 100.0) as usize)
         .min(cpu.brand.len());
+    // Find the nearest char boundary at or before `keep_raw` to avoid
+    // panicking on (hypothetical) multi-byte UTF-8 brand strings.
+    let keep = if keep_raw == 0 {
+        0
+    } else {
+        match cpu.brand.char_indices().take_while(|&(i, _)| i < keep_raw).last() {
+            Some((i, c)) => (i + c.len_utf8()).min(cpu.brand.len()),
+            None => 0,
+        }
+    };
     if keep < cpu.brand.len() {
         m.brand = format!("{}{}", &cpu.brand[..keep], "*".repeat(cpu.brand.len() - keep));
     }

@@ -545,11 +545,36 @@ impl LiveMiningClient {
                     }
                 }
             }
-        } else if self.recover_pending_commit_block(&mut pending, key_path).await? {
-            pending.commit_block
         } else {
-            crate::pending::clear(key_path)?;
-            return Err(anyhow!("No commitment receipt"));
+            // Receipt is None — TX was sent but RPC dropped the response.
+            // The commit may have landed on-chain; poll before giving up.
+            tracing::warn!(
+                "Commitment TX receipt was None — polling for on-chain confirmation"
+            );
+            if let Some(c) = self
+                .wait_for_matching_onchain_commitment(submission.commitment.commit_hash)
+                .await?
+            {
+                tracing::info!(
+                    "Commitment appeared on-chain at block {} after receipt was lost",
+                    c.commit_block
+                );
+                c.commit_block
+            } else if self
+                .recover_pending_commit_block(&mut pending, key_path)
+                .await?
+            {
+                pending.commit_block
+            } else {
+                // TX was sent (not rejected) so the commitment may still land.
+                // Do NOT clear the pending file — leave it for
+                // try_resume_pending_commitment on the next loop iteration.
+                tracing::warn!(
+                    "Commitment TX was sent but receipt and on-chain confirmation both missing — \
+                     leaving pending file for recovery"
+                );
+                return Err(anyhow!("No commitment receipt — pending kept for recovery"));
+            }
         };
 
         pending.commit_block = commit_block;
@@ -589,9 +614,25 @@ impl LiveMiningClient {
     ) -> Result<Option<TransactionReceipt>> {
         let mut pending = pending.clone();
         if pending.commit_block == 0 {
-            if !self.recover_pending_commit_block(&mut pending, key_path).await? {
+            // Pending was saved before commit confirmed — poll briefly for
+            // the on-chain commitment to appear (RPC may still be lagging).
+            for attempt in 0..6u8 {
+                if self
+                    .recover_pending_commit_block(&mut pending, key_path)
+                    .await?
+                {
+                    tracing::info!(
+                        "Recovered pending commit_block {} on poll attempt {}",
+                        pending.commit_block,
+                        attempt + 1
+                    );
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            if pending.commit_block == 0 {
                 tracing::warn!(
-                    "Saved pending commitment has no commit block and no matching on-chain commitment — discarding"
+                    "Saved pending commitment has no commit block and no matching on-chain commitment after polling — discarding"
                 );
                 crate::pending::clear(key_path)?;
                 return Ok(None);

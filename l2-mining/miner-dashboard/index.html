@@ -1894,7 +1894,9 @@
         els.progressBar.style.background = 'linear-gradient(90deg, var(--accent), var(--accent-2))';
       }
 
-      els.hashrate.textContent = fmtHashrate(snap.hashrate_hs);
+      // Use session-average hashrate when instantaneous is 0 (workers idle during clearance/lock)
+      const effectiveHashrate = snap.hashrate_hs || (snap.hashes > 0 && snap.uptime_seconds > 0 ? snap.hashes / snap.uptime_seconds : 0);
+      els.hashrate.textContent = fmtHashrate(effectiveHashrate);
       els.hashes.textContent = `${fmtNum(snap.hashes)} hashes total`;
       els.solutions.textContent = fmtNum(snap.solutions);
       els.lastNonce.textContent = snap.last_solution_nonce != null ? `Last nonce ${fmtNum(snap.last_solution_nonce)}` : 'No solution yet';
@@ -2088,7 +2090,7 @@
               </div>
               <span class="badge ${item.gapFlag ? 'fail' : 'ok'}">${item.gapFlag ? 'Gap' : 'Healthy'}</span>
             </div>
-            <div class="helper" style="margin-top:8px;">Gap ${escapeHtml(fmtMsDuration(item.gapMs))} • Hashrate ${escapeHtml(fmtHashrate(item.hashrateHs))} • Temp ${item.temperatureC != null ? escapeHtml(`${item.temperatureC.toFixed(1)} °C`) : '—'}</div>
+            <div class="helper" style="margin-top:8px;">Gap ${escapeHtml(fmtMsDuration(item.gapMs))} • Hashrate ${escapeHtml(fmtHashrate(item.hashrateHs || (item.totalHashes > 0 && item.uptimeSeconds > 0 ? item.totalHashes / item.uptimeSeconds : 0)))} • Temp ${item.temperatureC != null ? escapeHtml(`${item.temperatureC.toFixed(1)} °C`) : '—'}</div>
             <div class="mono" style="margin-top:8px;">${escapeHtml(shortHash(item.outputHash || '—', 18))}</div>
           </div>`).join('')
         : '<div class="helper">No heartbeat history available yet.</div>';
@@ -2650,7 +2652,7 @@
     function initEntropyPipeline() {
       const snap = state.latest;
       if (snap) {
-        entropyState.pow.hashrate = snap.hashrate_hs || 0;
+        entropyState.pow.hashrate = snap.hashrate_hs || (snap.hashes > 0 && snap.uptime_seconds > 0 ? snap.hashes / snap.uptime_seconds : 0);
         entropyState.pow.nonces = snap.hashes || 0;
         entropyState.pow.solutions = snap.solutions || 0;
         entropyState.pow.accepted = snap.accepted_submissions || 0;
@@ -2700,7 +2702,7 @@
 
       // ── Update PoW source from LIVE telemetry (real data) ──
       if (snap) {
-        entropyState.pow.hashrate = snap.hashrate_hs || entropyState.pow.hashrate;
+        entropyState.pow.hashrate = snap.hashrate_hs || (snap.hashes > 0 && snap.uptime_seconds > 0 ? snap.hashes / snap.uptime_seconds : entropyState.pow.hashrate);
         entropyState.pow.nonces = snap.hashes || entropyState.pow.nonces;
         entropyState.pow.solutions = snap.solutions || entropyState.pow.solutions;
         entropyState.pow.accepted = snap.accepted_submissions || entropyState.pow.accepted;
@@ -3258,7 +3260,8 @@
             : '<span class="sol-badge fail">Failed submit</span>';
           const nonce = s.nonce != null ? s.nonce.toLocaleString() : '—';
           const reward = s.accepted ? `<span style="color:var(--gold);">${fmtTGBT(s.reward)} TGBT${s.estimated ? ' (est)' : ''}</span>` : '—';
-          const hr = s.hashrate != null ? `${fmtNum(s.hashrate)} H/s` : '—';
+          const hr = (s.hashrate || (s.totalHashes > 0 && s.uptime > 0 ? s.totalHashes / s.uptime : 0)) > 0
+            ? `${fmtNum(s.hashrate || s.totalHashes / s.uptime)} H/s` : '—';
           const phase = s.phase || '—';
             const outputHash = s.outputHash || s.hash || null;
           const hash = s.accepted
