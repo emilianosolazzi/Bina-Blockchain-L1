@@ -1403,19 +1403,21 @@
               <div class="helper" style="margin-bottom:8px;">Active alerts</div>
               <div id="threatActiveAlerts" class="proof-nodes"></div>
             </div>
-            <div class="proof-box">
-              <div class="helper" style="margin-bottom:8px;">Relay profile preview</div>
+            <details class="proof-box" style="cursor:default;">
+              <summary class="helper" style="margin-bottom:8px;cursor:pointer;user-select:none;">Relay profile preview <span style="font-size:10px;color:var(--muted);">▸ click to show/hide</span></summary>
               <div id="relayProfilePreview" class="proof-node mono" style="white-space: pre-wrap;">—</div>
-            </div>
+            </details>
           </div>
         </div>
       </div>
 
       <div class="panel" style="grid-column: span 12;">
-        <div class="solutions-header">
-          <h3 class="section-title">System & Chain Status</h3>
-          <button class="action-btn" id="refreshSystem">Refresh status</button>
-        </div>
+        <details open id="systemStatusDetails">
+          <summary class="solutions-header" style="cursor:pointer;list-style:none;">
+            <h3 class="section-title" style="display:inline;">System & Chain Status</h3>
+            <span style="font-size:10px;color:var(--muted);margin-left:8px;">▸ click to hide/show</span>
+            <button class="action-btn" id="refreshSystem" onclick="event.stopPropagation()" style="float:right;">Refresh status</button>
+          </summary>
         <p class="helper" style="margin:0 0 14px;">Live status of all services, your wallet balance, smart contract wiring on Arbitrum, and the host machine hardware. If any service shows Offline, run <code style="font-size:11px;">start-all.ps1</code> to restart.</p>
         <div class="system-grid">
           <div class="status-card">
@@ -1469,6 +1471,7 @@
             </div>
           </div>
         </div>
+        </details>
       </div>
 
       <div class="panel left">
@@ -1767,10 +1770,12 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
       </div>
 
       <div class="panel solutions-panel">
-        <div class="solutions-header">
-          <h3 class="section-title">Epoch Explorer</h3>
-          <button class="action-btn" id="refreshEpochs">Refresh epochs</button>
-        </div>
+        <details open id="epochExplorerDetails">
+          <summary class="solutions-header" style="cursor:pointer;list-style:none;">
+            <h3 class="section-title" style="display:inline;">Epoch Explorer</h3>
+            <span style="font-size:10px;color:var(--muted);margin-left:8px;">▸ click to hide/show</span>
+            <button class="action-btn" id="refreshEpochs" onclick="event.stopPropagation()" style="float:right;">Refresh epochs</button>
+          </summary>
         <details style="margin:0 0 14px;font-size:12px;color:var(--muted);">
           <summary style="cursor:pointer;color:var(--accent);font-weight:600;">What are epochs and why do they matter?</summary>
           <div style="margin:8px 0 0 12px;line-height:1.6;">
@@ -1818,6 +1823,7 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
           </div>
         </div>
         <div id="epochStatus" class="helper" style="margin-top:12px;">—</div>
+        </details>
       </div>
     </section>
   </div>
