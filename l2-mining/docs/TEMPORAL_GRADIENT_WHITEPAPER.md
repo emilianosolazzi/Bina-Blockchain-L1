@@ -2,8 +2,8 @@
 
 ## Continuous Mining as a Security Primitive
 
-Version 0.1  
-March 16, 2026
+Version 0.2  
+March 22, 2026
 
 ---
 
@@ -295,16 +295,28 @@ Temporal Gradient is not yet a complete replacement for traditional network secu
 
 It does **not yet** provide:
 
-- encrypted tunnel transport,
-- packet forwarding,
-- multi-hop privacy routing,
-- full peer discovery,
+- encrypted tunnel transport between relay nodes,
+- packet forwarding plane for multi-hop routing,
+- multi-hop onion-routed privacy circuits,
+- full peer discovery and signed node directory,
+- relay admission control and session management,
+- mixnet batching and cover traffic generation,
+- private messaging or censorship-resistant publishing,
+- private transaction relay or MEV-protected order flow,
+- cross-chain atomic swap negotiation transport,
+- dVPN verified egress through healthy nodes,
+- RPC load balancing and failover mesh,
+- oracle data relay through the miner network,
+- decentralized CDN / edge caching,
+- decentralized key escrow with Shamir shares,
+- verifiable computation delegation through the mesh,
+- MPC transport with per-hop integrity attestation,
+- consensus gossip layer for L3 / appchain,
 - strong hardware attestation via TPM/TEE,
 - large-scale fleet correlation across institutions,
-- production relay admission and session control,
 - malware prevention or endpoint hardening.
 
-Those capabilities are future layers built on top of the current trust foundation.
+These capabilities are future layers built on top of the current trust foundation. The relay-readiness profile and heartbeat attestation infrastructure already in place provide the primitives needed to implement each of them.
 
 ---
 
@@ -377,13 +389,11 @@ A dense and diverse miner network can become a passive sensor grid without centr
 
 ---
 
-## 12. Verified Egress and Future Relay Networks
+## 12. Verified Egress and Peer-to-Peer Relay Networks
 
-A future extension of Temporal Gradient is a verified egress network.
+A future extension of Temporal Gradient is a verified egress network built on top of the existing miner mesh.
 
-In that model, healthy miners can serve as forwarding nodes for other participants.
-
-The value is not simply that a node can forward traffic. The value is that the forwarding node is continuously proving:
+In that model, healthy miners serve as forwarding nodes for other participants. Every relay node is continuously proving:
 
 - it is alive,
 - it is healthy,
@@ -391,12 +401,72 @@ The value is not simply that a node can forward traffic. The value is that the f
 - it is producing fresh work,
 - it remains below a threat threshold.
 
-This would produce a very different trust model from a traditional VPN.
+This produces a fundamentally different trust model from any existing relay, VPN, or mixnet.
 
-A traditional VPN asks the user to trust a server operator.
-Temporal Gradient would allow the user to trust only nodes whose liveness and integrity are being continuously measured.
+A traditional VPN asks the user to trust a server operator. Tor asks the user to trust that enough relay operators are honest. Neither system offers continuous, on-chain, independently verifiable proof of relay integrity.
 
-The current system already exposes a relay-readiness profile. The forwarding plane itself remains future work.
+Temporal Gradient relay nodes **cannot fake liveness**. The heartbeat chain and intrusion scoring are independently verifiable by anyone. That is the structural advantage.
+
+The current system already exposes a relay-readiness profile per miner. The forwarding plane itself is the next major development phase.
+
+### 12.1 Core transport layer
+
+The relay foundation consists of:
+
+- **Encrypted tunnel transport.** End-to-end encrypted circuits between miners with Double Ratchet key rotation. Each session is bound to the miner's on-chain identity.
+- **Packet forwarding plane.** Raw TCP/UDP relay through the miner mesh. Multi-hop onion routing where every hop is a cryptographically attested healthy node.
+- **Peer discovery and signed node directory.** On-chain registry of relay-ready miners with region, operator address, capability set, intrusion score, and current relay profile. Clients discover relays by querying the contract or a cached DHT.
+- **Relay admission control.** Only miners whose relay-readiness profile meets threshold criteria (uptime, intrusion score, heartbeat freshness) are admitted to the forwarding plane. Unhealthy nodes are automatically excluded.
+
+### 12.2 Privacy and communication
+
+The relay mesh enables privacy-preserving communication primitives:
+
+- **Private messaging.** End-to-end encrypted messages routed through the miner mesh. No central server. Miners earn TGBT for bandwidth. Cover traffic makes traffic analysis resistant.
+- **Mixnet batching.** Miners batch, delay, and reorder packets before forwarding. The heartbeat cadence creates natural batching windows. Cover traffic (already modeled in the relay profile) further obscures patterns.
+- **Whistleblower dead drops.** One-way anonymous message submission through multi-hop relay. The receiver can prove message integrity via Merkle proof. The sender is untraceable because every hop is a different attested miner.
+- **Censorship-resistant publishing.** Critical messages, governance proposals, or emergency keys can be pinned across the relay mesh with redundancy. Every storage node is health-attested.
+
+### 12.3 Financial and DeFi applications
+
+The combination of verified relay transport and on-chain randomness opens financial use cases:
+
+- **Private transaction relay.** Forward signed transactions to different RPC endpoints through the miner mesh, breaking the link between sender IP and transaction origin. Decentralized Flashbots Protect through health-attested nodes.
+- **MEV-protected order flow.** Transactions routed through multi-hop relay before reaching the mempool. Each relay hop is attested — if a relay node front-runs a transaction, its intrusion score spikes and it loses relay admission.
+- **Cross-chain atomic swap negotiation.** The relay carries swap negotiation messages between chains. The randomness beacon provides shared random seeds for fair ordering. Both parties can verify relay node integrity before committing.
+- **Entropy-as-a-service marketplace.** Miners sell randomness outputs directly to consumers through the relay with TGBT payment channels. No API middleman.
+
+### 12.4 Infrastructure services
+
+The relay mesh can serve as decentralized infrastructure:
+
+- **Decentralized VPN (dVPN).** Verified egress where every exit node is continuously proving liveness, health, and identity. Users select routes based on intrusion score, region, and latency.
+- **RPC load balancing and failover.** Clients connect to the relay mesh instead of a single RPC endpoint. The mesh routes to the healthiest, lowest-latency miners who proxy the calls.
+- **Oracle data relay.** Miners relay off-chain data — prices, events, block headers from other chains — through the mesh. The stale-block mining infrastructure already fetches Bitcoin block headers; this extends naturally to arbitrary oracle feeds.
+- **Decentralized CDN and edge cache.** Frequently requested randomness proofs, Merkle roots, and epoch data are cached at relay nodes closest to the consumer. Miners earn TGBT for cache hits.
+- **Decentralized DNS resolution.** Relay nodes resolve names through distributed hash tables. Liveness-proven nodes prevent DNS poisoning attacks.
+
+### 12.5 Security and monitoring services
+
+- **Passive threat sensing grid.** Miners detect anomalies (network scans, DDoS patterns, BGP hijacks) and report through the relay. A global intrusion detection network where every sensor is identity-bound and on-chain attested.
+- **Canary network.** Relay nodes that go silent or whose intrusion score spikes serve as automatic canaries for infrastructure problems. Smart contracts can trigger alerts when relay liveness drops below a threshold.
+- **Decentralized key escrow and recovery.** Shamir secret shares distributed across health-attested relay nodes. Recovery requires a threshold of nodes that are all provably alive and untampered.
+- **Proof-of-presence attestation service.** Third parties can verify that a device was online, healthy, and reachable at a specific time through the relay heartbeat chain. Useful for compliance, insurance, and SLA enforcement.
+
+### 12.6 Compute and coordination
+
+- **Verifiable computation relay.** Small compute tasks (VDF computation, ZK proof generation) are delegated through the mesh with results relayed back. Health attestation ensures the compute node was not tampered with.
+- **Multi-party computation (MPC) transport.** MPC protocols require secure channels between participants. The relay provides those channels with continuous integrity attestation on every hop.
+- **Decentralized lottery and fair selection.** On-chain randomness combined with relay transport enables provably fair selection protocols where the relay itself cannot bias the outcome.
+- **Consensus messaging layer.** If a custom L3 or appchain is built on top of Temporal Gradient, the relay mesh is a natural gossip layer for block propagation with built-in Sybil resistance through staked and attested miners.
+
+### 12.7 The structural differentiator
+
+Every capability above exists in isolation in other projects. What makes Temporal Gradient relay unique is the trust foundation beneath it:
+
+> Every relay node is continuously proving it is alive, healthy, identity-bound, and untampered — on-chain, independently verifiable.
+
+No other relay network, VPN, mixnet, or mesh has this property. Tor nodes can be malicious. VPN operators can lie. CDN providers can be compromised. Temporal Gradient relay nodes cannot fake liveness because the heartbeat chain and intrusion scoring are independently verifiable by any observer.
 
 ---
 
@@ -466,10 +536,16 @@ This means the whitepaper is not purely aspirational. Core building blocks alrea
 
 However, the following remain roadmap items:
 
-- multi-miner institutional fleet view,
+- encrypted tunnel transport and packet forwarding plane,
 - peer discovery and signed node directory,
-- encrypted relay sessions,
-- packet forwarding layer,
+- relay admission control and session management,
+- private messaging and mixnet batching,
+- private transaction relay and MEV-protected order flow,
+- dVPN verified egress through healthy nodes,
+- RPC load balancing, oracle relay, and decentralized CDN,
+- decentralized key escrow and verifiable computation relay,
+- MPC transport and consensus gossip layer,
+- multi-miner institutional fleet view,
 - multi-region anomaly aggregation,
 - strong hardware-bound attestations,
 - production policy engine for relay admission.
@@ -503,11 +579,44 @@ However, the following remain roadmap items:
 
 ### Phase 4 — Verified egress mesh
 
-- peer discovery,
-- encrypted sessions,
-- healthy-node admission,
-- forwarding plane,
-- multi-hop privacy routing.
+**4a — Core transport**
+
+- peer discovery and signed on-chain node directory,
+- encrypted tunnel transport with Double Ratchet key rotation,
+- relay admission control (intrusion score, uptime, heartbeat freshness thresholds),
+- packet forwarding plane with multi-hop onion routing,
+- cover traffic generation and mixnet batching.
+
+**4b — Privacy and communication**
+
+- end-to-end encrypted private messaging through relay mesh,
+- whistleblower dead drops with Merkle-proven integrity,
+- censorship-resistant publishing and data pinning.
+
+**4c — Financial services**
+
+- private transaction relay (IP-unlinkable tx submission),
+- MEV-protected order flow through attested multi-hop relay,
+- cross-chain atomic swap negotiation transport,
+- entropy-as-a-service marketplace with TGBT payment channels.
+
+**4d — Infrastructure**
+
+- decentralized VPN (dVPN) verified egress,
+- RPC load balancing and failover mesh,
+- oracle data relay through miner network,
+- decentralized CDN / edge caching for proofs and epoch data,
+- decentralized DNS resolution via DHT.
+
+**4e — Advanced capabilities**
+
+- passive threat sensing grid (distributed IDS),
+- canary network with on-chain alerting,
+- decentralized key escrow with Shamir secret shares,
+- proof-of-presence attestation service for compliance/SLA,
+- verifiable computation relay (VDF, ZK delegation),
+- MPC transport with per-hop integrity attestation,
+- consensus gossip layer for future L3/appchain.
 
 ---
 
@@ -546,7 +655,9 @@ Temporal Gradient uses mining to do two things at once:
 1. generate valuable randomness and rewards,
 2. prove that machines are continuously alive and connected.
 
-If many machines do this across many locations, the resulting network can become a decentralized layer of operational truth. Institutions could use it to verify critical devices, detect outages, notice disruptions, and eventually route through healthy verified nodes.
+If many machines do this across many locations, the resulting network can become a decentralized layer of operational truth. Institutions can use it to verify critical devices, detect outages, and notice disruptions.
+
+Beyond monitoring, healthy miners can become relay nodes — forwarding encrypted traffic, private messages, transactions, oracle data, and computation results through a mesh where every hop is a continuously attested, identity-bound node. This creates a verified egress network, decentralized VPN, privacy layer, and infrastructure mesh that no existing system can match, because every relay node is provably alive and untampered on-chain.
 
 The system is therefore not only a mining network.
-It is a mining-powered security network.
+It is a mining-powered security and relay network.
