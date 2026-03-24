@@ -582,13 +582,42 @@ utxo-scanner.js (Node.js)       ← 5-step pipeline, dashboard API, live discove
 test-dead-utxos.csv             ← inventory (OP_RETURN txids, grows via discovery)
 ```
 
+### Canonical Anchor Model vs Scanner Demo Output
+
+- The **canonical** dead-UTXO anchor model is the Rust `DeadUTXOAnchor` in `bitcoin_dead_utxo_anchor.rs`:
+  - `anchor_id`
+  - `utxo_id`
+  - `data_hash`
+  - `merkle_root`
+  - `storage_reference`
+  - `metadata`
+  - `created_at`
+- `compute_anchor_id()` in Rust hashes `utxo_id + data_hash + merkle_root + storage_reference + created_at(le)`.
+- The Node `utxo-scanner.js` live scan result is a **demo/inspection surface**, not the canonical registry format. Its `summary.anchorId` / `summary.dataHash` are convenient dashboard values, but future contract/API work must anchor to the Rust model above.
+- New on-chain contracts for this layer:
+  - `l2-mining/contracts/UTXOAnchorVerifier.sol` — stores compact canonical anchor facts and reproduces the Rust `anchor_id` formula on-chain
+  - `l2-mining/contracts/UTXOCertificateRegistry.sol` — mints TGBT-paid certificate NFTs only after `UTXOAnchorVerifier` confirms the stored anchor facts
+- When extending the certificate system, prefer the verifier/registry pair over the scanner summary payload.
+
 ### 5-Step Scan Pipeline (`utxo-scanner.js`)
 
 1. **Load inventory** — parse dead UTXOs from `test-dead-utxos.csv`
 2. **Entropy-based selection** — SHA-256 scoring (mirrors Rust `selectUtxoByEntropy`)
 3. **Fetch from Bitcoin** — live mempool.space API (`/tx/{txid}` + `/tx/{txid}/outspend/{vout}`)
 4. **Verify dead** — confirm OP_RETURN / spent / dust (<546 sat)
-5. **Create anchor** — `entropy_anchor_v1` with SHA-256(anchor_data + entropy + utxo_id)
+5. **Create canonical anchor** — builds Rust-compatible `anchor_id`, `data_hash`, `merkle_root`, `storage_reference`, `metadata`, and `created_at`
+
+### Scanner Reality Rules
+
+- The scanner is **not allowed** to fabricate display-only `anchorId` / `dataHash` values anymore.
+- `utxo-scanner.js` now computes a canonical anchor record with the Rust-compatible shape and formula.
+- `anchor_id` is derived from `utxo_id + data_hash + merkle_root + storage_reference + created_at(le)`.
+- `merkle_root` currently mirrors `data_hash`, matching the Rust helper path in `utxo_fetcher.rs`.
+- The scan endpoint accepts real input parameters:
+  - `seed`
+  - `preference`
+  - `storageReference`
+- Step 5 of the scan returns the canonical anchor plus `metadataDigest` for later verifier/certificate payload generation.
 
 ### Scan Result Shape
 
@@ -598,13 +627,26 @@ test-dead-utxos.csv             ← inventory (OP_RETURN txids, grows via discov
   "steps": [{ "step": 1, "title": "...", "status": "ok|error|warn", "data": {...}, "durationMs": 42 }],
   "summary": {
     "utxoId": "txid:vout", "txid": "...", "vout": 0, "type": "op_return",
-    "blockHeight": 800000, "anchorId": "hex", "dataHash": "hex",
+    "blockHeight": 800000, "anchorId": "hex", "dataHash": "hex", "merkleRoot": "hex",
+    "storageReference": "ipfs://...", "metadataDigest": "hex", "anchorCreatedAt": 1774381525,
     "isDead": true, "deadReason": "OP_RETURN outputs are provably unspendable...",
     "explorerUrl": "https://mempool.space/tx/...", "decodedData": { "decoded": "..." }
   },
   "durationMs": 1234, "timestamp": "ISO"
 }
 ```
+
+### UTXO Anchor / Certificate API Endpoints
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/api/utxo/scan?seed=...&preference=...&storageReference=...` | Run a real canonical dead-UTXO anchor scan |
+| `GET` | `/api/utxo/latest` | Latest scan result |
+| `GET` | `/api/utxo/anchor/latest` | Latest stored canonical anchor record |
+| `GET` | `/api/utxo/anchor/:anchorId` | Single canonical anchor record by id |
+| `POST` | `/api/utxo/certificate-payload` | Build verifier registration payload + certificate mint payload from a real stored anchor |
+
+`POST /api/utxo/certificate-payload` accepts either `anchorId` or `scanId`, plus certificate context such as `documentHash` or `documentText`, `recipient`, `certType`, `metadataURI`, and `attestor`.
 
 ### Discovery (`/api/utxo/discover?blocks=N`)
 
@@ -827,6 +869,7 @@ Dashboard index.html (JS)
 - Transaction hashes (`submitTxHash`, `claimTxHash`) are still **not** mirrored into miner telemetry, but the dashboard now backfills them from live `StaleBlockSubmitted` and `StaleRewardClaimed` event logs.
 - The dashboard endpoint `/api/stale/developer-proof` now returns a compact factual payload with three sections: `proof`, `tx`, and `onChain`.
 - The endpoint also handles the stale-proof hash byte-order mismatch by trying both the telemetry/display hash and the reversed `bytes32` form stored by the oracle.
+- The dashboard also exposes `/api/stale/proofs` and a stale-proof selector in the UI so operators can choose among stored stale proofs instead of only inspecting the latest one.
 
 ## Dashboard Solution Store Dedup
 
@@ -964,6 +1007,9 @@ Reads entire `telemetry.jsonl`, splits by newlines, takes last `limit` lines, JS
 // GET /api/stale/developer-proof
 // Returns compact stale-proof data from telemetry + live oracle state + event-derived tx hashes
 // Top-level keys: source, status, proof, tx, onChain
+
+// GET /api/stale/proofs
+// Returns the stored stale proof list used by the dashboard selector UI
 ```
 
 ## Dashboard `entropyState` — Complete Object Structure

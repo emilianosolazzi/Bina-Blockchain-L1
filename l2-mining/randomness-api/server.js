@@ -163,11 +163,137 @@ function readBody(req) {
 		let body = '';
 		req.on('data', c => body += c);
 		req.on('end', () => {
+			if (!body.trim()) return resolve({});
 			try { resolve(JSON.parse(body)); }
 			catch (e) { reject(e); }
 		});
 		req.on('error', reject);
 	});
+}
+
+function sha256HexUtf8(value) {
+	return crypto.createHash('sha256').update(String(value ?? ''), 'utf8').digest('hex');
+}
+
+function normalizeHex(value) {
+	return String(value || '').trim().replace(/^0x/i, '').toLowerCase();
+}
+
+function ensureBytes32Hex(value, fieldName) {
+	const hex = normalizeHex(value);
+	if (!/^[0-9a-f]{64}$/.test(hex)) {
+		throw new Error(`${fieldName} must be a 32-byte hex string`);
+	}
+	return `0x${hex}`;
+}
+
+function resolveDocumentHash(body) {
+	if (body.documentHash) return ensureBytes32Hex(body.documentHash, 'documentHash');
+	if (body.documentText) return `0x${sha256HexUtf8(body.documentText)}`;
+	throw new Error('Missing documentHash or documentText');
+}
+
+function canonicalizeValue(value) {
+	if (Array.isArray(value)) return value.map(canonicalizeValue);
+	if (value && typeof value === 'object') {
+		return Object.keys(value).sort().reduce((acc, key) => {
+			acc[key] = canonicalizeValue(value[key]);
+			return acc;
+		}, {});
+	}
+	return value;
+}
+
+function canonicalJson(value) {
+	return JSON.stringify(canonicalizeValue(value));
+}
+
+function certTypeToIndex(value) {
+	if (value === undefined || value === null || value === '') return 7;
+	if (Number.isInteger(value)) {
+		if (value < 0 || value > 7) throw new Error('certType must be between 0 and 7');
+		return value;
+	}
+	const labels = {
+		documentnotarisation: 0,
+		document_notarisation: 0,
+		supplychain: 1,
+		supply_chain: 1,
+		legalevidence: 2,
+		legal_evidence: 2,
+		carboncredit: 3,
+		carbon_credit: 3,
+		academicpriority: 4,
+		academic_priority: 4,
+		softwarebuild: 5,
+		software_build: 5,
+		financialaudit: 6,
+		financial_audit: 6,
+		custom: 7,
+	};
+	const key = String(value).trim().toLowerCase();
+	if (!(key in labels)) throw new Error(`Unknown certType '${value}'`);
+	return labels[key];
+}
+
+function resolveAnchorRecord(body = {}) {
+	if (body.anchorId) {
+		const anchor = utxoScanner.getAnchorById(body.anchorId);
+		if (!anchor) throw new Error(`Unknown anchorId '${body.anchorId}'`);
+		return anchor;
+	}
+	if (body.scanId) {
+		const scan = utxoScanner.getScanById(body.scanId);
+		if (!scan?.summary?.anchorId) throw new Error(`Unknown scanId '${body.scanId}'`);
+		const anchor = utxoScanner.getAnchorById(scan.summary.anchorId);
+		if (!anchor) throw new Error(`No stored anchor for scanId '${body.scanId}'`);
+		return anchor;
+	}
+	const latest = utxoScanner.getLatestAnchor();
+	if (!latest) throw new Error('No anchor available yet. Run /api/utxo/scan first.');
+	return latest;
+}
+
+function buildUtxoCertificatePayload(body = {}) {
+	const anchor = resolveAnchorRecord(body);
+	const documentHash = resolveDocumentHash(body);
+	const recipient = body.recipient || body.issuedTo || null;
+	const metadataURI = String(body.metadataURI || '');
+	const certType = certTypeToIndex(body.certType);
+	const attestor = body.attestor || anchor.attestor || null;
+	const documentDescriptor = body.documentText ? { source: 'documentText', sha256: documentHash } : { source: 'documentHash', sha256: documentHash };
+
+	const verifierRegistration = utxoScanner.buildVerifierRegistrationPayload(anchor, attestor);
+	const certificateMint = utxoScanner.buildCertificateMintPayload(anchor, {
+		recipient,
+		documentHash,
+		certType,
+		metadataURI,
+		attestationSignature: body.attestationSignature || null,
+	});
+
+	return {
+		anchor,
+		document: documentDescriptor,
+		digests: {
+			anchorId: `0x${anchor.anchorId}`,
+			metadataDigest: `0x${anchor.metadataDigest}`,
+			utxoIdHash: `0x${sha256HexUtf8(anchor.utxoId)}`,
+			storageReferenceHash: `0x${sha256HexUtf8(anchor.storageReference || '')}`,
+			documentHash,
+			metadataCanonicalJson: canonicalJson(anchor.metadata),
+		},
+		verifierRegistration,
+		certificateMint,
+		context: {
+			attestor,
+			recipient,
+			metadataURI,
+			certType,
+			attestationSignatureRequired: true,
+			contractExpectation: 'Anchor must be registered in UTXOAnchorVerifier before mintCertificate succeeds.',
+		},
+	};
 }
 
 // ── Signature helper ────────────────────────────────────
@@ -387,6 +513,15 @@ async function handleVerifyEpochStorage(_req, res, epochId) {
 	}
 }
 
+async function handleBuildUtxoCertificatePayload(req, res) {
+	try {
+		const body = await readBody(req);
+		return sendJson(res, 200, buildUtxoCertificatePayload(body));
+	} catch (err) {
+		return sendJson(res, 400, { error: err.message });
+	}
+}
+
 // ── Router ──────────────────────────────────────────────
 const server = http.createServer((req, res) => {
 	const url = parseUrl(req);
@@ -444,7 +579,10 @@ const server = http.createServer((req, res) => {
 
 		// ── UTXO live scan endpoints ──
 		if (req.method === 'GET' && p === '/api/utxo/scan') {
-			utxoScanner.runFullScan('live-dashboard-scan-' + Date.now())
+			const seed = url.searchParams.get('seed') || `live-dashboard-scan-${Date.now()}`;
+			const preference = url.searchParams.get('preference') || null;
+			const storageReference = url.searchParams.get('storageReference') || url.searchParams.get('storage_reference') || '';
+			utxoScanner.runFullScan(seed, { preference, storageReference })
 				.then(result => sendJson(res, 200, result))
 				.catch(err => sendJson(res, 500, { error: err.message }));
 			return;
@@ -458,6 +596,22 @@ const server = http.createServer((req, res) => {
 		}
 		if (req.method === 'GET' && p === '/api/utxo/history') {
 			return sendJson(res, 200, { scans: utxoScanner.getScanHistory() });
+		}
+		if (req.method === 'GET' && p === '/api/utxo/anchor/latest') {
+			const latest = utxoScanner.getLatestAnchor();
+			return latest
+				? sendJson(res, 200, latest)
+				: sendJson(res, 404, { error: 'No anchor yet. Hit /api/utxo/scan first.' });
+		}
+		const utxoAnchorMatch = p.match(/^\/api\/utxo\/anchor\/([0-9a-fA-F]+)$/);
+		if (req.method === 'GET' && utxoAnchorMatch) {
+			const anchor = utxoScanner.getAnchorById(utxoAnchorMatch[1]);
+			return anchor
+				? sendJson(res, 200, anchor)
+				: sendJson(res, 404, { error: 'Anchor not found' });
+		}
+		if (req.method === 'POST' && p === '/api/utxo/certificate-payload') {
+			return handleBuildUtxoCertificatePayload(req, res);
 		}
 		if (req.method === 'GET' && p === '/api/utxo/discover') {
 			const url = new URL(req.url, `http://${req.headers.host}`);
@@ -524,8 +678,11 @@ server.listen(PORT, HOST, () => {
 	console.log(`    GET  /api/health`);
 	console.log(`    GET  /api/utxo/scan`);
 	console.log(`    GET  /api/utxo/latest`);
+	console.log(`    GET  /api/utxo/anchor/latest`);
+	console.log(`    GET  /api/utxo/anchor/:anchorId`);
 	console.log(`    GET  /api/utxo/inventory`);
 	console.log(`    GET  /api/utxo/history`);
+	console.log(`    POST /api/utxo/certificate-payload`);
 	console.log(`    GET  /api/utxo/discover?blocks=3\n`);
 });
 

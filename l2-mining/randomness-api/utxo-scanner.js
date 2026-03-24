@@ -19,10 +19,13 @@ const crypto = require('crypto');
 const CSV_PATH = process.env.SPRINT_DEAD_UTXO_DB || path.resolve(__dirname, 'test-dead-utxos.csv');
 const MEMPOOL_API = process.env.MEMPOOL_API || 'https://mempool.space/api';
 const MAX_HISTORY = 20;
+const ANCHOR_METHOD = 'dead_utxo_anchor_v1';
 
 let inventory = [];
 let scanHistory = [];
 let lastScan = null;
+let anchorHistory = [];
+let anchorIndex = new Map();
 
 // ── CSV Parser ──────────────────────────────────────────
 
@@ -56,6 +59,109 @@ function decodeHex(hex) {
   }
 }
 
+function normalizeHex(hex) {
+  return String(hex || '').trim().replace(/^0x/i, '').toLowerCase();
+}
+
+function sha256(data) {
+  return crypto.createHash('sha256').update(data).digest();
+}
+
+function sha256Hex(data) {
+  return crypto.createHash('sha256').update(data).digest('hex');
+}
+
+function toLittleEndianU64(value) {
+  const out = Buffer.alloc(8);
+  out.writeBigUInt64LE(BigInt(value || 0));
+  return out;
+}
+
+function isLikelyHex(value) {
+  return typeof value === 'string' && /^[0-9a-fA-F]+$/.test(value) && value.length > 0 && value.length % 2 === 0;
+}
+
+function toDataBuffer(value) {
+  if (Buffer.isBuffer(value)) return value;
+  if (value === undefined || value === null) return Buffer.alloc(0);
+  if (typeof value === 'string') {
+    const normalized = normalizeHex(value);
+    if (isLikelyHex(normalized)) return Buffer.from(normalized, 'hex');
+    return Buffer.from(value, 'utf8');
+  }
+  if (typeof value === 'object') {
+    return Buffer.from(JSON.stringify(value), 'utf8');
+  }
+  return Buffer.from(String(value), 'utf8');
+}
+
+function normalizePreference(preference) {
+  const value = String(preference || '').trim().toLowerCase();
+  if (!value) return null;
+  if (value === 'opreturn' || value === 'op-return') return 'op_return';
+  if (value === 'burn_address' || value === 'burn-address') return 'burn';
+  return value;
+}
+
+function canonicalizeMetadata(metadata) {
+  const ordered = {};
+  for (const key of Object.keys(metadata || {}).sort()) {
+    ordered[key] = metadata[key];
+  }
+  return JSON.stringify(ordered);
+}
+
+function metadataDigestHex(metadata) {
+  return sha256Hex(Buffer.from(canonicalizeMetadata(metadata), 'utf8'));
+}
+
+function computeAnchorId(utxoId, dataHash, merkleRoot, storageReference, createdAt) {
+  return sha256Hex(Buffer.concat([
+    Buffer.from(String(utxoId), 'utf8'),
+    Buffer.from(String(dataHash), 'utf8'),
+    Buffer.from(String(merkleRoot), 'utf8'),
+    Buffer.from(String(storageReference || ''), 'utf8'),
+    toLittleEndianU64(createdAt),
+  ]));
+}
+
+function utxoSummary(utxo) {
+  const utxoId = `${utxo.txid}:${utxo.vout || 0}`;
+  const type = String(utxo.type || '').toLowerCase();
+  if (type === 'spent') {
+    const height = Number(utxo.spent_at_height || utxo.block_height || 0);
+    return `Spent output ${utxoId} spent at Bitcoin height ${height}`;
+  }
+  if (type === 'op_return') {
+    return `OP_RETURN output ${utxoId} confirmed at Bitcoin height ${Number(utxo.block_height || 0)}`;
+  }
+  if (type === 'dust') {
+    return `Dust output ${utxoId} with ${Number(utxo.satoshis || 0)} sats at Bitcoin height ${Number(utxo.block_height || 0)}`;
+  }
+  if (type === 'burn') {
+    return `Burn-address output ${utxoId} to ${utxo.address || 'burn-address'} with ${Number(utxo.satoshis || 0)} sats at Bitcoin height ${Number(utxo.block_height || 0)}`;
+  }
+  return `Dead UTXO ${utxoId} (${type || 'unknown'}) at Bitcoin height ${Number(utxo.block_height || 0)}`;
+}
+
+function selectionReason(utxo, preference) {
+  const type = String(utxo.type || '').toLowerCase();
+  if (preference === 'op_return') return 'Chosen from provably unspendable OP_RETURN outputs.';
+  if (preference === 'spent') return 'Chosen from already-spent outputs for irreversible timestamping.';
+  if (preference === 'dust') return 'Chosen from uneconomic dust outputs that are effectively dead.';
+  if (preference === 'burn') return 'Chosen from burn-address outputs for publicly auditable destruction.';
+  if (type === 'op_return') return 'Highest-assurance dead output selected from available inventory.';
+  if (type === 'spent') return 'Spent output selected from available dead-UTXO inventory.';
+  if (type === 'dust') return 'Dust output selected from available dead-UTXO inventory.';
+  if (type === 'burn') return 'Burn-address output selected from available dead-UTXO inventory.';
+  return 'Dead UTXO selected from available inventory.';
+}
+
+function storeAnchor(anchorRecord) {
+  anchorIndex.set(anchorRecord.anchorId, anchorRecord);
+  anchorHistory = [anchorRecord, ...anchorHistory.filter(x => x.anchorId !== anchorRecord.anchorId)].slice(0, MAX_HISTORY);
+}
+
 // ── Load dead-UTXO inventory ────────────────────────────
 
 function loadInventory() {
@@ -85,17 +191,25 @@ function loadInventory() {
 
 // ── Entropy-weighted selection (mirrors Rust SHA-256 scoring) ──
 
-function selectUtxoByEntropy(anchorData) {
-  const seed = crypto.createHash('sha256')
-    .update(anchorData ? Buffer.from(anchorData) : crypto.randomBytes(32))
-    .update(Buffer.from(Date.now().toString()))
-    .digest();
+function selectUtxoByEntropy(anchorData, opts = {}) {
+  const preference = normalizePreference(opts.preference);
+  const candidates = preference ? inventory.filter(u => normalizePreference(u.type) === preference) : inventory;
+  if (!candidates.length) {
+    throw new Error(preference
+      ? `No dead UTXOs available for preference '${preference}'`
+      : 'No dead UTXOs available in inventory');
+  }
 
-  const scored = inventory.map((utxo, idx) => {
-    const hash = crypto.createHash('sha256')
-      .update(seed)
-      .update(Buffer.from(`${utxo.txid}:${utxo.vout || 0}`))
-      .digest();
+  const context = toDataBuffer(anchorData || 'live-scan');
+  const entropy = sha256(context);
+
+  const scored = candidates.map((utxo, idx) => {
+    const utxoId = `${utxo.txid}:${utxo.vout || 0}`;
+    const hash = sha256(Buffer.concat([
+      entropy,
+      context,
+      Buffer.from(utxoId, 'utf8'),
+    ]));
     const score = hash.readBigUInt64LE(0);
     return { utxo, score: score.toString(), index: idx };
   });
@@ -126,6 +240,13 @@ async function fetchFromMempool(txid, vout) {
     voutData: txData.vout?.[Number(vout)] || null,
     apiUrls: { tx: txUrl, outspend: outspendUrl },
   };
+}
+
+async function fetchBlockHeaderHex(blockHash) {
+  if (!blockHash) return null;
+  const resp = await fetch(`${MEMPOOL_API}/block/${blockHash}/header`, { signal: AbortSignal.timeout(15000) });
+  if (!resp.ok) throw new Error(`block header fetch HTTP ${resp.status}`);
+  return (await resp.text()).trim();
 }
 
 // ── Dead-output verification ────────────────────────────
@@ -163,36 +284,93 @@ function verifyDead(mempool) {
   };
 }
 
-// ── Anchor creation (mirrors Rust entropy_anchor_v1) ────
+// ── Canonical anchor creation (mirrors Rust shape + anchor id formula) ────
 
-function createAnchor(utxo, anchorData) {
+function createCanonicalAnchor(utxo, anchorData, mempool, opts = {}) {
   const utxoId = `${utxo.txid}:${utxo.vout || 0}`;
-  const entropy = crypto.randomBytes(32);
+  const createdAt = Number(opts.createdAt || Math.floor(Date.now() / 1000));
+  const storageReference = String(opts.storageReference || '');
+  const anchorInput = toDataBuffer(anchorData || 'live-scan');
+  const headerHex = normalizeHex(opts.blockHeaderHex || '');
+  const entropy = sha256(Buffer.concat([
+    anchorInput,
+    headerHex ? Buffer.from(headerHex, 'hex') : Buffer.from(String(mempool?.tx?.status?.block_hash || ''), 'utf8'),
+    Buffer.from(utxoId, 'utf8'),
+    Buffer.from(String(mempool?.voutData?.scriptpubkey || ''), 'utf8'),
+    Buffer.from(String(mempool?.voutData?.value ?? ''), 'utf8'),
+    Buffer.from(String(mempool?.outspend?.txid || ''), 'utf8'),
+  ]));
   const payload = Buffer.concat([
-    Buffer.from(anchorData || 'live-scan'),
+    anchorInput,
     entropy,
-    Buffer.from(utxoId),
+    Buffer.from(utxoId, 'utf8'),
   ]);
-  const dataHash = crypto.createHash('sha256').update(payload).digest('hex');
-  const anchorId = crypto.createHash('sha256')
-    .update(Buffer.from(utxoId))
-    .update(Buffer.from(dataHash))
-    .update(Buffer.from(Date.now().toString()))
-    .digest('hex');
+  const dataHash = sha256Hex(payload);
+  const merkleRoot = dataHash;
+  const metadata = {
+    method: ANCHOR_METHOD,
+    preference: normalizePreference(opts.preference) || normalizePreference(utxo.type) || 'unknown',
+    selected_utxo: utxoId,
+    utxo_category: normalizePreference(utxo.type) || 'unknown',
+    utxo_summary: utxoSummary(utxo),
+    selection_reason: selectionReason(utxo, normalizePreference(opts.preference) || normalizePreference(utxo.type)),
+    created_at: String(createdAt),
+  };
+  const metadataDigest = metadataDigestHex(metadata);
+  const anchorId = computeAnchorId(utxoId, dataHash, merkleRoot, storageReference, createdAt);
 
   return {
     anchorId,
     utxoId,
     dataHash,
-    method: 'entropy_anchor_v1',
+    merkleRoot,
+    storageReference,
+    metadata,
+    metadataDigest,
+    method: ANCHOR_METHOD,
     entropyHex: entropy.toString('hex'),
-    createdAt: Math.floor(Date.now() / 1000),
+    createdAt,
+    blockHeaderHex: headerHex || null,
+  };
+}
+
+function buildVerifierRegistrationPayload(anchor, attestor = null) {
+  return {
+    contract: 'UTXOAnchorVerifier.registerAnchor',
+    args: {
+      utxoId: anchor.utxoId,
+      dataHashHex: anchor.dataHash,
+      merkleRootHex: anchor.merkleRoot,
+      storageReference: anchor.storageReference || '',
+      metadataDigest: `0x${anchor.metadataDigest}`,
+      createdAt: anchor.createdAt,
+      attestor,
+    },
+  };
+}
+
+function buildCertificateMintPayload(anchor, options = {}) {
+  return {
+    contract: 'UTXOCertificateRegistry.mintCertificate',
+    args: {
+      recipient: options.recipient || null,
+      documentHash: options.documentHash || null,
+      utxoId: anchor.utxoId,
+      dataHashHex: anchor.dataHash,
+      merkleRootHex: anchor.merkleRoot,
+      storageReference: anchor.storageReference || '',
+      metadataDigest: `0x${anchor.metadataDigest}`,
+      anchorCreatedAt: anchor.createdAt,
+      certType: options.certType ?? null,
+      metadataURI: options.metadataURI || '',
+      attestationSignature: options.attestationSignature || null,
+    },
   };
 }
 
 // ── Full 5-step scan ────────────────────────────────────
 
-async function runFullScan(anchorData) {
+async function runFullScan(anchorData, opts = {}) {
   const scanId = crypto.randomBytes(8).toString('hex');
   const steps = [];
   const scanStart = Date.now();
@@ -220,7 +398,21 @@ async function runFullScan(anchorData) {
 
   // ── Step 2: Entropy-based selection ──
   const s2 = Date.now();
-  const selection = selectUtxoByEntropy(anchorData);
+  let selection;
+  try {
+    selection = selectUtxoByEntropy(anchorData, opts);
+  } catch (err) {
+    steps.push({
+      step: 2,
+      title: 'Entropy-based UTXO selection',
+      icon: '🎲',
+      status: 'error',
+      detail: err.message,
+      data: { error: err.message, preference: normalizePreference(opts.preference) || null },
+      durationMs: Date.now() - s2,
+    });
+    return finalise(scanId, steps, scanStart, 'UTXO selection failed');
+  }
   const sel = selection.utxo;
   const decodedData = decodeHex(sel.data);
   steps.push({
@@ -235,7 +427,9 @@ async function runFullScan(anchorData) {
       type: sel.type,
       blockHeight: Number(sel.block_height || 0),
       entropyScore: selection.score,
+      preference: normalizePreference(opts.preference) || null,
       candidatesEvaluated: inv.count,
+      selectionReason: selectionReason(sel, normalizePreference(opts.preference) || normalizePreference(sel.type)),
       decodedData,
     },
     durationMs: Date.now() - s2,
@@ -244,8 +438,10 @@ async function runFullScan(anchorData) {
   // ── Step 3: Fetch from Bitcoin network ──
   const s3 = Date.now();
   let mempool;
+  let blockHeaderHex = null;
   try {
     mempool = await fetchFromMempool(sel.txid, sel.vout || 0);
+    blockHeaderHex = await fetchBlockHeaderHex(mempool.tx.status?.block_hash || null).catch(() => null);
     const vd = mempool.voutData;
     steps.push({
       step: 3,
@@ -259,6 +455,7 @@ async function runFullScan(anchorData) {
         confirmed: mempool.tx.status?.confirmed,
         blockHeight: mempool.tx.status?.block_height,
         blockHash: mempool.tx.status?.block_hash,
+        blockHeaderHex,
         voutIndex: Number(sel.vout || 0),
         voutType: vd?.scriptpubkey_type,
         voutValue: vd?.value,
@@ -298,14 +495,35 @@ async function runFullScan(anchorData) {
 
   // ── Step 5: Create entropy anchor ──
   const s5 = Date.now();
-  const anchor = createAnchor(sel, anchorData);
+  const anchor = createCanonicalAnchor(sel, anchorData, mempool, {
+    preference: opts.preference,
+    storageReference: opts.storageReference || '',
+    createdAt: opts.createdAt,
+    blockHeaderHex,
+  });
+  const anchorRecord = {
+    scanId,
+    ...anchor,
+    txid: sel.txid,
+    vout: Number(sel.vout || 0),
+    type: sel.type,
+    blockHeight: Number(sel.block_height || 0),
+    explorerUrl: `https://mempool.space/tx/${sel.txid}`,
+    isDead: dead.isDead,
+    deadReason: dead.reason,
+    decodedData,
+  };
+  storeAnchor(anchorRecord);
   steps.push({
     step: 5,
     title: 'Create entropy anchor',
     icon: '🔗',
     status: 'ok',
     detail: `Anchor ${anchor.anchorId.slice(0, 16)}… bound to ${anchor.utxoId.slice(0, 20)}…`,
-    data: anchor,
+    data: {
+      ...anchor,
+      metadataCanonicalJson: canonicalizeMetadata(anchor.metadata),
+    },
     durationMs: Date.now() - s5,
   });
 
@@ -317,6 +535,11 @@ async function runFullScan(anchorData) {
     blockHeight: Number(sel.block_height || 0),
     anchorId: anchor.anchorId,
     dataHash: anchor.dataHash,
+    merkleRoot: anchor.merkleRoot,
+    storageReference: anchor.storageReference,
+    metadata: anchor.metadata,
+    metadataDigest: anchor.metadataDigest,
+    anchorCreatedAt: anchor.createdAt,
     isDead: dead.isDead,
     deadReason: dead.reason,
     explorerUrl: `https://mempool.space/tx/${sel.txid}`,
@@ -348,6 +571,10 @@ function countTypes(items) {
 function getLastScan() { return lastScan; }
 function getScanHistory() { return scanHistory; }
 function getInventoryInfo() { return loadInventory(); }
+function getLatestAnchor() { return anchorHistory[0] || null; }
+function getAnchorHistory() { return anchorHistory; }
+function getAnchorById(anchorId) { return anchorIndex.get(String(anchorId || '').trim()) || null; }
+function getScanById(scanId) { return scanHistory.find(scan => scan.scanId === scanId) || null; }
 
 // ── Live Discovery — scan Bitcoin blocks for dead UTXOs ──
 
@@ -482,4 +709,19 @@ async function discoverDeadUtxos(opts = {}) {
   return results;
 }
 
-module.exports = { runFullScan, getLastScan, getScanHistory, getInventoryInfo, discoverDeadUtxos };
+module.exports = {
+  runFullScan,
+  getLastScan,
+  getScanHistory,
+  getScanById,
+  getInventoryInfo,
+  getLatestAnchor,
+  getAnchorHistory,
+  getAnchorById,
+  buildVerifierRegistrationPayload,
+  buildCertificateMintPayload,
+  canonicalizeMetadata,
+  metadataDigestHex,
+  computeAnchorId,
+  discoverDeadUtxos,
+};

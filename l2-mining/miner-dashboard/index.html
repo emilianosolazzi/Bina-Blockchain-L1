@@ -719,11 +719,27 @@
       justify-content: space-between;
       align-items: center;
     }
+    .stale-block-entry.selectable { cursor: pointer; }
+    .stale-block-entry.selected {
+      border-color: rgba(251,191,36,.55);
+      box-shadow: 0 0 0 1px rgba(251,191,36,.2) inset;
+      background: rgba(56,44,11,.35);
+    }
     .stale-block-entry .sb-hash {
       font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
       color: #8ba3c7;
     }
     .stale-block-entry .sb-meta { color: var(--muted); }
+    .stale-proof-select {
+      min-width: 280px;
+      max-width: 100%;
+      padding: 8px 10px;
+      border-radius: 10px;
+      background: rgba(15,23,42,.88);
+      color: var(--text);
+      border: 1px solid var(--border);
+      font-size: 12px;
+    }
 
     /* ── Toggle Switch ── */
     .toggle-wrap {
@@ -988,6 +1004,93 @@
       color: var(--accent-2); cursor: pointer; font-weight: 600;
     }
     .anchor-cert-copy:hover { background: rgba(34,197,94,.22); }
+
+    /* ── UTXO Certificate Actions ── */
+    .cert-action-panel {
+      margin-top: 14px; padding: 18px; border-radius: 12px;
+      background: linear-gradient(180deg, rgba(56,189,248,.05), rgba(15,23,42,.72));
+      border: 1px solid rgba(56,189,248,.18); display: none;
+    }
+    .cert-action-panel.show { display: block; }
+    .cert-action-header {
+      display: flex; align-items: flex-start; justify-content: space-between;
+      gap: 12px; margin-bottom: 12px; flex-wrap: wrap;
+    }
+    .cert-action-title { font-size: 13px; font-weight: 700; color: var(--accent); }
+    .cert-action-subtitle { font-size: 11px; color: var(--muted); line-height: 1.5; max-width: 760px; }
+    .cert-action-anchor {
+      display: inline-flex; align-items: center; gap: 6px; margin-top: 6px;
+      padding: 5px 10px; border-radius: 999px; font-size: 10px; font-weight: 700;
+      background: rgba(34,197,94,.12); border: 1px solid rgba(34,197,94,.18); color: var(--accent-2);
+      font-family: 'SF Mono','Fira Code',monospace;
+    }
+    .cert-action-grid {
+      display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 12px;
+    }
+    .cert-action-field { display: flex; flex-direction: column; gap: 6px; }
+    .cert-action-field.full { grid-column: 1 / -1; }
+    .cert-action-label {
+      font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 700;
+    }
+    .cert-action-input, .cert-action-select, .cert-action-textarea {
+      width: 100%; padding: 10px 12px; border-radius: 9px; border: 1px solid rgba(148,163,184,.14);
+      background: rgba(15,23,42,.74); color: var(--text); font-size: 12px; outline: none;
+      transition: border-color .2s, box-shadow .2s;
+    }
+    .cert-action-input:focus, .cert-action-select:focus, .cert-action-textarea:focus {
+      border-color: rgba(56,189,248,.5); box-shadow: 0 0 0 3px rgba(56,189,248,.10);
+    }
+    .cert-action-textarea { min-height: 84px; resize: vertical; line-height: 1.45; }
+    .cert-action-help { font-size: 10px; color: var(--muted); line-height: 1.45; }
+    .cert-action-toolbar {
+      display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 12px;
+    }
+    .cert-action-build {
+      padding: 9px 14px; border-radius: 9px; border: 1px solid rgba(56,189,248,.28);
+      background: rgba(56,189,248,.12); color: var(--accent); font-size: 12px; font-weight: 700; cursor: pointer;
+      transition: all .2s;
+    }
+    .cert-action-build:hover { background: rgba(56,189,248,.2); }
+    .cert-action-build:disabled { opacity: .55; cursor: wait; }
+    .cert-action-status {
+      flex: 1; min-width: 220px; font-size: 11px; color: var(--muted); line-height: 1.45;
+      padding: 10px 12px; border-radius: 9px; background: rgba(15,23,42,.45); border: 1px solid rgba(148,163,184,.08);
+    }
+    .cert-action-status.ok { color: var(--accent-2); border-color: rgba(34,197,94,.18); background: rgba(34,197,94,.06); }
+    .cert-action-status.fail { color: var(--danger); border-color: rgba(239,68,68,.18); background: rgba(239,68,68,.06); }
+    .cert-action-digests { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+    .cert-digest-pill {
+      display: inline-flex; flex-direction: column; gap: 3px; min-width: 180px;
+      padding: 10px 12px; border-radius: 10px; background: rgba(15,23,42,.55); border: 1px solid rgba(148,163,184,.08);
+    }
+    .cert-digest-pill span:first-child {
+      font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 700;
+    }
+    .cert-digest-pill span:last-child {
+      font-size: 11px; color: var(--text); font-family: 'SF Mono','Fira Code',monospace; word-break: break-all;
+    }
+    .cert-payload-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .cert-payload-card {
+      border-radius: 12px; background: rgba(15,23,42,.6); border: 1px solid rgba(148,163,184,.1); overflow: hidden;
+    }
+    .cert-payload-head {
+      display: flex; align-items: center; justify-content: space-between; gap: 8px;
+      padding: 12px 14px; border-bottom: 1px solid rgba(148,163,184,.08);
+    }
+    .cert-payload-name { font-size: 12px; font-weight: 700; color: var(--text); }
+    .cert-payload-copy {
+      padding: 4px 10px; border-radius: 7px; border: 1px solid rgba(148,163,184,.14);
+      background: rgba(15,23,42,.55); color: var(--muted); font-size: 10px; font-weight: 700; cursor: pointer;
+    }
+    .cert-payload-copy:hover { color: var(--text); border-color: rgba(56,189,248,.28); }
+    .cert-payload-body {
+      margin: 0; padding: 14px; background: transparent; color: var(--muted);
+      font-family: 'SF Mono','Fira Code',monospace; font-size: 11px; line-height: 1.55;
+      max-height: 320px; overflow: auto; white-space: pre-wrap; word-break: break-word;
+    }
+    @media (max-width: 980px) {
+      .cert-action-grid, .cert-payload-grid, .anchor-cert-grid { grid-template-columns: 1fr; }
+    }
 
     /* ── Inventory Browser ── */
     .utxo-inv-grid { display: flex; flex-direction: column; gap: 6px; max-height: 300px; overflow-y: auto; }
@@ -1436,7 +1539,75 @@
               <button class="anchor-cert-copy" id="utxoCertCopy" title="Copy anchor proof as JSON">📋 Copy proof</button>
               <div class="anchor-cert-grid" id="utxoCertGrid"></div>
               <div style="margin-top:10px;font-size:10px;color:var(--muted);line-height:1.5;">
-                This proof is independently verifiable: look up the UTXO on <a id="utxoCertExplorer" href="#" target="_blank" rel="noopener" style="color:var(--accent);">mempool.space ↗</a>, confirm it's dead (OP_RETURN/spent/dust), then verify the anchor hash matches SHA-256(utxo_data + entropy + utxo_id). The Bitcoin block height timestamps when this entropy was anchored.
+                This proof is independently verifiable: look up the UTXO on <a id="utxoCertExplorer" href="#" target="_blank" rel="noopener" style="color:var(--accent);">mempool.space ↗</a>, confirm it's dead, verify <strong>dataHash</strong> / <strong>merkleRoot</strong>, then verify <strong>anchorId = sha256(utxo_id + data_hash + merkle_root + storage_reference + created_at_le)</strong>.
+              </div>
+            </div>
+            <div class="cert-action-panel" id="utxoCertActionSection">
+              <div class="cert-action-header">
+                <div>
+                  <div class="cert-action-title">🖱️ Certificate Actions</div>
+                  <div class="cert-action-subtitle">Generate the exact on-chain payloads for the currently selected anchor. This stays quiet until you have a real anchor, then gives you one clean place to prepare verifier registration and NFT mint inputs.</div>
+                  <div class="cert-action-anchor" id="utxoPayloadAnchorLabel">No anchor selected yet</div>
+                </div>
+              </div>
+              <div class="cert-action-grid">
+                <div class="cert-action-field full">
+                  <label class="cert-action-label" for="utxoPayloadDocumentText">Document text</label>
+                  <textarea class="cert-action-textarea" id="utxoPayloadDocumentText" placeholder="Paste the document text or a canonical string to hash into documentHash."></textarea>
+                  <div class="cert-action-help">Use either document text or a precomputed 32-byte document hash below. If both are filled, the explicit document hash wins.</div>
+                </div>
+                <div class="cert-action-field full">
+                  <label class="cert-action-label" for="utxoPayloadDocumentHash">Document hash</label>
+                  <input class="cert-action-input" id="utxoPayloadDocumentHash" placeholder="0x... 32-byte document hash (optional if document text is provided)" />
+                </div>
+                <div class="cert-action-field">
+                  <label class="cert-action-label" for="utxoPayloadRecipient">Recipient</label>
+                  <input class="cert-action-input" id="utxoPayloadRecipient" placeholder="0x... certificate owner" />
+                  <div class="cert-action-help">Saved locally as your default recipient after you edit it.</div>
+                </div>
+                <div class="cert-action-field">
+                  <label class="cert-action-label" for="utxoPayloadAttestor">Attestor</label>
+                  <input class="cert-action-input" id="utxoPayloadAttestor" placeholder="0x... authorized attestor" />
+                  <div class="cert-action-help">Saved locally as your default attestor after you edit it.</div>
+                </div>
+                <div class="cert-action-field">
+                  <label class="cert-action-label" for="utxoPayloadMetadataUri">Metadata URI</label>
+                  <input class="cert-action-input" id="utxoPayloadMetadataUri" placeholder="ipfs://... certificate metadata" />
+                </div>
+                <div class="cert-action-field">
+                  <label class="cert-action-label" for="utxoPayloadCertType">Certificate type</label>
+                  <select class="cert-action-select" id="utxoPayloadCertType">
+                    <option value="DocumentNotarisation">Document notarisation</option>
+                    <option value="SupplyChain">Supply chain</option>
+                    <option value="LegalEvidence">Legal evidence</option>
+                    <option value="CarbonCredit">Carbon credit</option>
+                    <option value="AcademicPriority">Academic priority</option>
+                    <option value="SoftwareBuild">Software build</option>
+                    <option value="FinancialAudit">Financial audit</option>
+                    <option value="Custom">Custom</option>
+                  </select>
+                </div>
+              </div>
+              <div class="cert-action-toolbar">
+                <button class="cert-action-build" id="utxoBuildPayloadBtn">⚙️ Build verifier + mint payloads</button>
+                <div class="cert-action-status" id="utxoPayloadStatus">Scan a real anchor, fill in the document + recipient details, then click once to build both on-chain payloads.</div>
+              </div>
+              <div class="cert-action-digests" id="utxoPayloadDigests"></div>
+              <div class="cert-payload-grid">
+                <div class="cert-payload-card">
+                  <div class="cert-payload-head">
+                    <span class="cert-payload-name">UTXOAnchorVerifier payload</span>
+                    <button class="cert-payload-copy" id="utxoCopyVerifierBtn">Copy</button>
+                  </div>
+                  <pre class="cert-payload-body" id="utxoVerifierPayloadBox">Build a payload to see the verifier registration args.</pre>
+                </div>
+                <div class="cert-payload-card">
+                  <div class="cert-payload-head">
+                    <span class="cert-payload-name">UTXOCertificateRegistry payload</span>
+                    <button class="cert-payload-copy" id="utxoCopyMintBtn">Copy</button>
+                  </div>
+                  <pre class="cert-payload-body" id="utxoMintPayloadBox">Build a payload to see the certificate mint args.</pre>
+                </div>
               </div>
             </div>
           </div>
@@ -1819,11 +1990,12 @@ curl -s "http://127.0.0.1:4271/api/utxo/scan?seed=$BINARY_HASH" \
           <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;">
             <div style="font-size:13px;color:var(--gold);font-weight:600;">Developer Stale Proof JSON</div>
             <div style="display:flex;gap:8px;">
+              <select id="staleProofSelect" class="stale-proof-select" title="Choose which stale proof to inspect. New stale proofs will appear here as they are found."></select>
               <button class="copy-btn" id="refreshStaleDevProof">Refresh JSON</button>
               <button class="copy-btn" id="copyStaleDevProof">Copy JSON</button>
             </div>
           </div>
-          <div class="helper" style="margin-bottom:8px;">Shows the exact stale-proof fields the dashboard currently has, plus the fields still missing for full verification.</div>
+          <div class="helper" style="margin-bottom:8px;">Choose any stored stale proof from the list above. The JSON below shows the factual telemetry and on-chain state for that specific proof.</div>
           <pre id="staleDevProofJson" style="margin:0;padding:12px;border-radius:12px;background:rgba(5,10,18,.92);border:1px solid var(--border);color:var(--text);font-size:11px;line-height:1.45;overflow:auto;max-height:280px;">Loading stale developer JSON…</pre>
         </div>
         </details>
@@ -2518,6 +2690,9 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
       proof: null,
       selectedEpoch: null,
       selectedEpochOnChain: null,
+      staleDeveloperProof: null,
+      staleProofs: [],
+      selectedStaleProofId: '',
       alerts: {
         stalledEpochId: null,
         storageFailedEpochId: null,
@@ -4184,7 +4359,26 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
       }
 
       // ── Stale block log ──
-      if (ep.stale.blocks.length > 0) {
+      const storedStaleProofs = Array.isArray(state.staleProofs) ? state.staleProofs.slice(0, 12) : [];
+      if (storedStaleProofs.length > 0) {
+        els.epStaleLog.innerHTML = storedStaleProofs.map((b) => {
+          const hash = b.blockHash || b.telemetryBlockHash || b.proofId || b.hash || '—';
+          const ageSecs = b.timestampMs ? Math.max(0, Math.floor((Date.now() - b.timestampMs) / 1000)) : 0;
+          const selected = String(b.id) === String(state.selectedStaleProofId || '') ? ' selected' : '';
+          const heightLabel = b.bitcoinTipHeight ? fmtNum(b.bitcoinTipHeight) : '?';
+          return `
+          <div class="stale-block-entry selectable${selected}" onclick="window.dashboardActions.selectStaleProof('${escapeHtml(String(b.id))}')">
+            <div>
+              <span class="sb-hash">${escapeHtml(String(hash).slice(0, 18))}…${escapeHtml(String(hash).slice(-8))}</span>
+              <span class="sb-meta" style="margin-left:8px;">Height ${heightLabel} • ${b.leadingZeros || 0} zero bits • depth ${b.reorgDepth || 0}</span>
+            </div>
+            <div style="display:flex;gap:10px;align-items:center;">
+              <span class="sb-meta">${ageSecs < 60 ? ageSecs + 's ago' : Math.floor(ageSecs / 60) + 'm ago'}</span>
+              <span style="color:var(--gold);font-weight:600;font-size:12px;">+${fmtTGBT(Number(b.reward || 0))} TGBT</span>
+            </div>
+          </div>`;
+        }).join('');
+      } else if (ep.stale.blocks.length > 0) {
         const logPending = stalePending > 0;
         els.epStaleLog.innerHTML = ep.stale.blocks.map(b => `
           <div class="stale-block-entry">
@@ -4365,8 +4559,12 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
         ['UTXO', `${s.txid}:${s.vout}`],
         ['Type', (s.type || '').toUpperCase()],
         ['Block Height', Number(s.blockHeight).toLocaleString()],
+        ['Anchor Created At', s.anchorCreatedAt ? new Date(Number(s.anchorCreatedAt) * 1000).toISOString() : '—'],
         ['Dead Reason', s.deadReason || (s.isDead ? 'Verified dead' : 'Unverified')],
         ['Data Hash', s.dataHash || '—'],
+        ['Merkle Root', s.merkleRoot || '—'],
+        ['Storage Reference', s.storageReference || '—'],
+        ['Metadata Digest', s.metadataDigest || '—'],
         ['Dead Verified', s.isDead ? '✓ Yes' : '✗ No'],
         ['Decoded Data', s.decodedData?.decoded || '(binary / none)'],
         ['Timestamp', new Date(scan.timestamp).toISOString()],
@@ -4390,7 +4588,7 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
     function utxoCopyProof(scan) {
       if (!scan?.summary) return;
       const proof = {
-        version: 'entropy_anchor_v1',
+        version: 'dead_utxo_anchor_v1',
         anchorId: scan.summary.anchorId,
         scanId: scan.scanId,
         utxo: { txid: scan.summary.txid, vout: scan.summary.vout, type: scan.summary.type },
@@ -4398,6 +4596,11 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
         isDead: scan.summary.isDead,
         deadReason: scan.summary.deadReason,
         dataHash: scan.summary.dataHash,
+        merkleRoot: scan.summary.merkleRoot,
+        storageReference: scan.summary.storageReference,
+        metadata: scan.summary.metadata,
+        metadataDigest: scan.summary.metadataDigest,
+        anchorCreatedAt: scan.summary.anchorCreatedAt,
         decodedData: scan.summary.decodedData,
         explorerUrl: scan.summary.explorerUrl,
         timestamp: scan.timestamp,
@@ -4577,12 +4780,14 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
     window.utxoShowHistoryScan = function(idx) {
       const scan = utxoLocalHistory[idx];
       if (!scan) return;
+      utxoLastScanData = scan;
       utxoSwitchTab('scan');
       // Render steps instantly (no animation for replays)
       els.utxoScanSteps.innerHTML = scan.steps.map(step => utxoRenderStep(step).replace('class="utxo-step running"', `class="utxo-step visible ${step.status}"`)).join('');
       if (scan.summary) {
         utxoRenderSummary(els.utxoScanSummary, scan.summary);
         utxoRenderCertificate(scan);
+        utxoSyncPayloadSection(scan);
       }
       els.utxoScanStatusBadge.className = scan.error ? 'badge fail' : 'badge ok';
       els.utxoScanStatusBadge.textContent = `Replay — ${scan.steps.filter(s=>s.status==='ok').length}/5`;
@@ -4615,6 +4820,173 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
       if (els.utxoScanAccum) {
         els.utxoScanAccum.textContent = utxoTotalAnchored > 0 ? `🔗 ${utxoTotalAnchored} anchored` : '';
       }
+    }
+
+    let utxoPayloadResponse = null;
+    const UTXO_DEFAULT_RECIPIENT_KEY = 'tgbt-utxo-default-recipient';
+    const UTXO_DEFAULT_ATTESTOR_KEY = 'tgbt-utxo-default-attestor';
+
+    function utxoGetSavedDefault(key) {
+      try {
+        return (localStorage.getItem(key) || '').trim();
+      } catch {
+        return '';
+      }
+    }
+
+    function utxoSetSavedDefault(key, value) {
+      try {
+        const normalized = String(value || '').trim();
+        if (normalized) localStorage.setItem(key, normalized);
+        else localStorage.removeItem(key);
+      } catch {}
+    }
+
+    function utxoApplyPartyDefaults(force = false) {
+      const savedRecipient = utxoGetSavedDefault(UTXO_DEFAULT_RECIPIENT_KEY);
+      const savedAttestor = utxoGetSavedDefault(UTXO_DEFAULT_ATTESTOR_KEY);
+      if (els.utxoPayloadRecipient && (force || !els.utxoPayloadRecipient.value.trim()) && savedRecipient) {
+        els.utxoPayloadRecipient.value = savedRecipient;
+      }
+      if (els.utxoPayloadAttestor && (force || !els.utxoPayloadAttestor.value.trim()) && savedAttestor) {
+        els.utxoPayloadAttestor.value = savedAttestor;
+      }
+    }
+
+    function utxoActiveScan() {
+      return utxoLastScanData && utxoLastScanData.summary ? utxoLastScanData : null;
+    }
+
+    function utxoResetPayloadOutputs(message = 'Scan a real anchor, fill in the document + recipient details, then click once to build both on-chain payloads.') {
+      utxoPayloadResponse = null;
+      if (els.utxoPayloadStatus) {
+        els.utxoPayloadStatus.className = 'cert-action-status';
+        els.utxoPayloadStatus.textContent = message;
+      }
+      if (els.utxoPayloadDigests) els.utxoPayloadDigests.innerHTML = '';
+      if (els.utxoVerifierPayloadBox) els.utxoVerifierPayloadBox.textContent = 'Build a payload to see the verifier registration args.';
+      if (els.utxoMintPayloadBox) els.utxoMintPayloadBox.textContent = 'Build a payload to see the certificate mint args.';
+    }
+
+    function utxoSyncPayloadSection(scan) {
+      const hasAnchor = !!scan?.summary?.anchorId;
+      if (els.utxoCertActionSection) els.utxoCertActionSection.classList.toggle('show', hasAnchor);
+      if (!hasAnchor) {
+        if (els.utxoPayloadAnchorLabel) els.utxoPayloadAnchorLabel.textContent = 'No anchor selected yet';
+        utxoResetPayloadOutputs();
+        return;
+      }
+      const s = scan.summary;
+      if (els.utxoPayloadAnchorLabel) {
+        els.utxoPayloadAnchorLabel.textContent = `${s.anchorId.slice(0, 18)}… • ${s.type || 'utxo'} • block ${Number(s.blockHeight || 0).toLocaleString()}`;
+      }
+      if (els.utxoPayloadMetadataUri && !els.utxoPayloadMetadataUri.value && s.storageReference) {
+        els.utxoPayloadMetadataUri.value = s.storageReference;
+      }
+      utxoApplyPartyDefaults();
+      utxoResetPayloadOutputs(`Anchor ready. Click once to build the verifier registration and certificate mint payloads for ${s.anchorId.slice(0, 18)}…`);
+    }
+
+    function utxoRenderPayloadResponse(data) {
+      utxoPayloadResponse = data;
+      if (els.utxoPayloadStatus) {
+        els.utxoPayloadStatus.className = 'cert-action-status ok';
+        els.utxoPayloadStatus.textContent = 'Payloads built from the real stored anchor. Register the anchor first, then submit the certificate mint payload with an attestor signature.';
+      }
+      if (els.utxoPayloadDigests) {
+        const digests = [
+          ['Anchor ID', data?.digests?.anchorId || '—'],
+          ['Metadata Digest', data?.digests?.metadataDigest || '—'],
+          ['Document Hash', data?.digests?.documentHash || '—'],
+          ['Storage Ref Hash', data?.digests?.storageReferenceHash || '—'],
+        ];
+        els.utxoPayloadDigests.innerHTML = digests.map(([label, value]) => `
+          <div class="cert-digest-pill">
+            <span>${utxoEsc(label)}</span>
+            <span>${utxoEsc(String(value))}</span>
+          </div>`).join('');
+      }
+      if (els.utxoVerifierPayloadBox) {
+        els.utxoVerifierPayloadBox.textContent = JSON.stringify(data.verifierRegistration, null, 2);
+      }
+      if (els.utxoMintPayloadBox) {
+        els.utxoMintPayloadBox.textContent = JSON.stringify(data.certificateMint, null, 2);
+      }
+    }
+
+    async function utxoBuildCertificatePayload() {
+      const scan = utxoActiveScan();
+      if (!scan?.summary?.anchorId) {
+        utxoResetPayloadOutputs('No active anchor selected. Run a scan or replay a stored scan first.');
+        if (els.utxoPayloadStatus) els.utxoPayloadStatus.className = 'cert-action-status fail';
+        return;
+      }
+
+      const documentHash = (els.utxoPayloadDocumentHash?.value || '').trim();
+      const documentText = (els.utxoPayloadDocumentText?.value || '').trim();
+      const recipient = (els.utxoPayloadRecipient?.value || '').trim();
+      const attestor = (els.utxoPayloadAttestor?.value || '').trim();
+      const metadataURI = (els.utxoPayloadMetadataUri?.value || '').trim();
+      const certType = els.utxoPayloadCertType?.value || 'DocumentNotarisation';
+
+      if (!documentHash && !documentText) {
+        utxoResetPayloadOutputs('Provide either document text or a 32-byte document hash.');
+        if (els.utxoPayloadStatus) els.utxoPayloadStatus.className = 'cert-action-status fail';
+        return;
+      }
+      if (!recipient || !attestor || !metadataURI) {
+        utxoResetPayloadOutputs('Recipient, attestor, and metadata URI are required for a useful mint payload.');
+        if (els.utxoPayloadStatus) els.utxoPayloadStatus.className = 'cert-action-status fail';
+        return;
+      }
+
+      const btn = els.utxoBuildPayloadBtn;
+      if (btn) { btn.disabled = true; btn.textContent = '⏳ Building payloads…'; }
+      if (els.utxoPayloadStatus) {
+        els.utxoPayloadStatus.className = 'cert-action-status';
+        els.utxoPayloadStatus.textContent = 'Building payloads from the current anchor…';
+      }
+
+      try {
+        const body = {
+          anchorId: scan.summary.anchorId,
+          recipient,
+          attestor,
+          metadataURI,
+          certType,
+        };
+        if (documentHash) body.documentHash = documentHash;
+        else body.documentText = documentText;
+
+        const resp = await fetch(`${RANDOMNESS_API}/api/utxo/certificate-payload`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+        utxoRenderPayloadResponse(data);
+        showToast('Certificate payloads built from the real UTXO anchor.');
+      } catch (err) {
+        utxoResetPayloadOutputs(err.message || 'Failed to build certificate payloads.');
+        if (els.utxoPayloadStatus) els.utxoPayloadStatus.className = 'cert-action-status fail';
+        showToast('Certificate payload build failed.');
+      } finally {
+        if (btn) { btn.disabled = false; btn.textContent = '⚙️ Build verifier + mint payloads'; }
+      }
+    }
+
+    function utxoCopyPayload(kind) {
+      if (!utxoPayloadResponse) {
+        showToast('Build the payloads first.');
+        return;
+      }
+      const payload = kind === 'verifier'
+        ? utxoPayloadResponse.verifierRegistration
+        : utxoPayloadResponse.certificateMint;
+      navigator.clipboard.writeText(JSON.stringify(payload, null, 2)).then(() => {
+        showToast(`${kind === 'verifier' ? 'Verifier' : 'Mint'} payload copied.`);
+      }).catch(() => showToast('Failed to copy payload.'));
     }
 
     // ── Update Card (with accumulation) ──
@@ -4672,6 +5044,8 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
       summaryEl.classList.remove('show');
       summaryEl.innerHTML = '';
       if (els.utxoAnchorCert) els.utxoAnchorCert.style.display = 'none';
+      if (els.utxoCertActionSection) els.utxoCertActionSection.classList.remove('show');
+      utxoResetPayloadOutputs();
       badge.className = 'badge warn'; badge.textContent = isAutoScan ? 'Auto-scanning…' : 'Scanning…';
       btn.disabled = true; btn.textContent = '⏳ Scanning…';
       timing.textContent = '';
@@ -4700,6 +5074,7 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
         if (data.summary) {
           utxoRenderSummary(summaryEl, data.summary);
           utxoRenderCertificate(data);
+          utxoSyncPayloadSection(data);
         }
         utxoUpdateCard(data);
 
@@ -4737,6 +5112,25 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
     if (els.utxoCertCopy) {
       els.utxoCertCopy.addEventListener('click', () => utxoCopyProof(utxoLastScanData));
     }
+    if (els.utxoBuildPayloadBtn) {
+      els.utxoBuildPayloadBtn.addEventListener('click', utxoBuildCertificatePayload);
+    }
+    if (els.utxoPayloadRecipient) {
+      els.utxoPayloadRecipient.addEventListener('change', () => {
+        utxoSetSavedDefault(UTXO_DEFAULT_RECIPIENT_KEY, els.utxoPayloadRecipient.value);
+      });
+    }
+    if (els.utxoPayloadAttestor) {
+      els.utxoPayloadAttestor.addEventListener('change', () => {
+        utxoSetSavedDefault(UTXO_DEFAULT_ATTESTOR_KEY, els.utxoPayloadAttestor.value);
+      });
+    }
+    if (els.utxoCopyVerifierBtn) {
+      els.utxoCopyVerifierBtn.addEventListener('click', () => utxoCopyPayload('verifier'));
+    }
+    if (els.utxoCopyMintBtn) {
+      els.utxoCopyMintBtn.addEventListener('click', () => utxoCopyPayload('mint'));
+    }
 
     // ── Auto-Load + Auto-Scan + Periodic Re-scan ──
 
@@ -4746,8 +5140,10 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
         utxoUpdateCard(scan);
         utxoLastScanData = scan;
         utxoLocalHistory.push(scan);
+        utxoSyncPayloadSection(scan);
       }
     }).catch(() => {});
+    utxoApplyPartyDefaults();
 
     // 2. Auto-scan on startup after delay (if no previous scan)
     setTimeout(() => {
@@ -4819,6 +5215,12 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
         state.proof = { error: err.message };
         renderProof();
       }),
+      selectStaleProof: (id) => {
+        state.selectedStaleProofId = String(id || '');
+        if (els.staleProofSelect) els.staleProofSelect.value = state.selectedStaleProofId;
+        renderEntropyPipeline();
+        loadStaleDeveloperProof(true).catch(err => showToast(err.message, true));
+      },
       verifyStorage: (epochId) => verifyStorage(epochId).catch(err => {
         els.epochStatus.textContent = `Storage verification failed for epoch ${epochId}: ${err.message}`;
       }),
@@ -4921,8 +5323,56 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
 
     els.solPrev.addEventListener('click', () => { if (solState.page > 0) { solState.page--; loadSolutions(); } });
     els.solNext.addEventListener('click', () => { solState.page++; loadSolutions(); });
+    function formatStaleProofOptionLabel(proof) {
+      if (!proof) return 'Unknown stale proof';
+      const stamp = proof.detectedAt ? new Date(proof.detectedAt).toLocaleString() : 'Unknown time';
+      const hash = proof.blockHash || proof.telemetryBlockHash || proof.hash || proof.proofId || `proof-${proof.id}`;
+      const shortHash = hash ? `${String(hash).slice(0, 14)}…${String(hash).slice(-6)}` : `#${proof.id}`;
+      const reward = Number.isFinite(Number(proof.reward)) ? `${fmtTGBT(Number(proof.reward))} TGBT` : '—';
+      return `${stamp} • ${shortHash} • ${reward}`;
+    }
+
+    function syncStaleProofSelect() {
+      if (!els.staleProofSelect) return;
+      const proofs = Array.isArray(state.staleProofs) ? state.staleProofs : [];
+      if (!proofs.length) {
+        els.staleProofSelect.innerHTML = '<option value="">No stale proofs stored yet</option>';
+        els.staleProofSelect.disabled = true;
+        return;
+      }
+      if (!proofs.some(p => String(p.id) === String(state.selectedStaleProofId || ''))) {
+        state.selectedStaleProofId = String(proofs[0].id);
+      }
+      els.staleProofSelect.disabled = false;
+      els.staleProofSelect.innerHTML = proofs.map((proof) => {
+        const selected = String(proof.id) === String(state.selectedStaleProofId || '') ? ' selected' : '';
+        return `<option value="${escapeHtml(String(proof.id))}"${selected}>${escapeHtml(formatStaleProofOptionLabel(proof))}</option>`;
+      }).join('');
+    }
+
+    async function loadStaleProofOptions(showNotice = false) {
+      try {
+        const res = await fetch('/api/stale/proofs?limit=100');
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to load stale proof list');
+        state.staleProofs = Array.isArray(data.proofs) ? data.proofs : [];
+        syncStaleProofSelect();
+        renderEntropyPipeline();
+        if (showNotice) showToast('Stale proof list refreshed.');
+      } catch (err) {
+        state.staleProofs = [];
+        syncStaleProofSelect();
+        renderEntropyPipeline();
+        if (showNotice) showToast(`Stale proof list failed: ${err.message}`, true);
+      }
+    }
+
     els.refreshStaleDevProof.addEventListener('click', () => loadStaleDeveloperProof(true));
     els.copyStaleDevProof.addEventListener('click', () => copyText(JSON.stringify(state.staleDeveloperProof || {}, null, 2), 'Stale developer JSON'));
+    els.staleProofSelect.addEventListener('change', () => {
+      state.selectedStaleProofId = els.staleProofSelect.value || '';
+      loadStaleDeveloperProof(true);
+    });
 
     async function loadSolutions() {
       try {
@@ -5004,10 +5454,20 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
 
     async function loadStaleDeveloperProof(showNotice = false) {
       try {
-        const res = await fetch('/api/stale/developer-proof');
+        if (!state.staleProofs.length) {
+          await loadStaleProofOptions(false);
+        }
+        const query = state.selectedStaleProofId
+          ? `?id=${encodeURIComponent(state.selectedStaleProofId)}`
+          : '';
+        const res = await fetch(`/api/stale/developer-proof${query}`);
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || 'Failed to load stale developer proof');
         state.staleDeveloperProof = data;
+        if (data?.selected?.id != null && String(data.selected.id) !== String(state.selectedStaleProofId || '')) {
+          state.selectedStaleProofId = String(data.selected.id);
+          syncStaleProofSelect();
+        }
         if (els.staleDevProofJson) {
           els.staleDevProofJson.textContent = JSON.stringify(data, null, 2);
         }
@@ -5022,8 +5482,10 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
 
     // Poll solutions every 10s (live updates)
     loadSolutions();
+    loadStaleProofOptions();
     loadStaleDeveloperProof();
     setInterval(loadSolutions, 10000);
+    setInterval(loadStaleProofOptions, 10000);
     setInterval(loadStaleDeveloperProof, 10000);
 
     Promise.allSettled([

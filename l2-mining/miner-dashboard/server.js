@@ -834,6 +834,14 @@ function detectAndStoreSolution(snap) {
 				staleForkDepth: sd,
 				staleZeroBits: snap.stale_zero_bits || 0,
 				bitcoinTipHeight: snap.bitcoin_tip_height || 0,
+				proofId: snap.stale_proof_id || null,
+				rawHeaderHex: snap.stale_raw_header_hex || null,
+				telemetryBlockHash: snap.stale_block_hash_hex || null,
+				blockHashHex: null,
+				canonicalHash: snap.stale_canonical_hash || null,
+				entropyDigest: snap.stale_entropy_digest || null,
+				submitter: snap.stale_submitter || null,
+				staleCreatedAt: snap.stale_created_at || null,
 			}).catch(err => console.error('[SolutionStore] stale insert error:', err.message));
 		}
 	}
@@ -943,6 +951,32 @@ function latestSnapshotWithStaleProof() {
 	return null;
 }
 
+function normalizeHashForMatch(value) {
+	const normalized = toBytes32HexOrNull(value);
+	return normalized ? normalized.toLowerCase() : null;
+}
+
+async function listStoredStaleProofs(limit = 100) {
+	let solutions = await store.getSolutions({ limit: 100000, skip: 0, sort: 'desc' });
+	solutions = solutions.filter(s => s.type === 'stale').slice(0, Math.max(1, Math.min(200, Number(limit) || 100)));
+	return solutions.map((s) => ({
+		id: s.id,
+		proofId: s.proofId || null,
+		blockHash: s.blockHashHex || null,
+		telemetryBlockHash: s.telemetryBlockHash || null,
+		hash: s.hash || s.outputHash || null,
+		entropyDigest: s.entropyDigest || null,
+		submitter: s.submitter || null,
+		detectedAt: s.timestamp || s.createdAt || null,
+		timestampMs: Number(s.timestampMs || Date.parse(s.timestamp || s.createdAt || 0) || 0),
+		qualityScore: Number(s.staleQuality || 0),
+		reorgDepth: Number(s.staleForkDepth || 0),
+		leadingZeros: Number(s.staleZeroBits || 0),
+		reward: Number(s.reward || 0),
+		bitcoinTipHeight: Number(s.bitcoinTipHeight || 0),
+	}));
+}
+
 async function resolveStaleOracleAddress() {
 	const core = new ethers.Contract(CORE_ADDRESS, CORE_ABI, provider);
 	const addr = await core.moduleAddress(MODULE_IDS.STALE_BLOCK_MODULE);
@@ -1014,21 +1048,35 @@ async function fetchOnChainStaleProof(blockHashHex) {
 	};
 }
 
-async function getLatestStaleDeveloperProof() {
+async function getLatestStaleDeveloperProof(selection = {}) {
 	const latest = latestSnapshot();
 	const latestProofSnap = latestSnapshotWithStaleProof();
 	const recent = await store.getSolutions({ limit: 500, skip: 0, sort: 'desc' });
-	const latestStale = recent.find(s => s.type === 'stale') || null;
+	const staleSolutions = recent.filter(s => s.type === 'stale');
+	const normalizedSelectedBlockHash = normalizeHashForMatch(selection.blockHash);
+	const selectedStale = staleSolutions.find((s) => {
+		if (selection.id != null && String(s.id) === String(selection.id)) return true;
+		if (selection.proofId && s.proofId === selection.proofId) return true;
+		if (normalizedSelectedBlockHash) {
+			return [s.blockHashHex, s.telemetryBlockHash, s.hash, s.outputHash]
+				.map(normalizeHashForMatch)
+				.filter(Boolean)
+				.includes(normalizedSelectedBlockHash);
+		}
+		return false;
+	}) || null;
+	const latestStale = selectedStale || staleSolutions[0] || null;
 	const staleCount = Number(latest?.stale_block_count || 0);
 	const pendingProofs = Number(latest?.stale_pending_proofs || 0);
-	const proofSnap = latestProofSnap || latest;
-	const proofId = proofSnap?.stale_proof_id || null;
-	const rawHeaderHex = proofSnap?.stale_raw_header_hex || null;
-	const blockHashHex = proofSnap?.stale_block_hash_hex || null;
-	const canonicalHash = proofSnap?.stale_canonical_hash || null;
-	const entropyDigest = proofSnap?.stale_entropy_digest || null;
-	const submitter = proofSnap?.stale_submitter || null;
-	const createdAt = proofSnap?.stale_created_at || null;
+	const canBorrowLatestTelemetry = !selectedStale || staleSolutions.length <= 1 || selectedStale?.id === staleSolutions[0]?.id;
+	const proofSnap = canBorrowLatestTelemetry ? (latestProofSnap || latest) : null;
+	const proofId = latestStale?.proofId || proofSnap?.stale_proof_id || null;
+	const rawHeaderHex = latestStale?.rawHeaderHex || proofSnap?.stale_raw_header_hex || null;
+	const blockHashHex = latestStale?.telemetryBlockHash || latestStale?.blockHashHex || proofSnap?.stale_block_hash_hex || null;
+	const canonicalHash = latestStale?.canonicalHash || proofSnap?.stale_canonical_hash || null;
+	const entropyDigest = latestStale?.entropyDigest || proofSnap?.stale_entropy_digest || null;
+	const submitter = latestStale?.submitter || proofSnap?.stale_submitter || null;
+	const createdAt = latestStale?.staleCreatedAt || proofSnap?.stale_created_at || null;
 	const hasTelemetryProof = Boolean(
 		proofId ||
 		rawHeaderHex ||
@@ -1038,14 +1086,17 @@ async function getLatestStaleDeveloperProof() {
 		submitter
 	);
 	const onChainProof = await fetchOnChainStaleProof(blockHashHex).catch(() => null);
-	const reorgDepth = onChainProof?.reorgDepth ?? latest?.stale_fork_depth ?? latestStale?.staleForkDepth ?? null;
-	const qualityScore = onChainProof?.qualityScore ?? latest?.stale_quality ?? latestStale?.staleQuality ?? null;
-	const leadingZeros = onChainProof?.leadingZeros ?? latest?.stale_zero_bits ?? latestStale?.staleZeroBits ?? null;
-	const bitcoinTipHeight = latest?.bitcoin_tip_height ?? latestStale?.bitcoinTipHeight ?? null;
-	const timestampMs = createdAt ? createdAt * 1000 : (latestStale?.timestampMs || null);
+	if (onChainProof && latestStale && !latestStale.blockHashHex) {
+		latestStale.blockHashHex = onChainProof.blockHash;
+	}
+	const reorgDepth = onChainProof?.reorgDepth ?? latestStale?.staleForkDepth ?? latest?.stale_fork_depth ?? null;
+	const qualityScore = onChainProof?.qualityScore ?? latestStale?.staleQuality ?? latest?.stale_quality ?? null;
+	const leadingZeros = onChainProof?.leadingZeros ?? latestStale?.staleZeroBits ?? latest?.stale_zero_bits ?? null;
+	const bitcoinTipHeight = latestStale?.bitcoinTipHeight ?? latest?.bitcoin_tip_height ?? null;
+	const timestampMs = latestStale?.timestampMs || (createdAt ? createdAt * 1000 : null);
 	const detectedAt = createdAt
 		? new Date(createdAt * 1000).toISOString()
-		: (latestStale?.timestamp || null);
+		: (latestStale?.timestamp || latestStale?.createdAt || null);
 	const estimatedRewardTgbt = onChainProof
 		? (onChainProof.rewarded
 			? (50 * onChainProof.qualityScore * Math.min(onChainProof.reorgDepth + 1, 7)) / 100
@@ -1064,7 +1115,14 @@ async function getLatestStaleDeveloperProof() {
 	return {
 		source: onChainProof ? 'dashboard+onchain' : 'dashboard-summary',
 		status,
+		selected: latestStale ? {
+			id: latestStale.id,
+			proofId,
+			blockHash: onChainProof?.blockHash || latestStale?.blockHashHex || blockHashHex || null,
+			telemetryBlockHash: latestStale?.telemetryBlockHash || blockHashHex || null,
+		} : null,
 		proof: status === 'no-stale-detected' ? null : {
+			id: latestStale?.id || null,
 			proofId,
 			rawHeaderHex,
 			telemetryBlockHash: blockHashHex,
@@ -1388,9 +1446,24 @@ const server = http.createServer(async (req, res) => {
 	}
 
 	// ── Solution storage API ─────────────────────────────
+	if (url.pathname === '/api/stale/proofs' && req.method === 'GET') {
+		try {
+			const limit = Math.max(1, Math.min(200, Number(url.searchParams.get('limit') || 100)));
+			const proofs = await listStoredStaleProofs(limit);
+			sendJson(res, 200, { proofs, total: proofs.length });
+		} catch (err) {
+			sendJson(res, 500, { error: err.message });
+		}
+		return;
+	}
+
 	if (url.pathname === '/api/stale/developer-proof' && req.method === 'GET') {
 		try {
-			const payload = await getLatestStaleDeveloperProof();
+			const payload = await getLatestStaleDeveloperProof({
+				id: url.searchParams.get('id') || null,
+				proofId: url.searchParams.get('proofId') || null,
+				blockHash: url.searchParams.get('blockHash') || null,
+			});
 			sendJson(res, 200, payload);
 		} catch (err) {
 			sendJson(res, 500, { error: err.message });

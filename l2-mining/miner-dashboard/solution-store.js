@@ -25,8 +25,9 @@ class FileStore {
 	_makeFingerprint(doc) {
 		if (!doc) return null;
 		if (doc.type === 'stale') {
-			const staleHash = doc.hash || doc.outputHash || 'no-hash';
-			return `stale:${staleHash}`;
+			const proofId = doc.proofId || 'no-proof';
+			const staleHash = doc.blockHashHex || doc.telemetryBlockHash || doc.hash || doc.outputHash || 'no-hash';
+			return `stale:${proofId}:${staleHash}`;
 		}
 		if (doc.accepted) {
 			const nonce = doc.nonce != null ? doc.nonce : 'no-nonce';
