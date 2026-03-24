@@ -323,13 +323,13 @@ function evaluateSnapshots(snapshots, fileSize) {
     });
   }
 
-  if (solutionGapMs != null && solutionGapMs > derivedGapMs) {
-    // Suppress gap alerts during phases where the miner is alive but intentionally
-    // not producing solutions (commit-reveal cycle: waiting for clearance, locked, etc.)
-    const currentPhase = latest.mining_phase || null;
-    const waitingPhases = ['waiting_for_clearance', 'commitment_locked', 'committing', 'revealing'];
-    const isWaitingPhase = currentPhase && waitingPhases.includes(currentPhase);
+  // Suppress gap & hashrate alerts during phases where the miner is alive but
+  // intentionally idle (commit-reveal cycle: waiting for clearance, locked, etc.)
+  const currentPhase = latest.mining_phase || null;
+  const waitingPhases = ['waiting_for_clearance', 'commitment_locked', 'committing', 'revealing'];
+  const isWaitingPhase = currentPhase && waitingPhases.includes(currentPhase);
 
+  if (solutionGapMs != null && solutionGapMs > derivedGapMs) {
     if (!isWaitingPhase) {
       candidateAlerts.push({
         type: 'heartbeat_gap',
@@ -346,16 +346,19 @@ function evaluateSnapshots(snapshots, fileSize) {
   }
 
   if (hashrateRatio != null && baselineHashrateHs > 0 && hashrateRatio < HASHRATE_DROP_RATIO) {
-    candidateAlerts.push({
-      type: 'hashrate_drop',
-      severity: hashrateRatio < HASHRATE_DROP_RATIO / 2 ? 'high' : 'medium',
-      message: `Hashrate dropped to ${(hashrateRatio * 100).toFixed(1)}% of baseline.`,
-      details: {
-        currentHashrateHs,
-        baselineHashrateHs,
-        hashrateRatio,
-      },
-    });
+    // 0 H/s during waiting phases is normal — miner is idle between commit-reveal rounds
+    if (!isWaitingPhase) {
+      candidateAlerts.push({
+        type: 'hashrate_drop',
+        severity: hashrateRatio < HASHRATE_DROP_RATIO / 2 ? 'high' : 'medium',
+        message: `Hashrate dropped to ${(hashrateRatio * 100).toFixed(1)}% of baseline.`,
+        details: {
+          currentHashrateHs,
+          baselineHashrateHs,
+          hashrateRatio,
+        },
+      });
+    }
   }
 
   if (Number(latest.temperature_c || 0) >= TEMPERATURE_WARN_C) {
