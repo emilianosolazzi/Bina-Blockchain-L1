@@ -31,7 +31,7 @@ contract TokenomicsModuleTest is Test {
             address(tokenomicsImplementation),
             abi.encodeCall(
                 TokenomicsModule.initialize,
-                (address(core), address(token), INITIAL_REWARD, BLOCKS_PER_EPOCH, HALVING_INTERVAL, 2, 125)
+                (address(core), address(token), INITIAL_REWARD, BLOCKS_PER_EPOCH, HALVING_INTERVAL, 2, 125, 0, 0)
             )
         );
         tokenomics = TokenomicsModule(address(tokenomicsProxy));
@@ -305,11 +305,13 @@ contract TokenomicsModuleTest is Test {
                 (
                     address(core),
                     address(token),
-                    700_000_000 ether + 1,
+                    1_900_000_000 ether + 1,
                     BLOCKS_PER_EPOCH,
                     HALVING_INTERVAL,
                     2,
-                    125
+                    125,
+                    0,
+                    0
                 )
             )
         );

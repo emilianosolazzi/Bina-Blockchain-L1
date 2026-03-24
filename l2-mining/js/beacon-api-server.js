@@ -175,7 +175,11 @@ const BATCH_MINING_ABI = [
   'function latestOutput() view returns (bytes32)',
 ];
 
-const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
+// Pass static network so ethers.js skips the auto-detect probe
+// (NativeBTC RPC rejects bare eth_chainId with 400 "Missing method")
+const CHAIN_ID = parseInt(process.env.CHAIN_ID || '42161', 10);
+const staticNetwork = ethers.Network.from(CHAIN_ID);
+const provider = new ethers.JsonRpcProvider(process.env.RPC_URL, staticNetwork, { staticNetwork });
 
 // Classic mining contracts (always available)
 const coreContract = new ethers.Contract(
@@ -190,12 +194,8 @@ const tokenomicsContract = new ethers.Contract(
   provider,
 );
 
-// Mining module — resolve from Core or use env override
+// Mining module — not used on Arbitrum production (batch mining replaced it)
 let miningModuleContract = null;
-const miningModuleAddr = process.env.MINING_MODULE_ADDRESS;
-if (miningModuleAddr) {
-  miningModuleContract = new ethers.Contract(miningModuleAddr, MINING_MODULE_ABI, provider);
-}
 
 // TGBT token (optional)
 let tgbtContract = null;

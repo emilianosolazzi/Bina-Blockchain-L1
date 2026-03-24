@@ -237,8 +237,9 @@ contract BatchMiningModule is ModuleBase, EIP712("TemporalGradientBatch", "1"), 
         EpochData storage ep = _epochs[epochId];
         if (ep.merkleRoot == bytes32(0))
             revert IBatchMiningModule.EpochNotFound(epochId);
-        if (!ep.finalized)
-            revert IBatchMiningModule.EpochNotFinalized(epochId);
+        // No finalized check — the Merkle root is immutable from commit time.
+        // The challenge window is a dispute mechanism, not a proof-validity gate.
+        // Proofs are cryptographically valid the moment the root is on-chain.
 
         // Build leaf: keccak256(abi.encodePacked(leafIndex, outputHash))
         bytes32 leaf = keccak256(abi.encodePacked(leafIndex, outputHash));

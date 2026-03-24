@@ -1,6 +1,7 @@
 const http = require('http');
 const https = require('https');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { URL } = require('url');
 const { ethers } = require('ethers');
@@ -24,11 +25,11 @@ const RANDOMNESS_FALLBACK_LATEST_PATH = process.env.RANDOMNESS_FALLBACK_LATEST_P
 const RPC_URL = process.env.RPC_URL || 'https://api.nativebtc.org/v1/arb';
 const CORE_ADDRESS = process.env.CORE_ADDRESS || '0xF6556DDC7CdD3635A05428BD85BCf33A09F752e6';
 const TGBT_ADDRESS = process.env.TGBT_ADDRESS || '0x31228eE520e895DA19f728DE5459b1b317d9b8D8';
-const TOKENOMICS_ADDRESS = process.env.TOKENOMICS_ADDRESS || '0xA9f684d709bB46155A252b260dDDE4cb2a37a0E3';
-const BATCH_ADDRESS = process.env.BATCH_ADDRESS || '0x6eb6D03A8E98c79E89B98ce19AcAefB865817Db2';
+const TOKENOMICS_ADDRESS = process.env.TOKENOMICS_ADDRESS || '0xF6069614FE09B91e5B00DA0a13A11B2BFcCabC36';
+const BATCH_ADDRESS = process.env.BATCH_ADDRESS || '0xAf07E37D104E9be17639FE7a51B36972D4738651';
 const WALLET_ADDRESS = process.env.WALLET_ADDRESS || '0x5cB4D906f0464b34c44d6555A770BF6aF4A2cEfe';
 const RPC_API_KEY = process.env.RPC_API_KEY || 'fp_2d93df5e6cebe485b69c363a62e237fc9d0f88b9';
-const CHALLENGE_WINDOW = Number(process.env.CHALLENGE_WINDOW || 100);
+const CHALLENGE_WINDOW = Number(process.env.CHALLENGE_WINDOW || 28800);
 const MODULE_IDS = {
 	BATCH_MINING_MODULE: ethers.id('BATCH_MINING_MODULE'),
 	TOKENOMICS_MODULE: ethers.id('TOKENOMICS_MODULE'),
@@ -224,6 +225,22 @@ function readRelayStatus() {
 	}
 }
 
+// ── L1 block helper ─────────────────────────────────────
+// On Arbitrum, Solidity `block.number` returns the L1 (Ethereum mainnet) block number,
+// but ethers' provider.getBlockNumber() returns the L2 block number.
+// We must compare against L1 blocks when checking the challenge window.
+async function getL1BlockNumber() {
+	try {
+		const raw = await provider.send('eth_getBlockByNumber', ['latest', false]);
+		if (raw && raw.l1BlockNumber) {
+			return parseInt(raw.l1BlockNumber, 16);
+		}
+	} catch { /* fall through */ }
+	// Fallback: use provider block number (will be wrong on Arbitrum, but safe)
+	console.warn('[Dashboard] Warning: could not fetch L1 block number, using L2 as fallback');
+	return Number(await provider.getBlockNumber());
+}
+
 async function getSystemStatus() {
 	const core = new ethers.Contract(CORE_ADDRESS, CORE_ABI, provider);
 	const tgbt = new ethers.Contract(TGBT_ADDRESS, TGBT_ABI, provider);
@@ -241,7 +258,7 @@ async function getSystemStatus() {
 		tgbt.symbol(),
 		core.moduleAddress(MODULE_IDS.BATCH_MINING_MODULE).catch(() => ethers.ZeroAddress),
 		core.moduleAddress(MODULE_IDS.TOKENOMICS_MODULE).catch(() => ethers.ZeroAddress),
-		provider.getBlockNumber(),
+		getL1BlockNumber(),
 		provider.getNetwork(),
 	]);
 
@@ -256,7 +273,7 @@ async function getSystemStatus() {
 	const tokenSymbol = val(5, 'TGBT');
 	const coreBatchModule = val(6, ethers.ZeroAddress);
 	const coreTokenomicsModule = val(7, ethers.ZeroAddress);
-	const currentBlock = val(8, 0);
+	const l1Block = val(8, 0);
 	const network = val(9, { chainId: 42161n });
 
 	const liveBatchAddress = toChecksumOrNull(coreBatchModule);
@@ -286,8 +303,10 @@ async function getSystemStatus() {
 				totalReward: ethers.formatEther(info.totalReward),
 				storageAttested: info.storageAttested,
 				attestationHash: info.attestationHash,
-				blocksUntilFinalizable: Math.max(0, Number(info.startBlock) + CHALLENGE_WINDOW - Number(currentBlock)),
-				blocksPastChallenge: Math.max(0, Number(currentBlock) - (Number(info.startBlock) + CHALLENGE_WINDOW)),
+				l1Block,
+				blocksUntilFinalizable: Math.max(0, Number(info.startBlock) + CHALLENGE_WINDOW - l1Block),
+				blocksPastChallenge: Math.max(0, l1Block - (Number(info.startBlock) + CHALLENGE_WINDOW)),
+				etaHours: Math.max(0, (Number(info.startBlock) + CHALLENGE_WINDOW - l1Block) * 12 / 3600),
 			};
 			}
 		} catch (err) {
@@ -319,7 +338,7 @@ async function getSystemStatus() {
 		chain: {
 			rpcUrl: RPC_URL,
 			chainId: Number(network.chainId),
-			currentBlock: Number(currentBlock),
+			l1Block,
 			challengeWindow: CHALLENGE_WINDOW,
 			walletAddress: WALLET_ADDRESS,
 			ethBalance: ethers.formatEther(ethBalance),
@@ -341,7 +360,57 @@ async function getSystemStatus() {
 			nextEpochId: Number(nextEpochId),
 			latestOnChainEpoch,
 		},
+		hardware: getHardwareInfo(),
 		_rpcErrors: rpcErrors.length ? rpcErrors : undefined,
+	};
+}
+
+/**
+ * Collect host hardware info (CPU, memory, platform).
+ * Uses Node.js built-in `os` module — no external deps needed.
+ */
+function getHardwareInfo() {
+	const cpus = os.cpus();
+	const cpuModel = cpus.length > 0 ? cpus[0].model.trim() : 'Unknown';
+	const coreCount = cpus.length;
+	const totalMemBytes = os.totalmem();
+	const freeMemBytes = os.freemem();
+	const usedMemBytes = totalMemBytes - freeMemBytes;
+	const memUsagePercent = totalMemBytes > 0 ? Math.round((usedMemBytes / totalMemBytes) * 100) : 0;
+
+	// Try to extract manufacturer from CPU model string
+	let manufacturer = 'Unknown';
+	const modelLower = cpuModel.toLowerCase();
+	if (modelLower.includes('intel')) manufacturer = 'Intel';
+	else if (modelLower.includes('amd')) manufacturer = 'AMD';
+	else if (modelLower.includes('apple') || modelLower.includes('m1') || modelLower.includes('m2') || modelLower.includes('m3') || modelLower.includes('m4')) manufacturer = 'Apple';
+	else if (modelLower.includes('arm') || modelLower.includes('qualcomm') || modelLower.includes('snapdragon')) manufacturer = 'ARM';
+
+	// CPU speed (MHz → GHz)
+	const cpuSpeedMhz = cpus.length > 0 ? cpus[0].speed : 0;
+	const cpuSpeedGhz = cpuSpeedMhz > 0 ? (cpuSpeedMhz / 1000).toFixed(2) : null;
+
+	return {
+		platform: os.platform(),
+		arch: os.arch(),
+		hostname: os.hostname(),
+		cpu: {
+			model: cpuModel,
+			manufacturer,
+			cores: coreCount,
+			speedGhz: cpuSpeedGhz,
+		},
+		memory: {
+			totalBytes: totalMemBytes,
+			freeBytes: freeMemBytes,
+			usedBytes: usedMemBytes,
+			usagePercent: memUsagePercent,
+			totalGb: (totalMemBytes / (1024 ** 3)).toFixed(1),
+			freeGb: (freeMemBytes / (1024 ** 3)).toFixed(1),
+			usedGb: (usedMemBytes / (1024 ** 3)).toFixed(1),
+		},
+		uptime: os.uptime(),
+		nodeVersion: process.version,
 	};
 }
 
@@ -518,11 +587,12 @@ async function getRelayProfile() {
 
 async function getOnChainEpoch(epochId) {
 	const batch = new ethers.Contract(BATCH_ADDRESS, BATCH_ABI, provider);
-	const currentBlock = await provider.getBlockNumber();
+	const l1Block = await getL1BlockNumber();
 	const info = await batch.getEpochInfo(epochId);
 	if (!info || !info.merkleRoot || /^0x0+$/.test(info.merkleRoot)) {
 		throw new Error(`Epoch ${epochId} not found on-chain`);
 	}
+	const blocksUntil = Math.max(0, Number(info.startBlock) + CHALLENGE_WINDOW - l1Block);
 	return {
 		epochId: Number(epochId),
 		merkleRoot: info.merkleRoot,
@@ -535,10 +605,11 @@ async function getOnChainEpoch(epochId) {
 		totalReward: ethers.formatEther(info.totalReward),
 		storageAttested: info.storageAttested,
 		attestationHash: info.attestationHash,
-		currentBlock: Number(currentBlock),
+		l1Block,
 		challengeWindow: CHALLENGE_WINDOW,
-		blocksUntilFinalizable: Math.max(0, Number(info.startBlock) + CHALLENGE_WINDOW - Number(currentBlock)),
-		blocksPastChallenge: Math.max(0, Number(currentBlock) - (Number(info.startBlock) + CHALLENGE_WINDOW)),
+		blocksUntilFinalizable: blocksUntil,
+		blocksPastChallenge: Math.max(0, l1Block - (Number(info.startBlock) + CHALLENGE_WINDOW)),
+		etaHours: Math.max(0, blocksUntil * 12 / 3600),
 	};
 }
 

@@ -472,6 +472,13 @@ async function processEpoch() {
 				const onChainNextId = Number(await contract.currentEpochId());
 				if (epochId < onChainNextId) {
 					console.log(`[EpochBuilder] Epoch ${epochId} already committed on-chain (currentEpochId=${onChainNextId}), skipping commit`);
+				} else if (epochId > onChainNextId) {
+					// Self-correction: local state got ahead of on-chain (e.g. failed commit was counted locally)
+					console.warn(`[EpochBuilder] ⚠ Local epochId ${epochId} is ahead of on-chain _nextEpochId ${onChainNextId} — resetting to ${onChainNextId}`);
+					state.nextEpochId = onChainNextId;
+					state.pendingLeaves.unshift(...batch);
+					saveState();
+					return;
 				} else {
 					// Check cooldown (50 L1 blocks) before attempting commit
 					if (onChainNextId > 0) {

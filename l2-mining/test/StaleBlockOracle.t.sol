@@ -31,7 +31,7 @@ contract StaleBlockOracleTest is Test {
         TokenomicsModule implementation = new TokenomicsModule();
         ERC1967Proxy proxy = new ERC1967Proxy(
             address(implementation),
-            abi.encodeCall(TokenomicsModule.initialize, (address(core), address(token), 10 ether, 1_000, 10_000, 2, 125))
+            abi.encodeCall(TokenomicsModule.initialize, (address(core), address(token), 10 ether, 1_000, 10_000, 2, 125, 0, 0))
         );
         tokenomics = TokenomicsModule(address(proxy));
 

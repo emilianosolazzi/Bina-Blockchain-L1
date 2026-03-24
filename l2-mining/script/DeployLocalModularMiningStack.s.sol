@@ -52,7 +52,9 @@ contract DeployLocalModularMiningStackScript is Script {
             blocksPerEpoch,
             halvingInterval,
             0,
-            0
+            0,
+            0, // initialTotalMined (0 for fresh deploy, seed from old module on redeploy)
+            0  // initialTotalStaleRewards (0 for fresh deploy)
         );
 
         RateLimitModule rateLimitModule = new RateLimitModule();

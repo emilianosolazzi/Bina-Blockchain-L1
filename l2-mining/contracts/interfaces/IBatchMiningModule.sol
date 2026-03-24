@@ -100,12 +100,15 @@ interface IBatchMiningModule {
 
     // ── Randomness verification (anyone can call) ───────
 
-    /// @notice Verify that a particular output hash belongs to a finalised epoch.
+    /// @notice Verify that a particular output hash belongs to a committed epoch.
+    ///         Works immediately after commitEpochRoot — does NOT require finalization.
+    ///         The Merkle root is immutable from commit time; the challenge window
+    ///         is a dispute mechanism, not a proof-validity gate.
     /// @param epochId     The epoch containing the leaf.
     /// @param leafIndex   Position of the leaf in the Merkle tree.
     /// @param outputHash  The mined output hash (leaf value).
     /// @param proof       Merkle proof siblings.
-    /// @return valid  True when the proof is correct and the epoch is finalised.
+    /// @return valid  True when the proof is correct against the committed root.
     function verifyRandomnessLeaf(
         uint256 epochId,
         uint256 leafIndex,

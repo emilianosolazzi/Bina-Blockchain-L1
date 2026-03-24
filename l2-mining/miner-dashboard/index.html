@@ -880,6 +880,113 @@
     }
     .utxo-close-btn:hover { color: var(--text); border-color: var(--muted); }
 
+    /* ── UTXO Scan Tabs ── */
+    .utxo-tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border); margin-bottom: 14px; }
+    .utxo-tab {
+      padding: 7px 16px; font-size: 12px; font-weight: 600; color: var(--muted);
+      cursor: pointer; border-bottom: 2px solid transparent; transition: all .2s;
+      background: none; border-top: none; border-left: none; border-right: none;
+    }
+    .utxo-tab:hover { color: var(--text); }
+    .utxo-tab.active { color: var(--accent-2); border-bottom-color: var(--accent-2); }
+    .utxo-tab-content { display: none; }
+    .utxo-tab-content.active { display: block; }
+
+    /* ── Anchor Certificate ── */
+    .anchor-cert {
+      margin-top: 14px; padding: 16px; border-radius: 10px;
+      background: rgba(34,197,94,.04); border: 1px solid rgba(34,197,94,.2);
+      position: relative;
+    }
+    .anchor-cert-title { font-size: 13px; font-weight: 700; color: var(--accent-2); margin-bottom: 10px; }
+    .anchor-cert-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 20px; font-size: 12px; }
+    .anchor-cert-row { display: flex; justify-content: space-between; gap: 8px; }
+    .anchor-cert-label { color: var(--muted); white-space: nowrap; }
+    .anchor-cert-val { color: var(--text); font-family: 'SF Mono','Fira Code',monospace; font-size: 11px; text-align: right; word-break: break-all; }
+    .anchor-cert-copy {
+      position: absolute; top: 12px; right: 12px;
+      padding: 4px 10px; font-size: 10px; border-radius: 6px;
+      background: rgba(34,197,94,.12); border: 1px solid rgba(34,197,94,.25);
+      color: var(--accent-2); cursor: pointer; font-weight: 600;
+    }
+    .anchor-cert-copy:hover { background: rgba(34,197,94,.22); }
+
+    /* ── Inventory Browser ── */
+    .utxo-inv-grid { display: flex; flex-direction: column; gap: 6px; max-height: 300px; overflow-y: auto; }
+    .utxo-inv-item {
+      display: flex; align-items: center; gap: 12px; padding: 8px 12px;
+      border-radius: 8px; background: rgba(15,23,42,.5); border: 1px solid rgba(148,163,184,.07);
+      font-size: 12px; transition: border-color .2s;
+    }
+    .utxo-inv-item:hover { border-color: rgba(34,197,94,.25); }
+    .utxo-inv-type {
+      padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: .05em; white-space: nowrap;
+    }
+    .utxo-inv-type.op_return { background: rgba(34,197,94,.12); color: var(--accent-2); }
+    .utxo-inv-type.spent { background: rgba(56,189,248,.12); color: var(--accent); }
+    .utxo-inv-type.dust { background: rgba(251,191,36,.12); color: var(--gold); }
+    .utxo-inv-type.burn { background: rgba(244,114,182,.12); color: #f472b6; }
+    .utxo-inv-txid { flex: 1; font-family: 'SF Mono','Fira Code',monospace; color: var(--muted); font-size: 11px; }
+    .utxo-inv-block { color: var(--muted); font-size: 11px; white-space: nowrap; }
+    .utxo-inv-decoded { font-size: 11px; color: var(--accent-2); font-style: italic; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    /* ── Scan History ── */
+    .utxo-history-grid { display: flex; flex-direction: column; gap: 6px; max-height: 300px; overflow-y: auto; }
+    .utxo-history-item {
+      display: flex; align-items: center; gap: 12px; padding: 8px 12px;
+      border-radius: 8px; background: rgba(15,23,42,.5); border: 1px solid rgba(148,163,184,.07);
+      font-size: 12px; cursor: pointer; transition: border-color .2s;
+    }
+    .utxo-history-item:hover { border-color: rgba(34,197,94,.25); }
+    .utxo-auto-scan-indicator {
+      display: inline-flex; align-items: center; gap: 5px;
+      font-size: 11px; color: var(--muted); margin-left: 8px;
+    }
+    .utxo-auto-scan-indicator .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent-2); animation: utxoPulse 2s infinite; }
+
+    /* ── Use Case Cards ── */
+    .uc-grid { display: flex; flex-direction: column; gap: 10px; max-height: 520px; overflow-y: auto; padding-right: 4px; }
+    .uc-card {
+      padding: 14px 16px; border-radius: 10px;
+      background: rgba(15,23,42,.5); border: 1px solid rgba(148,163,184,.07);
+      transition: border-color .2s;
+    }
+    .uc-card:hover { border-color: rgba(34,197,94,.2); }
+    .uc-card summary {
+      cursor: pointer; list-style: none; display: flex; align-items: center; gap: 10px;
+    }
+    .uc-card summary::-webkit-details-marker { display: none; }
+    .uc-card summary::after {
+      content: '▸'; margin-left: auto; font-size: 12px; color: var(--muted); transition: transform .2s;
+    }
+    .uc-card[open] summary::after { transform: rotate(90deg); }
+    .uc-icon { font-size: 20px; flex-shrink: 0; }
+    .uc-title { font-size: 13px; font-weight: 700; color: var(--text); }
+    .uc-subtitle { font-size: 10px; color: var(--muted); margin-top: 1px; }
+    .uc-body { margin-top: 12px; font-size: 11px; line-height: 1.6; color: var(--muted); }
+    .uc-body strong { color: var(--text); font-weight: 600; }
+    .uc-flow {
+      display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+      margin: 10px 0; padding: 8px 12px; border-radius: 8px;
+      background: rgba(15,23,42,.6); font-size: 11px; font-family: 'SF Mono','Fira Code',monospace;
+    }
+    .uc-flow .arrow { color: var(--accent-2); }
+    .uc-example {
+      margin-top: 10px; padding: 10px 12px; border-radius: 8px;
+      background: rgba(56,189,248,.04); border: 1px solid rgba(56,189,248,.12);
+      font-size: 10px; font-family: 'SF Mono','Fira Code',monospace;
+      color: var(--text); white-space: pre-wrap; overflow-x: auto; line-height: 1.5;
+    }
+    .uc-example .cmt { color: var(--muted); }
+    .uc-tag {
+      display: inline-block; padding: 2px 7px; border-radius: 4px;
+      font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+    }
+    .uc-tag.ready { background: rgba(34,197,94,.12); color: var(--accent-2); }
+    .uc-tag.soon { background: rgba(251,191,36,.12); color: var(--gold); }
+    .uc-tag.api { background: rgba(56,189,248,.12); color: var(--accent); }
+
     @media (max-width: 980px) {
       .card { grid-column: span 6; }
       .left, .right { grid-column: span 12; }
@@ -1054,16 +1161,18 @@
     <!-- ── Unified Entropy Pipeline ── -->
     <section class="grid" style="margin-top:16px;">
       <div class="panel" style="grid-column: span 12;">
-        <div class="solutions-header">
-          <div style="display:flex;align-items:center;gap:14px;">
-            <h3 class="section-title">Unified Entropy Pipeline</h3>
-            <span class="badge ok" id="entropyPipelineStatus"><span class="live-dot"></span>All sources active</span>
-          </div>
-          <div style="display:flex;gap:8px;align-items:center;">
-            <span class="helper" id="entropyLastUpdate">—</span>
-            <button class="action-btn" id="refreshEntropy">Refresh sources</button>
-          </div>
-        </div>
+        <details open id="entropyPipelineDetails">
+          <summary class="solutions-header" style="cursor:pointer;list-style:none;">
+            <div style="display:flex;align-items:center;gap:14px;">
+              <h3 class="section-title" style="display:inline;">Unified Entropy Pipeline</h3>
+              <span style="font-size:13px;color:var(--muted);">▸ click to hide/show</span>
+              <span class="badge ok" id="entropyPipelineStatus"><span class="live-dot"></span>All sources active</span>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center;" onclick="event.stopPropagation()">
+              <span class="helper" id="entropyLastUpdate">—</span>
+              <button class="action-btn" id="refreshEntropy">Refresh sources</button>
+            </div>
+          </summary>
         <p class="helper" style="margin:4px 0 8px;">Three independent entropy streams are harvested and mixed into every beacon output. Currently only <strong>PoW Mining</strong> mints TGBT on Arbitrum L2 (via MiningModule → TokenomicsModule). Stale Block rewards are calculated on-chain but <em>claimReward()</em> does not yet mint. UTXO anchoring contributes entropy only.</p>
         <details style="margin:0 0 16px;font-size:12px;color:var(--muted);">
           <summary style="cursor:pointer;color:var(--accent);font-weight:600;">Why three entropy sources?</summary>
@@ -1130,23 +1239,36 @@
               </div>
               <button class="utxo-scan-btn" id="utxoScanBtn">⚡ Live Scan</button>
             </div>
-            <div class="helper" style="font-size:11px;line-height:1.5;margin:0 0 8px;color:var(--muted);">Scans Bitcoin for "dead" coins — outputs that can never be spent again (lost wallets, burn addresses). Their unpredictable pattern adds entropy nobody can manipulate. <strong style="color:var(--accent-2);">No TGBT rewards yet</strong> — the reward contract hasn't been deployed, but the entropy still strengthens the beacon.</div>
+            <div class="helper" style="font-size:11px;line-height:1.5;margin:0 0 8px;color:var(--muted);">Anchors your beacon entropy to <strong>Bitcoin's immutable chain</strong> — giving every output a timestamp backed by 15+ years of proof-of-work security. The miner queries mempool.space and blockstream.info for four types of permanently unspendable outputs: <strong>spent</strong> (already consumed), <strong>OP_RETURN</strong> (data-only, unspendable by design), <strong>dust</strong> (too small to ever spend), and <strong>burn-address</strong> (sent to known dead wallets like <code style="font-size:10px;">1BitcoinEater…</code>). It selects the best candidate by entropy-weighted score, then SHA-256 hashes the UTXO data with OS randomness + Bitcoin block headers (<em>enterprise entropy</em>). The resulting hash is XOR'd into the beacon.</div>
+            <details style="margin:0 0 8px;font-size:11px;color:var(--muted);">
+              <summary style="cursor:pointer;color:var(--accent-2);font-weight:600;font-size:11px;">What does anchoring to Bitcoin give you?</summary>
+              <div style="margin:6px 0 0 12px;line-height:1.6;">
+                <p style="margin:4px 0;">By tying each entropy output to a specific dead Bitcoin UTXO at a known block height, you get:</p>
+                <ul style="margin:4px 0;padding-left:18px;">
+                  <li><strong>Bitcoin-grade timestamps</strong> — proves your randomness existed before a specific Bitcoin block. Stronger than Ethereum alone because Bitcoin has deeper finality.</li>
+                  <li><strong>Tamper-proof provenance</strong> — the anchor hash is derived from an output that <em>can never change</em> (it's dead). Anyone can verify the anchor independently via the public Bitcoin chain.</li>
+                  <li><strong>Cross-chain entropy mixing</strong> — Bitcoin's unpredictable UTXO patterns add a source of entropy that is physically separate from the Arbitrum L2 chain, making manipulation exponentially harder.</li>
+                  <li><strong>Future utility</strong> — the same anchoring infrastructure enables document notarisation, IoT hardware attestation, software build provenance, and legal evidence timestamping (see <code style="font-size:10px;">create_entropy_anchor_with_reference()</code> in utxo_fetcher.rs).</li>
+                </ul>
+                <p style="margin:4px 0;color:var(--accent-2);">This is a <strong>plus</strong> that other randomness beacons don't have — your entropy is anchored to real Bitcoin finality, not just Ethereum.</p>
+              </div>
+            </details>
             <div class="source-metrics">
-              <div class="source-metric-row"><span title="How many dead/unspendable UTXOs have been found and hashed into the entropy pool.">Anchored UTXOs <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span class="val" id="epUtxoCount">—</span></div>
-              <div class="source-metric-row"><span title="Total number of Bitcoin outputs scanned looking for dead/unspendable ones.">Dead outputs scanned <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span class="val" id="epUtxoScanned">—</span></div>
-              <div class="source-metric-row"><span title="The Bitcoin block height at which the last UTXO was anchored. Ties the entropy to a specific point in Bitcoin's timeline.">Anchor height <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span class="val" id="epUtxoHeight">—</span></div>
-              <div class="source-metric-row"><span title="Whether the UTXO data comes from an enterprise-grade Bitcoin node (higher reliability).">Enterprise entropy <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span class="val ok" id="epUtxoEnterprise">—</span></div>
-              <div class="source-metric-row"><span title="Whether the UTXO scan data is recent. 'Fresh' means it's from the latest blocks; stale data reduces entropy quality.">Freshness <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span class="val" id="epUtxoFreshness">—</span></div>
+              <div class="source-metric-row"><span title="Dead Bitcoin outputs selected, SHA-256 hashed (UTXO data + enterprise entropy + utxo_id), and saved to DeadUTXOAnchorDB. Each anchor ties your beacon entropy to a specific, verifiable Bitcoin output that can never change.">Anchored UTXOs <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span class="val" id="epUtxoCount">—</span></div>
+              <div class="source-metric-row"><span title="Total Bitcoin outputs fetched from mempool.space / blockstream.info and classified as spent, OP_RETURN, dust, or burn-address. Only confirmed outputs (≥6 confirmations) qualify — unconfirmed outputs could be reversed, defeating the purpose of anchoring.">Dead outputs scanned <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span class="val" id="epUtxoScanned">—</span></div>
+              <div class="source-metric-row"><span title="Bitcoin block height of the most recently anchored UTXO. This is the timestamp anchor — it proves your entropy existed no later than this Bitcoin block. The deeper this block gets buried, the stronger the guarantee.">Anchor height <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span class="val" id="epUtxoHeight">—</span></div>
+              <div class="source-metric-row"><span title="Enterprise entropy mixes three layers: (1) OS randomness via getrandom, (2) real Bitcoin block header bytes, (3) UTXO anchor context — all SHA-256'd into a single 32-byte seed. This ensures the anchor hash can't be predicted even if one source is compromised. Shows 'N/A' when the UTXO subsystem is offline.">Enterprise entropy <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span class="val ok" id="epUtxoEnterprise">—</span></div>
+              <div class="source-metric-row"><span title="'Fresh' = anchors exist from recent Bitcoin blocks, actively strengthening the beacon. 'Offline' = UTXO subsystem hasn't connected to Bitcoin explorers yet. Stale data reduces anchor quality because older UTXOs provide less temporal freshness.">Freshness <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span class="val" id="epUtxoFreshness">—</span></div>
             </div>
-            <div class="helper" style="font-size:10px;color:var(--muted);margin:6px 0 2px;">↓ Hash derived from dead UTXO data — XOR'd into the final beacon output</div>
+            <div class="helper" style="font-size:10px;color:var(--muted);margin:6px 0 2px;">↓ SHA-256(utxo_data + enterprise_entropy + utxo_id) — XOR'd into the combined beacon output</div>
             <div class="source-entropy-hash" id="epUtxoHash">Scanning dead UTXOs…</div>
             <div class="quality-bar"><div id="epUtxoQuality" style="width:0%;background:linear-gradient(90deg,#22c55e,#16a34a);"></div></div>
             <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-top:4px;">
               <span>Anchor quality</span><span id="epUtxoQualityLabel">—</span>
             </div>
-            <div class="source-tgbt-reward">
-              <div style="font-size:11px;opacity:.7;margin-bottom:2px;">TGBT REWARD (no contract)</div>
-              <span id="epUtxoTgbt">0.00 TGBT (no mint)</span>
+            <div class="source-tgbt-reward" style="background:rgba(34,197,94,.06);">
+              <div style="font-size:11px;opacity:.8;margin-bottom:2px;color:var(--accent-2);" title="UTXO anchoring doesn't mint TGBT tokens — its value is anchoring your beacon entropy to Bitcoin's chain. Every anchored UTXO gives your randomness a Bitcoin-grade timestamp, cross-chain provenance, and tamper-proof verifiability. The same infrastructure also enables document notarisation, build provenance, IoT attestation, and legal timestamping via create_entropy_anchor_with_reference().">BITCOIN ANCHOR BONUS <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></div>
+              <span id="epUtxoTgbt" style="font-size:12px;">Anchored to Bitcoin chain — provenance + timestamp</span>
             </div>
           </div>
 
@@ -1187,18 +1309,333 @@
           <div class="utxo-scan-header">
             <div style="display:flex;align-items:center;gap:10px;">
               <span style="font-size:15px;">💀</span>
-              <span style="font-size:14px;font-weight:700;color:var(--accent-2);">UTXO Live Scan — Proof Pipeline</span>
+              <span style="font-size:14px;font-weight:700;color:var(--accent-2);">UTXO Live Scan — Bitcoin Anchor Pipeline</span>
               <span class="badge ok" id="utxoScanStatusBadge" style="font-size:10px;">Ready</span>
+              <span class="utxo-auto-scan-indicator" id="utxoAutoScanIndicator" style="display:none;"><span class="dot"></span>Auto-scanning</span>
             </div>
             <div style="display:flex;align-items:center;gap:10px;">
               <span class="helper" id="utxoScanTiming"></span>
+              <span class="helper" id="utxoScanAccum" style="color:var(--accent-2);font-weight:600;"></span>
               <button class="utxo-close-btn" id="utxoScanClose">✕ Close</button>
             </div>
           </div>
-          <div class="utxo-steps" id="utxoScanSteps">
-            <div style="text-align:center;padding:18px;color:var(--muted);font-size:12px;">Click <strong>⚡ Live Scan</strong> above to run the 5-step UTXO verification pipeline</div>
+
+          <!-- Tabs -->
+          <div class="utxo-tabs">
+            <button class="utxo-tab active" data-utxo-tab="scan">⚡ Live Scan</button>
+            <button class="utxo-tab" data-utxo-tab="history">📜 History (<span id="utxoHistoryCount">0</span>)</button>
+            <button class="utxo-tab" data-utxo-tab="inventory">📦 Inventory (<span id="utxoInvCount">0</span>)</button>
+            <button class="utxo-tab" data-utxo-tab="usecases">💡 Use Cases</button>
           </div>
-          <div class="utxo-scan-summary" id="utxoScanSummary"></div>
+
+          <!-- Tab: Live Scan -->
+          <div class="utxo-tab-content active" id="utxoTabScan">
+            <div class="utxo-steps" id="utxoScanSteps">
+              <div style="text-align:center;padding:18px;color:var(--muted);font-size:12px;">Click <strong>⚡ Live Scan</strong> above — or wait for auto-scan — to run the 5-step Bitcoin anchor verification pipeline</div>
+            </div>
+            <div class="utxo-scan-summary" id="utxoScanSummary"></div>
+            <div class="anchor-cert" id="utxoAnchorCert" style="display:none;">
+              <div class="anchor-cert-title">📜 Bitcoin Anchor Certificate</div>
+              <button class="anchor-cert-copy" id="utxoCertCopy" title="Copy anchor proof as JSON">📋 Copy proof</button>
+              <div class="anchor-cert-grid" id="utxoCertGrid"></div>
+              <div style="margin-top:10px;font-size:10px;color:var(--muted);line-height:1.5;">
+                This proof is independently verifiable: look up the UTXO on <a id="utxoCertExplorer" href="#" target="_blank" rel="noopener" style="color:var(--accent);">mempool.space ↗</a>, confirm it's dead (OP_RETURN/spent/dust), then verify the anchor hash matches SHA-256(utxo_data + entropy + utxo_id). The Bitcoin block height timestamps when this entropy was anchored.
+              </div>
+            </div>
+          </div>
+
+          <!-- Tab: History -->
+          <div class="utxo-tab-content" id="utxoTabHistory">
+            <div class="helper" style="margin-bottom:10px;font-size:11px;">All UTXO anchor scans this session. Each scan fetches live data from mempool.space and creates a verifiable entropy anchor.</div>
+            <div class="utxo-history-grid" id="utxoHistoryGrid">
+              <div style="text-align:center;padding:18px;color:var(--muted);font-size:12px;">No scans yet — run a Live Scan or wait for auto-scan.</div>
+            </div>
+          </div>
+
+          <!-- Tab: Inventory -->
+          <div class="utxo-tab-content" id="utxoTabInventory">
+            <div class="helper" style="margin-bottom:10px;font-size:11px;">Dead Bitcoin outputs available for entropy anchoring. These are permanently unspendable — their existence on the public Bitcoin chain becomes a tamper-proof timestamp for your beacon entropy.</div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;align-items:center;" id="utxoInvStats"></div>
+
+            <!-- Discover controls -->
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;padding:10px 14px;border-radius:8px;background:rgba(15,23,42,.5);border:1px solid rgba(148,163,184,.07);">
+              <span style="font-size:13px;">🔍</span>
+              <div style="flex:1;">
+                <div style="font-size:12px;font-weight:600;color:var(--text);margin-bottom:2px;">Discover more dead UTXOs</div>
+                <div style="font-size:10px;color:var(--muted);line-height:1.4;">Scans recent Bitcoin blocks via mempool.space for OP_RETURN & dust outputs. Found UTXOs are added to your local inventory for future anchoring.</div>
+              </div>
+              <select id="utxoDiscoverBlocks" style="background:rgba(15,23,42,.6);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:6px;font-size:11px;">
+                <option value="1">1 block</option>
+                <option value="3" selected>3 blocks</option>
+                <option value="5">5 blocks</option>
+                <option value="10">10 blocks</option>
+              </select>
+              <button id="utxoDiscoverBtn" style="padding:6px 14px;border-radius:6px;font-size:11px;font-weight:600;background:rgba(34,197,94,.12);border:1px solid rgba(34,197,94,.25);color:var(--accent-2);cursor:pointer;">🔍 Discover</button>
+            </div>
+            <div id="utxoDiscoverStatus" style="display:none;margin-bottom:10px;padding:10px 14px;border-radius:8px;background:rgba(56,189,248,.04);border:1px solid rgba(56,189,248,.15);font-size:11px;color:var(--muted);"></div>
+
+            <div class="utxo-inv-grid" id="utxoInvGrid">
+              <div style="text-align:center;padding:18px;color:var(--muted);font-size:12px;">Loading inventory…</div>
+            </div>
+          </div>
+
+          <!-- Tab: Use Cases -->
+          <div class="utxo-tab-content" id="utxoTabUsecases">
+            <div class="helper" style="margin-bottom:6px;font-size:11px;">Your miner already produces signed entropy, Merkle-proven epochs, and ECDSA device identity. Bitcoin UTXO anchoring turns those primitives into <strong style="color:var(--accent-2);">real-world proofs</strong> anyone can verify on the public Bitcoin chain — no trust required.</div>
+            <div style="font-size:10px;color:var(--muted);margin-bottom:14px;line-height:1.5;">Each use case below shows <strong>what it does</strong>, the <strong>data flow</strong>, and a <strong>ready-to-use API call</strong>. Click any card to expand.</div>
+
+            <div class="uc-grid">
+
+              <!-- 1. Document Notarisation -->
+              <details class="uc-card">
+                <summary>
+                  <span class="uc-icon">📄</span>
+                  <div><div class="uc-title">Document Notarisation</div><div class="uc-subtitle">Prove any document existed before a specific Bitcoin block — replaces $200-500 notary fees</div></div>
+                  <span class="uc-tag ready">Ready now</span>
+                </summary>
+                <div class="uc-body">
+                  <strong>How it works:</strong> Hash your document (contract, NDA, patent draft, will) → submit as mining seed → the solution hash gets anchored to a dead Bitcoin UTXO → timestamped by both Arbitrum and Bitcoin's immutable chain.
+                  <div class="uc-flow">
+                    <span>SHA-256(document)</span> <span class="arrow">→</span>
+                    <span>mining seed</span> <span class="arrow">→</span>
+                    <span>solution hash</span> <span class="arrow">→</span>
+                    <span>UTXO anchor</span> <span class="arrow">→</span>
+                    <span style="color:var(--accent-2);">📜 immutable proof</span>
+                  </div>
+                  <strong>Scenarios:</strong>
+                  <ul style="margin:6px 0 6px 16px;font-size:11px;color:var(--muted);">
+                    <li><strong>Freelancer contracts</strong> — anchor the signed PDF before starting work; proves terms were agreed on that date</li>
+                    <li><strong>Insurance photos</strong> — hash timestamped photos of property condition before a policy starts</li>
+                    <li><strong>Wills & trusts</strong> — anchor draft hash; proves the document wasn't altered after the date shown</li>
+                    <li><strong>IP disclosure</strong> — hash invention notes before filing a patent; establishes prior art date</li>
+                  </ul>
+                  <strong>API example:</strong>
+                  <div class="uc-example"><span class="cmt"># 1. Hash your document locally</span>
+const hash = await crypto.subtle.digest('SHA-256', fileBuffer);
+const hex = [...new Uint8Array(hash)].map(b => b.toString(16).padStart(2,'0')).join('');
+
+<span class="cmt"># 2. Anchor it to Bitcoin via the UTXO scan API</span>
+fetch('http://127.0.0.1:4271/api/utxo/scan?seed=' + hex)
+  .then(r => r.json())
+  .then(proof => {
+    console.log('Anchored at BTC block', proof.summary.blockHeight);
+    console.log('Anchor ID:', proof.summary.anchorId);
+    <span class="cmt">// Save proof.summary as your verifiable receipt</span>
+  });</div>
+                </div>
+              </details>
+
+              <!-- 2. Supply Chain & Inventory Tracking -->
+              <details class="uc-card">
+                <summary>
+                  <span class="uc-icon">📦</span>
+                  <div><div class="uc-title">Supply Chain & Inventory Tracking</div><div class="uc-subtitle">Tamper-proof chain-of-custody for goods, shipments, and warehouse inventory</div></div>
+                  <span class="uc-tag ready">Ready now</span>
+                </summary>
+                <div class="uc-body">
+                  <strong>How it works:</strong> At each checkpoint (warehouse receipt, shipping scan, delivery confirmation), hash the event data → anchor to Bitcoin. Creates an immutable audit trail that no party can alter retroactively.
+                  <div class="uc-flow">
+                    <span>scan barcode</span> <span class="arrow">→</span>
+                    <span>SHA-256(event)</span> <span class="arrow">→</span>
+                    <span>UTXO anchor</span> <span class="arrow">→</span>
+                    <span style="color:var(--accent-2);">🔗 verified at BTC block #N</span>
+                  </div>
+                  <strong>Scenarios:</strong>
+                  <ul style="margin:6px 0 6px 16px;font-size:11px;color:var(--muted);">
+                    <li><strong>Cold chain pharma</strong> — anchor temperature readings at each handoff; proves compliance window</li>
+                    <li><strong>Luxury goods</strong> — hash serial + photo at manufacture → distribution → sale; proves authenticity chain</li>
+                    <li><strong>Warehouse inventory</strong> — daily stock count hash; auditors verify counts weren't backdated</li>
+                    <li><strong>Import/export</strong> — anchor customs declarations + bill of lading at port; proves goods were documented on that date</li>
+                    <li><strong>Agriculture</strong> — anchor harvest weight + quality grade → transport → retailer receipt; farm-to-table provenance</li>
+                  </ul>
+                  <strong>API example (batch checkpoint):</strong>
+                  <div class="uc-example"><span class="cmt"># Hash an inventory checkpoint</span>
+const checkpoint = JSON.stringify({
+  warehouse: 'WH-204', sku: 'TG-MINER-V3',
+  count: 1450, timestamp: Date.now(),
+  operator: 'badge-7291'
+});
+
+const hash = await crypto.subtle.digest('SHA-256',
+  new TextEncoder().encode(checkpoint));
+
+<span class="cmt"># Anchor to Bitcoin</span>
+const proof = await fetch('http://127.0.0.1:4271/api/utxo/scan?seed='
+  + [...new Uint8Array(hash)].map(b=>b.toString(16).padStart(2,'0')).join('')
+).then(r => r.json());
+
+<span class="cmt"># Store proof alongside your inventory record</span>
+console.log('Checkpoint anchored:', proof.summary.anchorId);</div>
+                </div>
+              </details>
+
+              <!-- 3. Legal Evidence Chain -->
+              <details class="uc-card">
+                <summary>
+                  <span class="uc-icon">⚖️</span>
+                  <div><div class="uc-title">Legal Evidence Chain</div><div class="uc-subtitle">Immutable chain-of-custody for digital evidence — admissible in blockchain-aware courts</div></div>
+                  <span class="uc-tag ready">Ready now</span>
+                </summary>
+                <div class="uc-body">
+                  <strong>How it works:</strong> Hash evidence files during case preparation → anchor to Bitcoin UTXO. The Bitcoin block height proves the evidence existed at that specific time. Cannot be backdated.
+                  <div class="uc-flow">
+                    <span>evidence file</span> <span class="arrow">→</span>
+                    <span>SHA-256</span> <span class="arrow">→</span>
+                    <span>UTXO anchor</span> <span class="arrow">→</span>
+                    <span style="color:var(--accent-2);">⚖️ timestamped proof</span>
+                  </div>
+                  <strong>Scenarios:</strong>
+                  <ul style="margin:6px 0 6px 16px;font-size:11px;color:var(--muted);">
+                    <li><strong>Screenshots / emails</strong> — hash at capture time; proves they weren't fabricated later</li>
+                    <li><strong>Contracts & signatures</strong> — anchor signed agreements; proves both parties agreed on that date</li>
+                    <li><strong>Whistleblower protection</strong> — anchor evidence hash before disclosure; proves timeline</li>
+                    <li><strong>IP infringement cases</strong> — anchor your original work before the alleged copy appeared</li>
+                  </ul>
+                  <strong>Verification:</strong> Any court can independently look up the UTXO on <a href="https://mempool.space" target="_blank" rel="noopener" style="color:var(--accent);">mempool.space</a>, verify the dead output exists at the claimed block height, and recompute the anchor hash.
+                </div>
+              </details>
+
+              <!-- 4. Carbon Credit & ESG Provenance -->
+              <details class="uc-card">
+                <summary>
+                  <span class="uc-icon">🌱</span>
+                  <div><div class="uc-title">Carbon Credit & ESG Provenance</div><div class="uc-subtitle">Hardware-attested environmental data with Bitcoin-level immutability</div></div>
+                  <span class="uc-tag ready">Ready now</span>
+                </summary>
+                <div class="uc-body">
+                  <strong>How it works:</strong> IoT sensors (solar panels, air quality monitors, water meters) sign readings → submit as mining seed → anchor proves the reading was produced by real hardware at a real time. TerraStake carbon credits become hardware-attested, not self-reported.
+                  <div class="uc-flow">
+                    <span>ESP32 sensor</span> <span class="arrow">→</span>
+                    <span>signed reading</span> <span class="arrow">→</span>
+                    <span>mining seed</span> <span class="arrow">→</span>
+                    <span>UTXO anchor</span> <span class="arrow">→</span>
+                    <span style="color:var(--accent-2);">🌱 verified impact</span>
+                  </div>
+                  <strong>Scenarios:</strong>
+                  <ul style="margin:6px 0 6px 16px;font-size:11px;color:var(--muted);">
+                    <li><strong>Solar generation</strong> — anchor kWh readings per panel per day; proves clean energy production</li>
+                    <li><strong>Carbon offsets</strong> — reforestation sites anchor GPS + growth data; auditors verify remotely</li>
+                    <li><strong>Water quality</strong> — anchor pH/turbidity readings from treatment plants; regulatory compliance</li>
+                    <li><strong>ESG reports</strong> — anchor final report hash before submission; proves data wasn't altered</li>
+                  </ul>
+                </div>
+              </details>
+
+              <!-- 5. Academic Priority & Research -->
+              <details class="uc-card">
+                <summary>
+                  <span class="uc-icon">🎓</span>
+                  <div><div class="uc-title">Academic Priority & Research</div><div class="uc-subtitle">Prove authorship date without revealing content — resolve priority disputes</div></div>
+                  <span class="uc-tag ready">Ready now</span>
+                </summary>
+                <div class="uc-body">
+                  <strong>How it works:</strong> Hash your research paper / dataset / algorithm before publication → anchor to Bitcoin. Later, reveal the paper and show the hash matches. Bitcoin block height proves you had it first.
+                  <div class="uc-flow">
+                    <span>paper.pdf</span> <span class="arrow">→</span>
+                    <span>SHA-256</span> <span class="arrow">→</span>
+                    <span>UTXO anchor</span> <span class="arrow">→</span>
+                    <span style="color:var(--accent-2);">🎓 priority proof</span>
+                  </div>
+                  <strong>Scenarios:</strong>
+                  <ul style="margin:6px 0 6px 16px;font-size:11px;color:var(--muted);">
+                    <li><strong>Pre-print priority</strong> — anchor before submitting to arXiv; proves you had the idea first</li>
+                    <li><strong>Dataset versioning</strong> — anchor dataset hash at each version; prevents data p-hacking accusations</li>
+                    <li><strong>Grant proposals</strong> — anchor before submission; proves original ideas weren't copied from reviewers</li>
+                    <li><strong>Lab notebooks</strong> — daily hash of experiment logs; digital equivalent of signed lab books</li>
+                  </ul>
+                </div>
+              </details>
+
+              <!-- 6. Software Build Provenance -->
+              <details class="uc-card">
+                <summary>
+                  <span class="uc-icon">🔨</span>
+                  <div><div class="uc-title">Software Build Provenance</div><div class="uc-subtitle">Prove a specific binary existed before a specific block — tamper-evident releases</div></div>
+                  <span class="uc-tag api">API</span>
+                </summary>
+                <div class="uc-body">
+                  <strong>How it works:</strong> CI/CD pipeline hashes the compiled binary → submits as mining seed → anchor proves "this exact binary existed and was signed before Bitcoin block #N". Downstream users verify the hash matches.
+                  <div class="uc-flow">
+                    <span>cargo build</span> <span class="arrow">→</span>
+                    <span>SHA-256(binary)</span> <span class="arrow">→</span>
+                    <span>UTXO anchor</span> <span class="arrow">→</span>
+                    <span style="color:var(--accent-2);">🔨 build receipt</span>
+                  </div>
+                  <strong>Scenarios:</strong>
+                  <ul style="margin:6px 0 6px 16px;font-size:11px;color:var(--muted);">
+                    <li><strong>Release signing</strong> — anchor each release binary; users verify download matches anchored hash</li>
+                    <li><strong>CVE dating</strong> — anchor vulnerable binary hash before fix; proves patch timeline</li>
+                    <li><strong>Firmware updates</strong> — IoT devices verify update hash against Bitcoin anchor before installing</li>
+                    <li><strong>Container images</strong> — anchor Docker digest; deployment pipeline rejects unanchored images</li>
+                  </ul>
+                  <strong>CI/CD example (GitHub Actions):</strong>
+                  <div class="uc-example"><span class="cmt"># In your CI pipeline after build:</span>
+BINARY_HASH=$(sha256sum target/release/myapp | cut -d' ' -f1)
+curl -s "http://127.0.0.1:4271/api/utxo/scan?seed=$BINARY_HASH" \
+  | jq '.summary | {anchorId, blockHeight, txid}' \
+  > build-provenance.json
+
+<span class="cmt"># Ship build-provenance.json alongside your release</span></div>
+                </div>
+              </details>
+
+              <!-- 7. Financial Audit Trail -->
+              <details class="uc-card">
+                <summary>
+                  <span class="uc-icon">🏦</span>
+                  <div><div class="uc-title">Financial Audit Trail</div><div class="uc-subtitle">GDPR-compliant proof that calculations existed on a specific date — without revealing data</div></div>
+                  <span class="uc-tag api">API</span>
+                </summary>
+                <div class="uc-body">
+                  <strong>How it works:</strong> Hash daily NAV calculations, portfolio valuations, or risk reports → anchor to Bitcoin. The hash proves the calculation existed and was unchanged, without revealing any private financial data. Regulators verify the hash, not the data.
+                  <div class="uc-flow">
+                    <span>daily NAV</span> <span class="arrow">→</span>
+                    <span>SHA-256</span> <span class="arrow">→</span>
+                    <span>UTXO anchor</span> <span class="arrow">→</span>
+                    <span style="color:var(--accent-2);">🏦 audit proof</span>
+                  </div>
+                  <strong>Scenarios:</strong>
+                  <ul style="margin:6px 0 6px 16px;font-size:11px;color:var(--muted);">
+                    <li><strong>Fund administration</strong> — daily NAV hash anchored; proves valuation wasn't backdated</li>
+                    <li><strong>Tax records</strong> — anchor year-end calculations before filing deadline</li>
+                    <li><strong>Compliance reports</strong> — anchor risk metrics; proves they were computed on the claimed date</li>
+                    <li><strong>Transaction logs</strong> — anchor end-of-day summary hash; creates immutable reconciliation trail</li>
+                  </ul>
+                </div>
+              </details>
+
+              <!-- 8. Decentralised Identity / PKI -->
+              <details class="uc-card">
+                <summary>
+                  <span class="uc-icon">🔑</span>
+                  <div><div class="uc-title">Decentralised Identity & PKI</div><div class="uc-subtitle">Mining wallet = device identity — no certificate authority needed</div></div>
+                  <span class="uc-tag soon">Coming soon</span>
+                </summary>
+                <div class="uc-body">
+                  <strong>How it works:</strong> Your mining wallet is your device identity. Your solution history is proof of continuous operation. Combined with Bitcoin UTXO anchoring, this replaces X.509 certificates with mining-proven identity — the certificate can't be stolen because it requires live CPU work to maintain.
+                  <div class="uc-flow">
+                    <span>mining wallet</span> <span class="arrow">→</span>
+                    <span>continuous solutions</span> <span class="arrow">→</span>
+                    <span>UTXO anchors</span> <span class="arrow">→</span>
+                    <span style="color:var(--accent-2);">🔑 mining-proven ID</span>
+                  </div>
+                  <strong>Scenarios:</strong>
+                  <ul style="margin:6px 0 6px 16px;font-size:11px;color:var(--muted);">
+                    <li><strong>IoT device auth</strong> — devices prove identity via mining history, not pre-shared keys</li>
+                    <li><strong>Zero-trust networking</strong> — access requires proof of recent mining activity</li>
+                    <li><strong>API authentication</strong> — replace API keys with mining wallet signatures</li>
+                    <li><strong>Multi-factor</strong> — "something you compute" as a factor alongside password + phone</li>
+                  </ul>
+                </div>
+              </details>
+
+            </div><!-- /uc-grid -->
+
+            <div style="margin-top:14px;padding:12px 16px;border-radius:10px;background:rgba(34,197,94,.04);border:1px solid rgba(34,197,94,.15);font-size:11px;color:var(--muted);line-height:1.6;">
+              <strong style="color:var(--accent-2);">How it all connects:</strong> Every use case above uses the same infrastructure you're already running. The miner produces signed entropy → the UTXO scanner (📦 Inventory tab) selects a dead Bitcoin output → the anchor pipeline (⚡ Live Scan tab) binds your data hash to that UTXO → the certificate (📜) becomes your proof. Anyone can verify it on <a href="https://mempool.space" target="_blank" rel="noopener" style="color:var(--accent);">mempool.space ↗</a> without trusting you.
+            </div>
+          </div>
+
         </div>
 
         <!-- ── Entropy Mixer Flow Diagram ── -->
@@ -1256,8 +1693,8 @@
                 <span class="tgbt-val" style="color:var(--accent);" id="epBreakdownPow">—</span>
               </div>
               <div class="tgbt-breakdown-item">
-                <div class="source-name"><span class="source-dot" style="background:var(--accent-2);opacity:.4;"></span>Dead UTXO <span style="font-size:10px;color:var(--muted);" title="No smart contract deployed yet to reward UTXO entropy. The entropy still improves beacon quality, but there's no token payment path.">(no contract) ⓘ</span></div>
-                <span class="tgbt-val" style="color:var(--muted);" id="epBreakdownUtxo">—</span>
+                <div class="source-name"><span class="source-dot" style="background:var(--accent-2);opacity:.7;"></span>Dead UTXO <span style="font-size:10px;color:var(--accent-2);" title="UTXO anchoring doesn't mint tokens — its value is anchoring your entropy to Bitcoin. Every anchored dead output gives the beacon a Bitcoin-grade timestamp and cross-chain provenance that other randomness beacons can't match.">(Bitcoin anchor) ⓘ</span></div>
+                <span class="tgbt-val" style="color:var(--accent-2);font-size:11px;" id="epBreakdownUtxo">—</span>
               </div>
               <div class="tgbt-breakdown-item">
                 <div class="source-name"><span class="source-dot" style="background:var(--gold);opacity:.4;"></span>Stale Blocks <span style="font-size:10px;color:var(--muted);" title="The StaleBlockOracle contract can CALCULATE rewards (baseReward × quality × forkDepth) but claimReward() doesn't actually mint TGBT yet — it's a TODO in the contract. Will go live in a future update.">(pending) ⓘ</span></div>
@@ -1281,6 +1718,7 @@
             <div class="helper">Monitoring Bitcoin network for orphaned blocks…</div>
           </div>
         </div>
+        </details>
       </div>
     </section>
 
@@ -1291,7 +1729,7 @@
           <summary class="solutions-header" style="cursor:pointer;list-style:none;">
             <div style="display:flex;align-items:center;gap:14px;">
               <h3 style="display:inline;" title="Every accepted solution becomes a leaf in the epoch Merkle tree. Consumers use these to verify randomness on-chain.">Solution Storage</h3>
-              <span style="font-size:10px;color:var(--muted);">▸ click to hide/show</span>
+              <span style="font-size:13px;color:var(--muted);">▸ click to hide/show</span>
               <div class="sol-storage-badge" id="storageBadge" title="Where solutions are stored. FILE = local telemetry.jsonl on disk (default). No database needed — Redis and PostgreSQL are background services for caching and state, not for solution storage."><span class="dot"></span><span id="storageLabel">File</span></div>
             </div>
             <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;" onclick="event.stopPropagation()">
@@ -1339,13 +1777,15 @@
 
     <section class="grid" style="margin-top:16px;">
       <div class="panel" style="grid-column: span 12;">
-        <div class="solutions-header">
-          <h3 class="section-title">Personal Threat Dashboard</h3>
-          <div style="display:flex;gap:8px;flex-wrap:wrap;">
-            <button class="action-btn" id="refreshSecurity">Refresh security</button>
-            <button class="copy-btn" id="copyRelayProfile">Copy relay profile</button>
-          </div>
-        </div>
+        <details open id="threatDashboardDetails">
+          <summary class="solutions-header" style="cursor:pointer;list-style:none;">
+            <h3 class="section-title" style="display:inline;">Personal Threat Dashboard</h3>
+            <span style="font-size:13px;color:var(--muted);margin-left:8px;">▸ click to hide/show</span>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;float:right;" onclick="event.stopPropagation()">
+              <button class="action-btn" id="refreshSecurity">Refresh security</button>
+              <button class="copy-btn" id="copyRelayProfile">Copy relay profile</button>
+            </div>
+          </summary>
         <p class="helper" style="margin:0 0 14px;">Monitors your miner's integrity. Gaps in solution output, unusual hashrate patterns, or tampered telemetry trigger alerts. A clean record here proves your node is honest — required for maximum TGBT rewards.</p>
         <div class="system-grid">
           <div class="status-card">
@@ -1407,73 +1847,104 @@
               <div id="threatActiveAlerts" class="proof-nodes"></div>
             </div>
             <details class="proof-box" style="cursor:default;">
-              <summary class="helper" style="margin-bottom:8px;cursor:pointer;user-select:none;">Relay profile preview <span style="font-size:10px;color:var(--muted);">▸ click to show/hide</span></summary>
+              <summary class="helper" style="margin-bottom:8px;cursor:pointer;user-select:none;">Relay profile preview <span style="font-size:13px;color:var(--muted);">▸ click to show/hide</span></summary>
               <div id="relayProfilePreview" class="proof-node mono" style="white-space: pre-wrap;">—</div>
             </details>
           </div>
         </div>
+        </details>
       </div>
 
       <div class="panel" style="grid-column: span 12;">
         <details open id="systemStatusDetails">
           <summary class="solutions-header" style="cursor:pointer;list-style:none;">
-            <h3 class="section-title" style="display:inline;">System & Chain Status</h3>
-            <span style="font-size:10px;color:var(--muted);margin-left:8px;">▸ click to hide/show</span>
-            <button class="action-btn" id="refreshSystem" onclick="event.stopPropagation()" style="float:right;">Refresh status</button>
+            <h3 class="section-title" style="display:inline;">Miner Status</h3>
+            <span id="systemHealthDot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--muted);margin-left:8px;vertical-align:middle;"></span>
+            <button class="action-btn" id="refreshSystem" onclick="event.stopPropagation()" style="float:right;">Refresh</button>
           </summary>
-        <p class="helper" style="margin:0 0 14px;">Live status of all services, your wallet balance, smart contract wiring on Arbitrum, and the host machine hardware. If any service shows Offline, run <code style="font-size:11px;">start-all.ps1</code> to restart.</p>
-        <div class="system-grid">
-          <div class="status-card">
-            <h3>Services</h3>
-            <div class="status-list">
-              <div class="status-item"><span>Dashboard</span><span class="badge ok">Online</span></div>
-              <div class="status-item"><span>Randomness API</span><span id="randomnessApiBadge" class="badge">Checking…</span></div>
-              <div class="status-item"><span>Heartbeat sidecar</span><span id="heartbeatApiBadge" class="badge">Checking…</span></div>
-              <div class="status-item"><span title="Where telemetry data is read from. This is the file the Rust miner writes solution data to.">Telemetry source</span><span id="telemetryPath" class="mono">—</span></div>
-              <div class="status-item"><span title="How solutions are stored: 'file' = local JSON lines on disk (default, no database needed). Redis and PostgreSQL run in the background for API caching and epoch state — you don't need to manage them.">Solution backend</span><span id="solutionBackend">—</span></div>
+
+        <!-- ── Main status: 3 columns ── -->
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-top:12px;">
+
+          <!-- Col 1: Health -->
+          <div style="display:grid;gap:8px;align-content:start;">
+            <div id="systemHealthBanner" style="padding:10px 14px;border-radius:10px;background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.18);font-size:13px;font-weight:600;color:var(--accent-2);">All systems online</div>
+            <div id="ethLowWarning" style="display:none;padding:8px 12px;border-radius:8px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.2);font-size:12px;color:var(--danger);">
+              <strong>⚠ Low gas</strong> — send ETH on Arbitrum to <span id="ethWarnAddr" class="mono" style="font-size:11px;">your wallet</span>
             </div>
           </div>
-          <div class="status-card">
-            <h3>Wallet</h3>
-            <div class="status-list">
-              <div class="status-item"><span>Address</span><span id="walletAddress" class="mono">—</span></div>
-              <div class="status-item"><span>TGBT</span><span id="walletTgbt">—</span></div>
-              <div class="status-item"><span>ETH</span><span id="walletEth">—</span></div>
-              <div class="status-item"><span>RPC</span><span id="rpcStatus" class="mono">—</span></div>
+
+          <!-- Col 2: Balances -->
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+            <div style="background:rgba(251,191,36,.06);border:1px solid rgba(251,191,36,.15);border-radius:12px;padding:10px 12px;text-align:center;">
+              <div style="font-size:11px;color:var(--muted);margin-bottom:2px;">TGBT earned</div>
+              <div id="walletTgbt" style="font-size:20px;font-weight:700;color:var(--gold);">—</div>
+            </div>
+            <div id="ethBalanceCard" style="background:rgba(34,197,94,.06);border:1px solid rgba(34,197,94,.15);border-radius:12px;padding:10px 12px;text-align:center;">
+              <div style="font-size:11px;color:var(--muted);margin-bottom:2px;">ETH (gas)</div>
+              <div id="walletEth" style="font-size:20px;font-weight:700;color:var(--accent-2);">—</div>
             </div>
           </div>
-          <div class="status-card">
-            <h3>Contract Wiring</h3>
-            <div class="status-list">
-              <div class="status-item"><span>Batch in Core</span><span id="batchWireBadge" class="badge">—</span></div>
-              <div class="status-item"><span>Tokenomics in Core</span><span id="tokenomicsWireBadge" class="badge">—</span></div>
-              <div class="status-item"><span>Live batch</span><span id="liveBatchAddress" class="mono">—</span></div>
-              <div class="status-item"><span>Live tokenomics</span><span id="liveTokenomicsAddress" class="mono">—</span></div>
+
+          <!-- Col 3: Epochs -->
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+            <div style="background:rgba(56,189,248,.06);border:1px solid rgba(56,189,248,.15);border-radius:12px;padding:10px 12px;text-align:center;">
+              <div style="font-size:11px;color:var(--muted);margin-bottom:2px;">Epochs</div>
+              <div id="nextEpochId" style="font-size:20px;font-weight:700;color:var(--accent);">—</div>
             </div>
-          </div>
-          <div class="status-card">
-            <h3>On-chain Epoch</h3>
-            <div class="status-list">
-              <div class="status-item"><span>Next epoch id</span><span id="nextEpochId">—</span></div>
-              <div class="status-item"><span>Latest on-chain epoch</span><span id="latestOnChainEpoch">—</span></div>
-              <div class="status-item"><span>Finalized</span><span id="latestOnChainFinalized">—</span></div>
-              <div class="status-item"><span>Storage attested</span><span id="latestOnChainAttested">—</span></div>
-            </div>
-          </div>
-          <div class="status-card">
-            <h3>Hardware</h3>
-            <div class="status-list">
-              <div class="status-item"><span>CPU</span><span id="hwCpuModel" class="mono" style="font-size:11px;">—</span></div>
-              <div class="status-item"><span>Manufacturer</span><span id="hwManufacturer">—</span></div>
-              <div class="status-item"><span>Cores</span><span id="hwCores">—</span></div>
-              <div class="status-item"><span>CPU Speed</span><span id="hwSpeed">—</span></div>
-              <div class="status-item"><span>Memory</span><span id="hwMemory">—</span></div>
-              <div class="status-item"><span>Memory usage</span><span id="hwMemUsage">—</span></div>
-              <div class="status-item"><span>Platform</span><span id="hwPlatform">—</span></div>
-              <div class="status-item"><span>Host uptime</span><span id="hwUptime">—</span></div>
+            <div id="latestEpochCard" style="background:rgba(56,189,248,.06);border:1px solid rgba(56,189,248,.15);border-radius:12px;padding:10px 12px;text-align:center;">
+              <div style="font-size:11px;color:var(--muted);margin-bottom:2px;">Latest</div>
+              <div id="latestOnChainEpoch" style="font-size:20px;font-weight:700;color:var(--accent);">—</div>
+              <div style="font-size:10px;margin-top:2px;"><span id="latestOnChainFinalized" style="color:var(--muted);">—</span></div>
             </div>
           </div>
         </div>
+
+        <!-- ── Advanced details (collapsed) ── -->
+        <details style="margin-top:14px;font-size:12px;">
+          <summary style="cursor:pointer;color:var(--muted);font-size:11px;letter-spacing:.04em;">Advanced diagnostics</summary>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:10px;">
+            <!-- Left: Services + Wallet -->
+            <div style="display:grid;gap:6px;font-size:12px;">
+              <div style="display:flex;justify-content:space-between;"><span style="color:var(--muted);">Randomness API</span><span id="randomnessApiBadge" class="badge" style="font-size:10px;padding:2px 8px;">—</span></div>
+              <div style="display:flex;justify-content:space-between;"><span style="color:var(--muted);">Heartbeat</span><span id="heartbeatApiBadge" class="badge" style="font-size:10px;padding:2px 8px;">—</span></div>
+              <div style="display:flex;justify-content:space-between;align-items:center;">
+                <span style="color:var(--muted);">Wallet</span>
+                <span style="display:flex;align-items:center;gap:6px;">
+                  <span id="walletAddress" class="mono" style="font-size:11px;color:var(--accent);cursor:pointer;" title="Click to copy" onclick="navigator.clipboard.writeText(this.dataset.full||this.textContent)">—</span>
+                  <a id="walletExplorerLink" href="#" target="_blank" rel="noopener" style="font-size:10px;color:var(--muted);text-decoration:none;" title="Arbiscan">↗</a>
+                </span>
+              </div>
+              <div style="display:flex;justify-content:space-between;"><span style="color:var(--muted);">RPC</span><span id="rpcStatus" class="mono" style="font-size:11px;">—</span></div>
+              <div style="display:flex;justify-content:space-between;"><span style="color:var(--muted);">Storage</span><span id="solutionBackend" style="font-size:11px;">—</span></div>
+            </div>
+            <!-- Right: On-chain + Hardware -->
+            <div style="display:grid;gap:6px;font-size:12px;">
+              <div style="display:flex;justify-content:space-between;align-items:center;">
+                <span style="color:var(--muted);">Batch contract</span>
+                <span style="display:flex;align-items:center;gap:4px;"><span id="batchWireBadge" class="badge" style="font-size:10px;padding:2px 6px;">—</span><a id="liveBatchLink" class="mono" href="#" target="_blank" rel="noopener" style="font-size:10px;color:var(--accent);text-decoration:none;">—</a></span>
+              </div>
+              <div style="display:flex;justify-content:space-between;align-items:center;">
+                <span style="color:var(--muted);">Tokenomics</span>
+                <span style="display:flex;align-items:center;gap:4px;"><span id="tokenomicsWireBadge" class="badge" style="font-size:10px;padding:2px 6px;">—</span><a id="liveTokenomicsLink" class="mono" href="#" target="_blank" rel="noopener" style="font-size:10px;color:var(--accent);text-decoration:none;">—</a></span>
+              </div>
+              <div style="display:flex;justify-content:space-between;"><span style="color:var(--muted);">Finalized</span><span id="latestOnChainAttested" style="font-weight:600;">—</span></div>
+              <div style="display:flex;justify-content:space-between;"><span style="color:var(--muted);">CPU</span><span id="hwCpuModel" class="mono" style="font-size:11px;">—</span></div>
+              <div style="display:flex;justify-content:space-between;"><span style="color:var(--muted);">Memory</span><span id="hwMemUsage" style="font-size:11px;">—</span></div>
+              <div style="display:flex;justify-content:space-between;"><span style="color:var(--muted);">Uptime</span><span id="hwUptime" style="font-size:11px;">—</span></div>
+            </div>
+          </div>
+          <!-- Hidden elements still needed by JS but not displayed -->
+          <span id="telemetryPath" style="display:none;">—</span>
+          <span id="liveBatchAddress" style="display:none;">—</span>
+          <span id="liveTokenomicsAddress" style="display:none;">—</span>
+          <span id="hwManufacturer" style="display:none;">—</span>
+          <span id="hwMemory" style="display:none;">—</span>
+          <span id="hwSummary" style="display:none;">—</span>
+          <span id="hwCores" style="display:none;">—</span>
+          <span id="hwSpeed" style="display:none;">—</span>
+          <span id="hwPlatform" style="display:none;">—</span>
+        </details>
         </details>
       </div>
 
@@ -1538,7 +2009,7 @@ interface IBatchMining {
 
 contract FairLottery {
     IBatchMining constant BEACON =
-        IBatchMining(0x6eb6D03A8E98c79E89B98ce19AcAefB865817Db2); // Arbitrum
+        IBatchMining(0xAf07E37D104E9be17639FE7a51B36972D4738651); // Arbitrum
 
     address[] public players;
 
@@ -1587,7 +2058,7 @@ interface IBatchMining {
 
 contract RandomTraitNFT is ERC721 {
     IBatchMining constant BEACON =
-        IBatchMining(0x6eb6D03A8E98c79E89B98ce19AcAefB865817Db2);
+        IBatchMining(0xAf07E37D104E9be17639FE7a51B36972D4738651);
 
     uint256 public nextTokenId;
     mapping(uint256 => uint8) public rarity; // 0=common, 1=rare, 2=legendary
@@ -1642,7 +2113,7 @@ import { ethers } from "ethers";
 
 const provider = new ethers.JsonRpcProvider("https://arb1.arbitrum.io/rpc");
 const beacon = new ethers.Contract(
-    "0x6eb6D03A8E98c79E89B98ce19AcAefB865817Db2",
+    "0xAf07E37D104E9be17639FE7a51B36972D4738651",
     ["function verifyRandomnessLeaf(uint256,uint256,bytes32,bytes32[]) view returns (bool)"],
     provider
 );
@@ -1685,7 +2156,7 @@ async fn main() -> eyre::Result&lt;()&gt; {
         .on_http("https://arb1.arbitrum.io/rpc".parse()?);
 
     let beacon = IBatchMining::new(
-        "0x6eb6D03A8E98c79E89B98ce19AcAefB865817Db2".parse()?,
+        "0xAf07E37D104E9be17639FE7a51B36972D4738651".parse()?,
         provider,
     );
 
@@ -1776,7 +2247,7 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
         <details open id="epochExplorerDetails">
           <summary class="solutions-header" style="cursor:pointer;list-style:none;">
             <h3 class="section-title" style="display:inline;">Epoch Explorer</h3>
-            <span style="font-size:10px;color:var(--muted);margin-left:8px;">▸ click to hide/show</span>
+            <span style="font-size:13px;color:var(--muted);margin-left:8px;">▸ click to hide/show</span>
             <button class="action-btn" id="refreshEpochs" onclick="event.stopPropagation()" style="float:right;">Refresh epochs</button>
           </summary>
         <details style="margin:0 0 14px;font-size:12px;color:var(--muted);">
@@ -1822,7 +2293,7 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
             <strong style="color:var(--accent);">Latest proof</strong> — loads the most recent random number from this epoch into the Proof Inspector (above), so you can inspect its Merkle proof and copy the on-chain verification call.
           </div>
           <div style="flex:1;min-width:160px;background:rgba(56,189,248,.06);border:1px solid rgba(56,189,248,.12);border-radius:8px;padding:8px 10px;line-height:1.5;">
-            <strong style="color:var(--accent);">Details</strong> — opens a side panel showing the full epoch: all 10 leaf hashes, Merkle root, finalization status, challenge window progress, storage attestation, and wallet actions (finalize/attest via MetaMask).
+            <strong style="color:var(--accent);">Details</strong> — opens a side panel showing the full epoch: all 10 leaf hashes, Merkle root, finalization status, challenge window progress, and storage attestation.
           </div>
         </div>
         <div id="epochStatus" class="helper" style="margin-top:12px;">—</div>
@@ -1842,30 +2313,52 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
       <button id="closeDrawer" class="drawer-close">Close</button>
     </div>
     <div class="drawer-grid">
+      <!-- ── Finalization status card ── -->
       <div class="drawer-card">
-        <h4>Overview</h4>
-        <div class="kv" style="grid-template-columns: 170px 1fr;">
-          <div class="label">Merkle root</div><div id="drawerMerkleRoot" class="hash">—</div>
-          <div class="label">Leaf count</div><div id="drawerLeafCount">—</div>
+        <h4>Finalization</h4>
+        <div id="drawerStatusBanner" style="padding:10px 14px;border-radius:8px;margin-bottom:14px;line-height:1.5;font-size:13px;">—</div>
+        <div id="drawerProgressWrap" style="margin-bottom:14px;">
+          <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-bottom:4px;">
+            <span>Committed</span><span id="drawerProgressLabel">—</span><span>Finalizable</span>
+          </div>
+          <div style="height:6px;border-radius:3px;background:rgba(255,255,255,.08);overflow:hidden;">
+            <div id="drawerProgressBar" style="height:100%;border-radius:3px;background:var(--accent);transition:width .4s ease;width:0%;"></div>
+          </div>
+        </div>
+        <div class="kv" style="grid-template-columns: 140px 1fr;">
+          <div class="label">Status</div><div id="drawerFinalized">—</div>
           <div class="label">Reward</div><div id="drawerReward">—</div>
-          <div class="label">Finalized</div><div id="drawerFinalized">—</div>
-          <div class="label">On-chain start block</div><div id="drawerStartBlock">—</div>
-          <div class="label">On-chain end block</div><div id="drawerEndBlock">—</div>
-          <div class="label">Blocks past challenge</div><div id="drawerBlocksPastChallenge">—</div>
-          <div class="label">Storage attested</div><div id="drawerStorageAttested">—</div>
+          <div class="label">Operator</div><div id="drawerOperator" class="hash" style="font-size:11px;">—</div>
+          <div class="label">Pool</div><div id="drawerPoolId">—</div>
+        </div>
+      </div>
+      <!-- ── On-chain details card ── -->
+      <div class="drawer-card">
+        <h4>On-chain details</h4>
+        <div class="kv" style="grid-template-columns: 160px 1fr;">
+          <div class="label">Merkle root</div><div id="drawerMerkleRoot" class="hash">—</div>
+          <div class="label">Leaves</div><div id="drawerLeafCount">—</div>
+          <div class="label">Commit block (L1)</div><div id="drawerStartBlock">—</div>
+          <div class="label">Finalize block (L1)</div><div id="drawerEndBlock">—</div>
+          <div class="label">Challenge window</div><div id="drawerBlocksPastChallenge">—</div>
+        </div>
+      </div>
+      <!-- ── Storage & attestation card ── -->
+      <div class="drawer-card">
+        <h4>Storage attestation</h4>
+        <div class="kv" style="grid-template-columns: 160px 1fr;margin-bottom:10px;">
+          <div class="label">Attested on-chain</div><div id="drawerStorageAttested">—</div>
           <div class="label">Attestation hash</div><div id="drawerAttestationHash" class="hash">—</div>
           <div class="label">Attestation tx</div><div id="drawerAttestationTx" class="hash">—</div>
         </div>
-      </div>
-      <div class="drawer-card">
-        <h4>Storage attestation</h4>
         <div id="drawerStorageSummary" class="helper">—</div>
         <div class="copy-actions" style="margin-top:12px;">
           <button class="copy-btn" id="copyDrawerAttestationHash">Copy attestation hash</button>
           <button class="action-btn" id="drawerVerifyStorage">Verify storage now</button>
         </div>
       </div>
-      <div class="drawer-card">
+      <!-- Wallet actions hidden: epoch-builder auto-finalizes and auto-attests -->
+      <div class="drawer-card" style="display:none;">
         <h4>Wallet actions</h4>
         <div class="wallet-row" style="margin-bottom:12px;">
           <button class="action-btn" id="connectWallet">Connect MetaMask</button>
@@ -2049,7 +2542,12 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
     }
 
     function finalizeLabel(ep) {
-      return ep?.finalized ? { label: 'Finalized', kind: 'ok' } : { label: 'Pending', kind: 'warn' };
+      if (ep?.finalized) return { label: 'Finalized', kind: 'ok' };
+      if (ep?.blocksUntilFinalizable > 0 && ep?.etaHours != null) {
+        return { label: `~${ep.etaHours.toFixed(0)}h left`, kind: 'warn' };
+      }
+      if (ep?.blocksPastChallenge > 0) return { label: 'Ready to finalize', kind: 'warn' };
+      return { label: 'Pending', kind: 'warn' };
     }
 
     async function copyText(text, label = 'Copied') {
@@ -2113,7 +2611,7 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
       const latestOnChain = state.system?.chain?.latestOnChainEpoch;
       if (latestOnChain && !latestOnChain.error && !latestOnChain.finalized && Number(latestOnChain.blocksPastChallenge || 0) > 0) {
         state.alerts.stalledEpochId = latestOnChain.epochId;
-        els.bannerStalledText.textContent = `Epoch #${latestOnChain.epochId} has not been finalized — ${latestOnChain.blocksPastChallenge} blocks past the ${state.system?.chain?.challengeWindow || 100}-block challenge window.`;
+        els.bannerStalledText.textContent = `Epoch #${latestOnChain.epochId} has not been finalized — ${latestOnChain.blocksPastChallenge.toLocaleString()} L1 blocks past the ${(state.system?.chain?.challengeWindow || 28800).toLocaleString()}-block challenge window.`;
         els.bannerStalledFinalization.classList.add('show');
       } else {
         state.alerts.stalledEpochId = null;
@@ -2300,109 +2798,147 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
       drawChart();
     }
 
+    /** Abbreviate 0x-address to 0x1234…5678 */
+    function abbrevAddr(addr) {
+      if (!addr || addr.length < 12) return addr || '—';
+      return addr.slice(0, 6) + '…' + addr.slice(-4);
+    }
+    /** Arbiscan URL for an address */
+    function arbiscanAddr(addr) { return `https://arbiscan.io/address/${addr}`; }
+    /** Redact API key from URL: show host only, replace key with ••• */
+    function redactRpcUrl(url) {
+      if (!url) return '—';
+      try {
+        const u = new URL(url);
+        const path = u.pathname.replace(/\/$/, '');
+        const hasKey = u.searchParams.has('key');
+        return `${u.host}${path}${hasKey ? '?key=•••' : ''}`;
+      } catch { return url.replace(/key=[^&]+/, 'key=•••'); }
+    }
+
     function renderSystemStatus() {
       const sys = state.system;
       if (!sys) return;
 
-      // Show RPC error banner if system status had issues
-      if (sys._error) {
-        els.rpcStatus.textContent = `RPC Error: ${sys._error}`;
-        els.rpcStatus.className = 'danger';
-      } else {
-        els.rpcStatus.textContent = sys.chain?.rpcUrl || '—';
-        els.rpcStatus.className = '';
+      // ── Overall health: single green/red banner + dot ──
+      const rndOk = sys.randomnessApi?.online;
+      const hbOk = sys.heartbeatApi?.online;
+      const allOk = rndOk && hbOk && !sys._error;
+      const dot = els.systemHealthDot;
+      const banner = els.systemHealthBanner;
+      if (dot) dot.style.background = allOk ? 'var(--accent-2)' : 'var(--danger)';
+      if (banner) {
+        banner.textContent = allOk ? 'All systems online' : sys._error ? `RPC error — ${sys._error}` : 'Service offline — check start-all.ps1';
+        banner.style.background = allOk ? 'rgba(34,197,94,.08)' : 'rgba(239,68,68,.08)';
+        banner.style.borderColor = allOk ? 'rgba(34,197,94,.18)' : 'rgba(239,68,68,.18)';
+        banner.style.color = allOk ? 'var(--accent-2)' : 'var(--danger)';
       }
 
-      setBadge(els.randomnessApiBadge, sys.randomnessApi?.online ? 'Online' : 'Offline', sys.randomnessApi?.online ? 'ok' : 'fail');
-      setBadge(els.heartbeatApiBadge, sys.heartbeatApi?.online ? 'Online' : 'Offline', sys.heartbeatApi?.online ? 'ok' : 'fail');
+      // ── Advanced: services ──
+      setBadge(els.randomnessApiBadge, rndOk ? 'Online' : 'Offline', rndOk ? 'ok' : 'fail');
+      setBadge(els.heartbeatApiBadge, hbOk ? 'Online' : 'Offline', hbOk ? 'ok' : 'fail');
+      const backend = sys.dashboard?.solutionsBackend || 'file';
+      els.solutionBackend.textContent = backend.toUpperCase();
       els.telemetryPath.textContent = sys.dashboard?.telemetryFile || '—';
-      els.solutionBackend.textContent = sys.dashboard?.solutionsBackend || '—';
-      els.storageLabel.textContent = (sys.dashboard?.solutionsBackend || 'file').toUpperCase();
+      els.storageLabel.textContent = backend.toUpperCase();
 
-      // Wallet: always show the address (it's config, not RPC-dependent)
-      els.walletAddress.textContent = sys.chain?.walletAddress || '—';
+      // ── RPC (redacted in advanced) ──
+      if (sys._error) {
+        els.rpcStatus.textContent = 'Error';
+        els.rpcStatus.style.color = 'var(--danger)';
+      } else {
+        els.rpcStatus.textContent = redactRpcUrl(sys.chain?.rpcUrl);
+        els.rpcStatus.style.color = '';
+      }
+
+      // ── Wallet ──
+      const walletAddr = sys.chain?.walletAddress || '';
+      els.walletAddress.textContent = abbrevAddr(walletAddr);
+      els.walletAddress.dataset.full = walletAddr;
+      els.walletAddress.title = walletAddr || 'Click to copy';
+      if (walletAddr && els.walletExplorerLink) {
+        els.walletExplorerLink.href = arbiscanAddr(walletAddr);
+        els.walletExplorerLink.style.display = '';
+      }
+      if (els.ethWarnAddr) els.ethWarnAddr.textContent = abbrevAddr(walletAddr);
+
+      // ── Balances ──
       const tgbtBalance = Number(sys.chain?.token?.balance || 0);
       const ethBalance = Number(sys.chain?.ethBalance || 0);
-      els.walletTgbt.textContent = tgbtBalance > 0 || !sys._error
-        ? `${fmtTGBT(tgbtBalance)} ${sys.chain?.token?.symbol || 'TGBT'}`
-        : 'Loading…';
-      els.walletEth.textContent = ethBalance > 0 || !sys._error
-        ? `${fmtEth(sys.chain?.ethBalance || 0)} ETH`
-        : 'Loading…';
+      els.walletTgbt.textContent = tgbtBalance > 0 || !sys._error ? fmtTGBT(tgbtBalance) : '…';
+      els.walletEth.textContent = ethBalance > 0 || !sys._error ? fmtEth(sys.chain?.ethBalance || 0) : '…';
 
-      const contracts = sys.chain?.contracts || {};
-      const hasWiringData =
-        contracts.coreBatchModule !== undefined &&
-        contracts.coreTokenomicsModule !== undefined &&
-        contracts.batchWiredCorrectly !== undefined &&
-        contracts.tokenomicsWiredCorrectly !== undefined;
-
-      const batchEnabled = hasWiringData ? !!contracts.batchEnabled : null;
-      const batchWiring = !hasWiringData
-        ? { label: 'Unknown', kind: 'warn' }
-        : batchEnabled
-          ? statusFromBool(contracts.batchWiredCorrectly, 'Correct', 'Mismatch')
-          : { label: 'Not wired', kind: 'warn' };
-
-      const tokenomicsWiring = !hasWiringData
-        ? { label: 'Unknown', kind: 'warn' }
-        : statusFromBool(contracts.tokenomicsWiredCorrectly, 'Correct', 'Mismatch');
-
-      setBadge(els.batchWireBadge, batchWiring.label, batchWiring.kind);
-      setBadge(els.tokenomicsWireBadge, tokenomicsWiring.label, tokenomicsWiring.kind);
-      els.liveBatchAddress.textContent = !hasWiringData
-        ? 'Unknown (RPC unavailable)'
-        : batchEnabled
-          ? (contracts.coreBatchModule || '—')
-          : 'No live batch module on this Core';
-      els.liveTokenomicsAddress.textContent = !hasWiringData
-        ? 'Unknown (RPC unavailable)'
-        : (contracts.coreTokenomicsModule || '—');
-
-      els.nextEpochId.textContent = sys.chain?.nextEpochId ?? '—';
-      const latestOnChain = sys.chain?.latestOnChainEpoch;
-      if (!batchEnabled) {
-        els.latestOnChainEpoch.textContent = 'Disabled';
-        els.latestOnChainFinalized.textContent = 'No live batch mining on this Core';
-        els.latestOnChainFinalized.className = 'warn';
-        els.latestOnChainAttested.textContent = '—';
-        els.latestOnChainAttested.className = '';
-      } else if (latestOnChain && !latestOnChain.error) {
-        els.latestOnChainEpoch.textContent = latestOnChain.epochId;
-        const fin = latestOnChain.finalized ? 'Finalized' : 'Pending';
-        const att = latestOnChain.storageAttested ? 'Recorded' : 'Pending';
-        els.latestOnChainFinalized.textContent = fin;
-        els.latestOnChainFinalized.className = latestOnChain.finalized ? 'ok' : 'warn';
-        els.latestOnChainAttested.textContent = att;
-        els.latestOnChainAttested.className = latestOnChain.storageAttested ? 'ok' : 'warn';
-      } else if (latestOnChain?.error) {
-        els.latestOnChainEpoch.textContent = 'Error';
-        els.latestOnChainFinalized.textContent = latestOnChain.error;
-        els.latestOnChainFinalized.className = 'danger';
-        els.latestOnChainAttested.textContent = '—';
-        els.latestOnChainAttested.className = '';
-      } else {
-        els.latestOnChainEpoch.textContent = 'None yet';
-        els.latestOnChainFinalized.textContent = '—';
-        els.latestOnChainAttested.textContent = '—';
+      // ETH color
+      const ethCard = els.ethBalanceCard;
+      const ethWarn = els.ethLowWarning;
+      if (ethCard && ethWarn) {
+        if (ethBalance < 0.001) {
+          ethCard.style.background = 'rgba(239,68,68,.08)';
+          ethCard.style.borderColor = 'rgba(239,68,68,.25)';
+          els.walletEth.style.color = 'var(--danger)';
+          ethWarn.style.display = '';
+        } else if (ethBalance < 0.005) {
+          ethCard.style.background = 'rgba(245,158,11,.08)';
+          ethCard.style.borderColor = 'rgba(245,158,11,.25)';
+          els.walletEth.style.color = 'var(--warn)';
+          ethWarn.style.display = 'none';
+        } else {
+          ethCard.style.background = 'rgba(34,197,94,.06)';
+          ethCard.style.borderColor = 'rgba(34,197,94,.15)';
+          els.walletEth.style.color = 'var(--accent-2)';
+          ethWarn.style.display = 'none';
+        }
       }
 
-      // ── Hardware info ──
+      // ── Contract wiring (advanced) ──
+      const contracts = sys.chain?.contracts || {};
+      const hasWiringData = contracts.coreBatchModule !== undefined && contracts.batchWiredCorrectly !== undefined;
+      const batchEnabled = hasWiringData ? !!contracts.batchEnabled : null;
+
+      setBadge(els.batchWireBadge, !hasWiringData ? '?' : batchEnabled ? '✓' : '✗', !hasWiringData ? 'warn' : batchEnabled ? 'ok' : 'fail');
+      setBadge(els.tokenomicsWireBadge, !hasWiringData ? '?' : contracts.tokenomicsWiredCorrectly ? '✓' : '✗', !hasWiringData ? 'warn' : contracts.tokenomicsWiredCorrectly ? 'ok' : 'fail');
+
+      const batchAddr = hasWiringData && batchEnabled ? (contracts.coreBatchModule || '') : '';
+      const tokenomicsAddr = hasWiringData ? (contracts.coreTokenomicsModule || '') : '';
+      els.liveBatchAddress.textContent = batchAddr || '—';
+      els.liveTokenomicsAddress.textContent = tokenomicsAddr || '—';
+      if (els.liveBatchLink) { els.liveBatchLink.textContent = abbrevAddr(batchAddr); els.liveBatchLink.href = batchAddr ? arbiscanAddr(batchAddr) : '#'; }
+      if (els.liveTokenomicsLink) { els.liveTokenomicsLink.textContent = abbrevAddr(tokenomicsAddr); els.liveTokenomicsLink.href = tokenomicsAddr ? arbiscanAddr(tokenomicsAddr) : '#'; }
+
+      // ── Epochs (main view) ──
+      const epochCount = sys.chain?.nextEpochId ?? 0;
+      els.nextEpochId.textContent = epochCount;
+      const latestOnChain = sys.chain?.latestOnChainEpoch;
+      if (!batchEnabled || !latestOnChain || latestOnChain.error) {
+        els.latestOnChainEpoch.textContent = epochCount > 0 ? '#' + (epochCount - 1) : '—';
+        els.latestOnChainFinalized.textContent = latestOnChain?.error ? 'Error' : '—';
+        els.latestOnChainAttested.textContent = '—';
+      } else {
+        els.latestOnChainEpoch.textContent = `#${latestOnChain.epochId}`;
+        els.latestOnChainFinalized.textContent = latestOnChain.finalized ? '✓ Finalized' : 'Pending';
+        els.latestOnChainFinalized.style.color = latestOnChain.finalized ? 'var(--accent-2)' : 'var(--warn)';
+        els.latestOnChainAttested.textContent = latestOnChain.storageAttested ? '✓ Attested' : 'Pending';
+        els.latestOnChainAttested.style.color = latestOnChain.storageAttested ? 'var(--accent-2)' : 'var(--warn)';
+      }
+
+      // ── Hardware (advanced) ──
       const hw = sys.hardware;
       if (hw) {
-        els.hwCpuModel.textContent = hw.cpu?.model || '—';
+        const cpuShort = (hw.cpu?.model || '').replace(/\(R\)|\(TM\)|CPU|Processor|@\s*[\d.]+GHz/gi, '').replace(/\s{2,}/g, ' ').trim();
+        els.hwCpuModel.textContent = cpuShort || '—';
         els.hwManufacturer.textContent = hw.cpu?.manufacturer || '—';
-        els.hwCores.textContent = hw.cpu?.cores ? `${hw.cpu.cores} logical` : '—';
+        els.hwCores.textContent = hw.cpu?.cores ? `${hw.cpu.cores}C` : '—';
         els.hwSpeed.textContent = hw.cpu?.speedGhz ? `${hw.cpu.speedGhz} GHz` : '—';
-        els.hwMemory.textContent = hw.memory?.totalGb ? `${hw.memory.totalGb} GB total` : '—';
         const memPct = hw.memory?.usagePercent ?? 0;
-        els.hwMemUsage.textContent = hw.memory?.usedGb ? `${hw.memory.usedGb} / ${hw.memory.totalGb} GB (${memPct}%)` : '—';
-        els.hwMemUsage.className = memPct > 90 ? 'danger' : memPct > 75 ? 'warn' : '';
+        els.hwMemUsage.textContent = hw.memory?.usedGb ? `${hw.memory.usedGb}/${hw.memory.totalGb} GB (${memPct}%)` : '—';
+        els.hwMemUsage.style.color = memPct > 90 ? 'var(--danger)' : memPct > 75 ? 'var(--warn)' : '';
+        els.hwMemory.textContent = hw.memory?.totalGb ? `${hw.memory.totalGb} GB` : '—';
         const platLabel = { win32: 'Windows', darwin: 'macOS', linux: 'Linux' }[hw.platform] || hw.platform;
-        els.hwPlatform.textContent = `${platLabel} (${hw.arch || '—'})`;
+        els.hwPlatform.textContent = `${platLabel} ${hw.arch || ''}`.trim();
         const uptimeH = hw.uptime ? Math.floor(hw.uptime / 3600) : 0;
         const uptimeM = hw.uptime ? Math.floor((hw.uptime % 3600) / 60) : 0;
         els.hwUptime.textContent = hw.uptime ? `${uptimeH}h ${uptimeM}m` : '—';
+        if (els.hwSummary) els.hwSummary.textContent = `${cpuShort || '?'} · ${hw.cpu?.cores || '?'}C · ${hw.memory?.totalGb || '?'} GB · up ${uptimeH}h ${uptimeM}m`;
       }
 
       renderAlerts();
@@ -2587,22 +3123,82 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
       const finalizeReady = onChain && !onChain.error
         ? !onChain.finalized && Number(onChain.blocksUntilFinalizable || 0) === 0
         : false;
+
+      // ── Header ──
       els.drawerEpochTitle.textContent = `Epoch #${ep.epochId}`;
       els.drawerEpochSubtitle.textContent = `${ep.createdAt ? new Date(ep.createdAt).toLocaleString() : 'Unknown creation time'} • ${fmtNum(ep.leafCount)} leaves`;
-      els.drawerMerkleRoot.textContent = ep.merkleRoot || '—';
-      els.drawerLeafCount.textContent = fmtNum(ep.leafCount);
+
+      // ── Status banner + progress bar ──
+      const banner = els.drawerStatusBanner;
+      const blocksUntil = onChain ? Number(onChain.blocksUntilFinalizable || 0) : 0;
+      const challengeWindow = onChain?.challengeWindow || 28800;
+      const elapsed = onChain ? challengeWindow - blocksUntil : 0;
+      const pct = challengeWindow > 0 ? Math.min(100, Math.round((elapsed / challengeWindow) * 100)) : 0;
+
+      if (!onChain || onChain.error) {
+        banner.textContent = 'On-chain data unavailable.';
+        banner.style.background = 'rgba(251,191,36,.08)';
+        banner.style.border = '1px solid rgba(251,191,36,.18)';
+        banner.style.color = '#fbbf24';
+        els.drawerProgressBar.style.width = '0%';
+        els.drawerProgressLabel.textContent = '—';
+      } else if (isFinalized) {
+        banner.innerHTML = '<strong style="color:#34d399;">Finalized</strong> — TGBT rewards minted. Proofs remain verifiable on-chain.';
+        banner.style.background = 'rgba(52,211,153,.08)';
+        banner.style.border = '1px solid rgba(52,211,153,.18)';
+        banner.style.color = '#d1fae5';
+        els.drawerProgressBar.style.width = '100%';
+        els.drawerProgressBar.style.background = '#34d399';
+        els.drawerProgressLabel.textContent = 'Complete';
+      } else if (blocksUntil > 0) {
+        const etaH = (onChain.etaHours || 0).toFixed(1);
+        banner.innerHTML = `<strong style="color:#38bdf8;">In challenge window</strong> — ~${etaH} h remaining (${blocksUntil.toLocaleString()} L1 blocks). `
+          + `<span style="color:#34d399;">Proofs are already verifiable</span> — the Merkle root is on-chain. `
+          + `Finalization mints TGBT rewards and is automatic.`;
+        banner.style.background = 'rgba(56,189,248,.08)';
+        banner.style.border = '1px solid rgba(56,189,248,.18)';
+        banner.style.color = '#bae6fd';
+        els.drawerProgressBar.style.width = `${pct}%`;
+        els.drawerProgressBar.style.background = 'var(--accent)';
+        els.drawerProgressLabel.textContent = `${pct}% (~${etaH} h left)`;
+      } else {
+        banner.innerHTML = '<strong style="color:#fbbf24;">Ready to finalize</strong> — challenge window elapsed. '
+          + '<span style="color:#34d399;">Proofs verifiable.</span> '
+          + 'The epoch builder will finalize (mint TGBT) shortly.';
+        banner.style.background = 'rgba(251,191,36,.08)';
+        banner.style.border = '1px solid rgba(251,191,36,.18)';
+        banner.style.color = '#fef3c7';
+        els.drawerProgressBar.style.width = '100%';
+        els.drawerProgressBar.style.background = '#fbbf24';
+        els.drawerProgressLabel.textContent = 'Ready';
+      }
+      els.drawerProgressWrap.style.display = isFinalized && !onChain?.error ? 'none' : 'block';
+
+      // ── Finalization card ──
+      els.drawerFinalized.textContent = isFinalized ? 'Finalized' : blocksUntil > 0 ? 'In challenge window' : finalizeReady ? 'Ready to finalize' : 'Pending';
+      els.drawerFinalized.className = isFinalized ? 'ok' : finalizeReady ? 'warn' : '';
       els.drawerReward.textContent = rewardLabel(displayReward, rewardEstimated);
-      els.drawerFinalized.textContent = isFinalized ? 'Yes' : 'No';
-      els.drawerFinalized.className = isFinalized ? 'ok' : 'warn';
-      els.drawerStartBlock.textContent = onChain?.startBlock ?? '—';
-      els.drawerEndBlock.textContent = onChain?.endBlock ? onChain.endBlock : '—';
+      els.drawerOperator.textContent = onChain?.operator || '—';
+      els.drawerPoolId.textContent = onChain?.poolId != null ? `Pool #${onChain.poolId}` : '—';
+
+      // ── On-chain details card ──
+      els.drawerMerkleRoot.textContent = ep.merkleRoot || '—';
+      els.drawerLeafCount.textContent = `${fmtNum(ep.leafCount)} solutions`;
+      els.drawerStartBlock.textContent = onChain?.startBlock ? `L1 #${onChain.startBlock.toLocaleString()}` : '—';
+      els.drawerEndBlock.textContent = onChain?.endBlock && onChain.endBlock > 0
+        ? `L1 #${onChain.endBlock.toLocaleString()}`
+        : isFinalized ? '—' : 'Not yet finalized';
       els.drawerBlocksPastChallenge.textContent = onChain
-        ? `${onChain.blocksPastChallenge} past / ${onChain.blocksUntilFinalizable} remaining`
+        ? blocksUntil > 0
+          ? `${blocksUntil.toLocaleString()} of ${challengeWindow.toLocaleString()} blocks remaining`
+          : `${challengeWindow.toLocaleString()} blocks (complete)`
         : '—';
-      els.drawerStorageAttested.textContent = isStorageAttested ? 'Yes' : 'No';
-      els.drawerStorageAttested.className = isStorageAttested ? 'ok' : 'warn';
-      els.drawerAttestationHash.textContent = attestationHash || 'No attestation hash';
-      els.drawerAttestationTx.textContent = ep?.onChainAttestation?.txHash || 'No tx recorded';
+
+      // ── Storage attestation card ──
+      els.drawerStorageAttested.textContent = isStorageAttested ? 'Yes' : 'Not yet';
+      els.drawerStorageAttested.className = isStorageAttested ? 'ok' : '';
+      els.drawerAttestationHash.textContent = attestationHash || '—';
+      els.drawerAttestationTx.textContent = ep?.onChainAttestation?.txHash || '—';
       els.drawerStorageSummary.textContent = storage.detail;
       els.drawerVerifyStorage.disabled = false;
       els.copyDrawerAttestationHash.disabled = !attestationHash;
@@ -2614,13 +3210,14 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
       } else if (isStorageAttested) {
         els.walletConnectStatus.textContent = 'Storage attestation is already recorded on-chain for this epoch.';
       } else if (isFinalized) {
-        els.walletConnectStatus.textContent = `Epoch ${ep.epochId} is already finalized on-chain.`;
-      } else if (onChain && Number(onChain.blocksUntilFinalizable || 0) > 0) {
-        els.walletConnectStatus.textContent = `Epoch ${ep.epochId} is not ready yet — ${onChain.blocksUntilFinalizable} blocks remaining.`;
+        els.walletConnectStatus.textContent = `Epoch ${ep.epochId} is finalized — TGBT rewards minted. Proofs verifiable on-chain.`;
+      } else if (onChain && blocksUntil > 0) {
+        const eta = onChain.etaHours ? ` (~${onChain.etaHours.toFixed(1)} hours)` : '';
+        els.walletConnectStatus.textContent = `Challenge window: ${blocksUntil.toLocaleString()} L1 blocks remaining${eta}. Proofs are already verifiable — finalization only mints TGBT.`;
       } else if (attestationHash) {
-        els.walletConnectStatus.textContent = 'Wallet ready. Finalize first, then record attestation if needed.';
+        els.walletConnectStatus.textContent = 'Proofs verifiable. Finalize to mint TGBT, then record attestation.';
       } else {
-        els.walletConnectStatus.textContent = 'Wallet ready.';
+        els.walletConnectStatus.textContent = 'Proofs are verifiable immediately once the Merkle root is committed on-chain.';
       }
 
       const leaves = ep.leaves || [];
@@ -2704,7 +3301,8 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
       if (onChain?.error) throw new Error(`On-chain status unavailable: ${onChain.error}`);
       if (onChain?.finalized) throw new Error(`Epoch ${state.selectedEpoch.epochId} is already finalized.`);
       if (Number(onChain?.blocksUntilFinalizable || 0) > 0) {
-        throw new Error(`Epoch ${state.selectedEpoch.epochId} is not ready yet — ${onChain.blocksUntilFinalizable} blocks remaining.`);
+        const eta = onChain.etaHours ? ` (~${onChain.etaHours.toFixed(1)} hours)` : '';
+        throw new Error(`Epoch ${state.selectedEpoch.epochId} is not ready yet — ${onChain.blocksUntilFinalizable.toLocaleString()} L1 blocks remaining${eta}.`);
       }
       const signer = state.wallet.signer || await ensureWallet();
       const batch = new browserEthers.Contract(state.system.chain.contracts.batch, WALLET_BATCH_ABI, signer);
@@ -3044,11 +3642,13 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
       // Bitcoin tip height — estimate from genesis date
       entropyState.btcTipHeight = 941529 + Math.floor((Date.now() - new Date('2025-05-01').getTime()) / 600000);
 
-      // UTXO: show as offline until real subsystem connects
-      entropyState.utxo.height = entropyState.btcTipHeight;
-      entropyState.utxo.scanned = 0;
-      entropyState.utxo.anchored = 0;
-      entropyState.utxo.status = 'offline';
+      // UTXO: preserve scan results if a scan has already populated them
+      if (!entropyState.utxo.anchored) {
+        entropyState.utxo.height = entropyState.btcTipHeight;
+        entropyState.utxo.scanned = 0;
+        entropyState.utxo.anchored = 0;
+        entropyState.utxo.status = 'offline';
+      }
 
       // Stale block: respect the stale mining toggle instead of hardcoding offline
       entropyState.stale.count = snap?.stale_block_count || 0;
@@ -3186,17 +3786,20 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
       els.epPowTgbt.textContent = `${fmtTGBT(ep.tgbt.pow)} TGBT${powLabel}`;
       setBadge(els.powStatus, powActive ? 'Active' : 'Idle', powActive ? 'ok' : 'warn');
 
-      // ── Dead UTXO card (entropy only — no on-chain reward) ──
+      // ── Dead UTXO card (Bitcoin anchoring — provenance + timestamp bonus) ──
       els.epUtxoCount.textContent = fmtNum(ep.utxo.anchored);
       els.epUtxoScanned.textContent = fmtNum(ep.utxo.scanned);
       els.epUtxoHeight.textContent = fmtNum(ep.utxo.height);
-      els.epUtxoEnterprise.textContent = 'N/A';
+      els.epUtxoEnterprise.textContent = utxoActive ? 'Active' : 'N/A';
+      els.epUtxoEnterprise.className = 'val' + (utxoActive ? ' ok' : '');
       els.epUtxoFreshness.textContent = utxoActive ? 'Fresh' : 'Offline';
       els.epUtxoFreshness.className = 'val' + (utxoActive ? ' ok' : ' warn');
       els.epUtxoHash.textContent = ep.utxo.hash;
       els.epUtxoQuality.style.width = `${ep.utxo.quality}%`;
       els.epUtxoQualityLabel.textContent = `${ep.utxo.quality}/100`;
-      els.epUtxoTgbt.textContent = utxoActive ? `${fmtTGBT(ep.tgbt.utxo)} TGBT` : '0.000 TGBT (no mint)';
+      els.epUtxoTgbt.textContent = utxoActive
+        ? `Anchored at BTC #${fmtNum(ep.utxo.height)} — ${ep.utxo.anchored} output${ep.utxo.anchored !== 1 ? 's' : ''} verified`
+        : 'Waiting for UTXO subsystem…';
       setBadge(els.utxoStatus, utxoActive ? 'Active' : 'Offline', utxoActive ? 'ok' : 'fail');
 
       // ── Stale Block card (entropy only — claimReward TODO) ──
@@ -3225,7 +3828,7 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
 
       // ── TGBT breakdown (honest: only PoW mints, others pending) ──
       els.epBreakdownPow.textContent = `${fmtTGBT(ep.tgbt.pow)} TGBT` + (ep.tgbt.powOnChain ? ' ✓' : ' (est)');
-      els.epBreakdownUtxo.textContent = utxoActive ? `${fmtTGBT(ep.tgbt.utxo)} TGBT` : '0.000 TGBT — no contract';
+      els.epBreakdownUtxo.textContent = utxoActive ? `✓ Anchored at BTC #${fmtNum(ep.utxo.height)}` : 'Offline — not anchoring';
       els.epBreakdownStale.textContent = staleDisabled ? 'Disabled' : (staleActive ? `${fmtTGBT(ep.tgbt.stale)} TGBT` : '0.000 TGBT — pending');
       els.epBreakdownTotal.textContent = `${fmtTGBT(ep.tgbt.total)} TGBT` + (ep.tgbt.total > 0 ? ' (PoW only)' : '');
 
@@ -3333,6 +3936,10 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
     // ── UTXO Live Scan ──────────────────────────────────────
     const RANDOMNESS_API = 'http://127.0.0.1:4271';
     let utxoScanRunning = false;
+    let utxoTotalAnchored = 0;
+    let utxoLocalHistory = [];
+    const UTXO_RESCAN_INTERVAL = 300000; // 5 minutes
+    const UTXO_AUTO_SCAN_DELAY = 5000;   // 5 seconds after load
 
     function utxoEsc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
@@ -3387,14 +3994,284 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
       el.classList.add('show');
     }
 
+    // ── Anchor Certificate ──
+
+    function utxoRenderCertificate(scan) {
+      if (!scan.summary) return;
+      const s = scan.summary;
+      const cert = els.utxoAnchorCert;
+      const grid = els.utxoCertGrid;
+      if (!cert || !grid) return;
+
+      const fields = [
+        ['Anchor ID', s.anchorId || '—'],
+        ['Scan ID', scan.scanId || '—'],
+        ['UTXO', `${s.txid}:${s.vout}`],
+        ['Type', (s.type || '').toUpperCase()],
+        ['Block Height', Number(s.blockHeight).toLocaleString()],
+        ['Dead Reason', s.deadReason || (s.isDead ? 'Verified dead' : 'Unverified')],
+        ['Data Hash', s.dataHash || '—'],
+        ['Dead Verified', s.isDead ? '✓ Yes' : '✗ No'],
+        ['Decoded Data', s.decodedData?.decoded || '(binary / none)'],
+        ['Timestamp', new Date(scan.timestamp).toISOString()],
+        ['Duration', `${scan.durationMs}ms`],
+        ['Steps Passed', `${scan.steps.filter(x=>x.status==='ok').length} / ${scan.steps.length}`],
+      ];
+
+      grid.innerHTML = fields.map(([label, val]) =>
+        `<div class="anchor-cert-row"><span class="anchor-cert-label">${utxoEsc(label)}</span><span class="anchor-cert-val">${utxoEsc(String(val))}</span></div>`
+      ).join('');
+
+      // Set explorer link
+      if (els.utxoCertExplorer && s.explorerUrl) {
+        els.utxoCertExplorer.href = s.explorerUrl;
+      }
+
+      cert.style.display = '';
+    }
+
+    // Copy full anchor proof as JSON
+    function utxoCopyProof(scan) {
+      if (!scan?.summary) return;
+      const proof = {
+        version: 'entropy_anchor_v1',
+        anchorId: scan.summary.anchorId,
+        scanId: scan.scanId,
+        utxo: { txid: scan.summary.txid, vout: scan.summary.vout, type: scan.summary.type },
+        blockHeight: scan.summary.blockHeight,
+        isDead: scan.summary.isDead,
+        deadReason: scan.summary.deadReason,
+        dataHash: scan.summary.dataHash,
+        decodedData: scan.summary.decodedData,
+        explorerUrl: scan.summary.explorerUrl,
+        timestamp: scan.timestamp,
+        durationMs: scan.durationMs,
+        steps: scan.steps.map(s => ({ step: s.step, title: s.title, status: s.status, durationMs: s.durationMs })),
+      };
+      navigator.clipboard.writeText(JSON.stringify(proof, null, 2)).then(() => {
+        showToast('Anchor proof copied to clipboard — share to prove Bitcoin-anchored entropy.');
+        if (els.utxoCertCopy) { els.utxoCertCopy.textContent = '✓ Copied!'; setTimeout(() => { els.utxoCertCopy.textContent = '📋 Copy proof'; }, 2000); }
+      }).catch(() => showToast('Failed to copy — try manually.'));
+    }
+
+    // ── Tab Switching ──
+
+    function utxoSwitchTab(tabName) {
+      document.querySelectorAll('.utxo-tab').forEach(b => b.classList.toggle('active', b.dataset.utxoTab === tabName));
+      ['utxoTabScan', 'utxoTabHistory', 'utxoTabInventory', 'utxoTabUsecases'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.classList.toggle('active', id === 'utxoTab' + tabName.charAt(0).toUpperCase() + tabName.slice(1));
+      });
+      // Lazy-load tabs on first switch
+      if (tabName === 'history') utxoLoadHistory();
+      if (tabName === 'inventory') utxoLoadInventory();
+    }
+
+    document.querySelectorAll('.utxo-tab').forEach(btn => {
+      btn.addEventListener('click', () => utxoSwitchTab(btn.dataset.utxoTab));
+    });
+
+    // ── Inventory Loading ──
+
+    let utxoInventoryLoaded = false;
+    async function utxoLoadInventory() {
+      if (utxoInventoryLoaded) return;
+      try {
+        const resp = await fetch(`${RANDOMNESS_API}/api/utxo/inventory`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const inv = await resp.json();
+        if (!inv.loaded) throw new Error(inv.error || 'Inventory not loaded');
+
+        // Update count badge
+        if (els.utxoInvCount) els.utxoInvCount.textContent = inv.count || 0;
+
+        // Render stats bar
+        if (els.utxoInvStats && inv.types) {
+          const typeColors = { op_return: 'var(--accent-2)', spent: 'var(--accent)', dust: 'var(--gold)', burn: '#f472b6' };
+          els.utxoInvStats.innerHTML = Object.entries(inv.types).map(([type, count]) =>
+            `<span style="padding:3px 10px;border-radius:6px;font-size:11px;font-weight:600;background:rgba(15,23,42,.6);border:1px solid rgba(148,163,184,.1);color:${typeColors[type]||'var(--muted)'};">${type.toUpperCase()}: ${count}</span>`
+          ).join('') + `<span style="padding:3px 10px;border-radius:6px;font-size:11px;color:var(--muted);background:rgba(15,23,42,.4);">Source: ${utxoEsc(inv.source || 'CSV')}</span>`;
+        }
+
+        // Render inventory items
+        if (els.utxoInvGrid && inv.items?.length) {
+          els.utxoInvGrid.innerHTML = inv.items.map(item => {
+            const typeClass = (item.type || '').toLowerCase().replace(/[^a-z_]/g, '');
+            const decoded = item.decodedData?.decoded ? `<span class="utxo-inv-decoded" title="${utxoEsc(item.decodedData.decoded)}">📝 ${utxoEsc(item.decodedData.decoded)}</span>` : '';
+            return `<div class="utxo-inv-item">
+              <span class="utxo-inv-type ${typeClass}">${utxoEsc(item.type)}</span>
+              <a class="utxo-inv-txid" href="https://mempool.space/tx/${item.txid}" target="_blank" rel="noopener" title="${item.txid}">${item.txid.slice(0,12)}…${item.txid.slice(-6)}</a>
+              <span class="utxo-inv-block">Block ${Number(item.blockHeight).toLocaleString()}</span>
+              ${decoded}
+            </div>`;
+          }).join('');
+        } else if (els.utxoInvGrid) {
+          els.utxoInvGrid.innerHTML = '<div style="text-align:center;padding:18px;color:var(--muted);font-size:12px;">No dead UTXOs in inventory.</div>';
+        }
+
+        utxoInventoryLoaded = true;
+      } catch (err) {
+        if (els.utxoInvGrid) els.utxoInvGrid.innerHTML = `<div style="text-align:center;padding:18px;color:var(--danger);font-size:12px;">Failed to load inventory: ${utxoEsc(err.message)}<br><span style="color:var(--muted);font-size:11px;">Randomness API must be running on port 4271</span></div>`;
+      }
+    }
+
+    // ── Discover Dead UTXOs from Bitcoin Blocks ──
+
+    let utxoDiscoverRunning = false;
+    async function utxoDiscover() {
+      if (utxoDiscoverRunning) return;
+      utxoDiscoverRunning = true;
+      const btn = els.utxoDiscoverBtn;
+      const status = els.utxoDiscoverStatus;
+      const blocks = els.utxoDiscoverBlocks?.value || '3';
+      if (btn) { btn.disabled = true; btn.textContent = '⏳ Scanning…'; }
+      if (status) { status.style.display = ''; status.innerHTML = `<span style="color:var(--accent);">Scanning ${blocks} recent Bitcoin block(s) via mempool.space…</span> This takes a few seconds per block.`; }
+
+      try {
+        const resp = await fetch(`${RANDOMNESS_API}/api/utxo/discover?blocks=${blocks}`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+
+        // Build status report
+        let html = '';
+        if (data.added > 0) {
+          html += `<div style="color:var(--accent-2);font-weight:600;margin-bottom:6px;">✓ Discovered ${data.discovered.length} dead UTXO${data.discovered.length !== 1 ? 's' : ''} — ${data.added} added to inventory</div>`;
+        } else if (data.discovered.length === 0) {
+          html += `<div style="color:var(--muted);margin-bottom:6px;">No new dead UTXOs found in scanned blocks (already in inventory or none in first 25 txs).</div>`;
+        }
+        if (data.skippedDuplicates > 0) {
+          html += `<div style="font-size:10px;color:var(--muted);">${data.skippedDuplicates} duplicates skipped (already in inventory)</div>`;
+        }
+        // Blocks scanned
+        if (data.scannedBlocks?.length) {
+          html += '<div style="margin-top:8px;font-size:10px;color:var(--muted);">';
+          for (const b of data.scannedBlocks) {
+            html += `<div>Block ${Number(b.height).toLocaleString()} — ${b.txsScanned} txs scanned, ${b.found} dead found</div>`;
+          }
+          html += `<div style="margin-top:4px;">Total: ${data.durationMs}ms</div></div>`;
+        }
+        if (data.errors?.length) {
+          html += `<div style="color:var(--danger);font-size:10px;margin-top:6px;">${data.errors.map(e => utxoEsc(e.error || JSON.stringify(e))).join('<br>')}</div>`;
+        }
+        // Show new UTXOs found
+        if (data.discovered?.length) {
+          html += '<div style="margin-top:10px;font-size:11px;font-weight:600;color:var(--accent-2);">Newly discovered:</div>';
+          for (const d of data.discovered) {
+            const decoded = d.decoded?.decoded ? ` — 📝 "${utxoEsc(d.decoded.decoded)}"` : '';
+            html += `<div style="font-size:10px;color:var(--muted);padding:2px 0;">
+              <span style="color:${d.type === 'op_return' ? 'var(--accent-2)' : 'var(--gold)'};font-weight:600;">${d.type.toUpperCase()}</span>
+              <a href="https://mempool.space/tx/${d.txid}" target="_blank" rel="noopener" style="color:var(--accent);margin-left:6px;">${d.txid.slice(0,12)}…:${d.vout}</a>
+              <span style="margin-left:6px;">Block ${Number(d.block_height).toLocaleString()}</span>
+              ${decoded}
+            </div>`;
+          }
+        }
+
+        if (status) status.innerHTML = html;
+        showToast(`Discovered ${data.discovered.length} dead UTXO${data.discovered.length !== 1 ? 's' : ''} in ${blocks} block(s) — ${data.added} added to inventory`);
+
+        // Refresh inventory display
+        if (data.added > 0) {
+          utxoInventoryLoaded = false;
+          await utxoLoadInventory();
+        }
+      } catch (err) {
+        if (status) { status.style.display = ''; status.innerHTML = `<span style="color:var(--danger);">Discovery failed: ${utxoEsc(err.message)}</span><br><span style="font-size:10px;color:var(--muted);">Randomness API must be running on port 4271</span>`; }
+        showToast('UTXO discovery failed — is the Randomness API running?');
+      } finally {
+        utxoDiscoverRunning = false;
+        if (btn) { btn.disabled = false; btn.textContent = '🔍 Discover'; }
+      }
+    }
+
+    if (els.utxoDiscoverBtn) {
+      els.utxoDiscoverBtn.addEventListener('click', utxoDiscover);
+    }
+
+    // ── History Display ──
+
+    function utxoRenderHistory() {
+      if (!els.utxoHistoryGrid) return;
+      if (els.utxoHistoryCount) els.utxoHistoryCount.textContent = utxoLocalHistory.length;
+
+      if (utxoLocalHistory.length === 0) {
+        els.utxoHistoryGrid.innerHTML = '<div style="text-align:center;padding:18px;color:var(--muted);font-size:12px;">No scans yet — run a Live Scan or wait for auto-scan.</div>';
+        return;
+      }
+
+      els.utxoHistoryGrid.innerHTML = utxoLocalHistory.slice().reverse().map((scan, i) => {
+        const s = scan.summary;
+        if (!s) return '';
+        const time = new Date(scan.timestamp).toLocaleTimeString();
+        const passed = scan.steps.filter(x => x.status === 'ok').length;
+        const typeClass = (s.type || '').toLowerCase().replace(/[^a-z_]/g, '');
+        return `<div class="utxo-history-item" onclick="utxoShowHistoryScan(${utxoLocalHistory.length - 1 - i})" title="Click to view full scan details">
+          <span style="font-size:11px;color:var(--muted);min-width:70px;">${time}</span>
+          <span class="utxo-inv-type ${typeClass}" style="font-size:9px;">${utxoEsc(s.type)}</span>
+          <span style="flex:1;font-family:'SF Mono','Fira Code',monospace;font-size:11px;color:var(--muted);">${s.txid.slice(0,10)}…:${s.vout}</span>
+          <span style="font-size:11px;color:var(--muted);">Block ${Number(s.blockHeight).toLocaleString()}</span>
+          <span style="font-size:11px;color:${s.isDead?'var(--accent-2)':'var(--danger)'};">${s.isDead?'✓ Dead':'✗ Alive'}</span>
+          <span style="font-size:11px;color:var(--muted);">${passed}/5</span>
+          <span style="font-size:11px;color:var(--muted);">${scan.durationMs}ms</span>
+        </div>`;
+      }).join('');
+    }
+
+    // Click a history item to replay its scan details
+    window.utxoShowHistoryScan = function(idx) {
+      const scan = utxoLocalHistory[idx];
+      if (!scan) return;
+      utxoSwitchTab('scan');
+      // Render steps instantly (no animation for replays)
+      els.utxoScanSteps.innerHTML = scan.steps.map(step => utxoRenderStep(step).replace('class="utxo-step running"', `class="utxo-step visible ${step.status}"`)).join('');
+      if (scan.summary) {
+        utxoRenderSummary(els.utxoScanSummary, scan.summary);
+        utxoRenderCertificate(scan);
+      }
+      els.utxoScanStatusBadge.className = scan.error ? 'badge fail' : 'badge ok';
+      els.utxoScanStatusBadge.textContent = `Replay — ${scan.steps.filter(s=>s.status==='ok').length}/5`;
+      els.utxoScanTiming.textContent = `${scan.durationMs}ms • ${new Date(scan.timestamp).toLocaleTimeString()}`;
+    };
+
+    async function utxoLoadHistory() {
+      // Merge local history with server-side history
+      try {
+        const resp = await fetch(`${RANDOMNESS_API}/api/utxo/history`);
+        if (resp.ok) {
+          const data = await resp.json();
+          if (data.scans?.length) {
+            // Merge: add server scans not already in local by scanId
+            const localIds = new Set(utxoLocalHistory.map(s => s.scanId));
+            for (const scan of data.scans) {
+              if (!localIds.has(scan.scanId)) {
+                utxoLocalHistory.push(scan);
+              }
+            }
+          }
+        }
+      } catch {}
+      utxoRenderHistory();
+    }
+
+    // ── Accumulation Tracking ──
+
+    function utxoUpdateAccum() {
+      if (els.utxoScanAccum) {
+        els.utxoScanAccum.textContent = utxoTotalAnchored > 0 ? `🔗 ${utxoTotalAnchored} anchored` : '';
+      }
+    }
+
+    // ── Update Card (with accumulation) ──
+
     function utxoUpdateCard(scan) {
       if (!scan.summary) return;
       const s = scan.summary;
-      els.epUtxoCount.textContent = '1';
+      utxoTotalAnchored++;
+      els.epUtxoCount.textContent = utxoTotalAnchored;
       els.epUtxoScanned.textContent = scan.steps[0]?.data?.count || '—';
       els.epUtxoHeight.textContent = Number(s.blockHeight).toLocaleString();
       els.epUtxoHash.textContent = s.dataHash;
-      els.epUtxoEnterprise.textContent = s.isDead ? 'Verified ✓' : 'Unverified';
+      els.epUtxoEnterprise.textContent = s.isDead ? 'Active' : 'Unverified';
       els.epUtxoEnterprise.className = s.isDead ? 'val ok' : 'val warn';
       els.epUtxoFreshness.textContent = 'Just scanned';
       els.epUtxoFreshness.className = 'val ok';
@@ -3402,14 +4279,25 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
       els.epUtxoQualityLabel.textContent = s.isDead ? '95/100' : '30/100';
       setBadge(els.utxoStatus, s.isDead ? 'Verified' : 'Unverified', s.isDead ? 'ok' : 'warn');
       // Feed real data into entropy state
-      entropyState.utxo.anchored = 1;
+      entropyState.utxo.anchored = utxoTotalAnchored;
       entropyState.utxo.scanned = scan.steps[0]?.data?.count || 0;
       entropyState.utxo.height = s.blockHeight;
       entropyState.utxo.hash = s.dataHash;
       entropyState.utxo.quality = s.isDead ? 95 : 30;
+      entropyState.utxo.fresh = true;
+      entropyState.utxo.status = s.isDead ? 'anchored' : 'scanning';
+      utxoUpdateAccum();
+      // Decay freshness after 30s
+      setTimeout(() => {
+        if (els.epUtxoFreshness) { els.epUtxoFreshness.textContent = `${new Date(scan.timestamp).toLocaleTimeString()}`; els.epUtxoFreshness.className = 'val'; }
+        entropyState.utxo.fresh = false;
+      }, 30000);
     }
 
-    async function runUtxoScan() {
+    // ── Main Scan Function ──
+
+    let utxoLastScanData = null;
+    async function runUtxoScan(opts = {}) {
       if (utxoScanRunning) return;
       utxoScanRunning = true;
 
@@ -3419,26 +4307,33 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
       const badge = els.utxoScanStatusBadge;
       const timing = els.utxoScanTiming;
       const btn = els.utxoScanBtn;
+      const isAutoScan = opts.auto || false;
 
+      // Switch to scan tab if user is on another
+      utxoSwitchTab('scan');
       panel.classList.remove('hidden');
       stepsEl.innerHTML = '';
       summaryEl.classList.remove('show');
       summaryEl.innerHTML = '';
-      badge.className = 'badge warn'; badge.textContent = 'Scanning…';
+      if (els.utxoAnchorCert) els.utxoAnchorCert.style.display = 'none';
+      badge.className = 'badge warn'; badge.textContent = isAutoScan ? 'Auto-scanning…' : 'Scanning…';
       btn.disabled = true; btn.textContent = '⏳ Scanning…';
       timing.textContent = '';
+
+      // Show auto-scan indicator
+      if (isAutoScan && els.utxoAutoScanIndicator) els.utxoAutoScanIndicator.style.display = '';
 
       try {
         const resp = await fetch(`${RANDOMNESS_API}/api/utxo/scan`);
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
+        utxoLastScanData = data;
 
         // Render steps one-by-one with staggered animation
         for (let i = 0; i < data.steps.length; i++) {
           const html = utxoRenderStep(data.steps[i]);
           stepsEl.insertAdjacentHTML('beforeend', html);
           const stepEl = stepsEl.lastElementChild;
-          // Trigger animation after paint
           await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
           stepEl.classList.add('visible');
           stepEl.classList.remove('running');
@@ -3448,13 +4343,20 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
 
         if (data.summary) {
           utxoRenderSummary(summaryEl, data.summary);
+          utxoRenderCertificate(data);
         }
         utxoUpdateCard(data);
 
+        // Add to local history
+        utxoLocalHistory.push(data);
+        if (utxoLocalHistory.length > 50) utxoLocalHistory.shift();
+        utxoRenderHistory();
+
+        const passed = data.steps.filter(s=>s.status==='ok').length;
         badge.className = data.error ? 'badge fail' : 'badge ok';
-        badge.textContent = data.error ? 'Error' : `Done — ${data.steps.filter(s=>s.status==='ok').length}/5 passed`;
+        badge.textContent = data.error ? 'Error' : `Done — ${passed}/5 passed`;
         timing.textContent = `${data.durationMs}ms total • ${new Date(data.timestamp).toLocaleTimeString()}`;
-        showToast(`UTXO scan complete — ${data.steps.filter(s=>s.status==='ok').length}/5 steps passed in ${data.durationMs}ms`);
+        showToast(`UTXO scan complete — ${passed}/5 steps passed in ${data.durationMs}ms${isAutoScan ? ' (auto)' : ''}`);
 
       } catch (err) {
         badge.className = 'badge fail'; badge.textContent = 'Failed';
@@ -3462,22 +4364,48 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
           <strong>Scan failed:</strong> ${utxoEsc(err.message)}<br>
           <span style="color:var(--muted);font-size:11px;">Make sure the Randomness API is running on port 4271 (<code>start-all.ps1</code> or <code>node server.js</code> in randomness-api/)</span>
         </div>`;
-        showToast('UTXO scan failed — is the Randomness API running?');
+        if (!isAutoScan) showToast('UTXO scan failed — is the Randomness API running?');
       } finally {
         utxoScanRunning = false;
         btn.disabled = false; btn.textContent = '⚡ Live Scan';
+        if (els.utxoAutoScanIndicator) els.utxoAutoScanIndicator.style.display = 'none';
       }
     }
 
-    els.utxoScanBtn.addEventListener('click', runUtxoScan);
+    // ── Event Listeners ──
+
+    els.utxoScanBtn.addEventListener('click', () => runUtxoScan());
     els.utxoScanClose.addEventListener('click', () => {
       els.utxoScanPanel.classList.add('hidden');
     });
+    if (els.utxoCertCopy) {
+      els.utxoCertCopy.addEventListener('click', () => utxoCopyProof(utxoLastScanData));
+    }
 
-    // Auto-load last scan result on page load (if available)
+    // ── Auto-Load + Auto-Scan + Periodic Re-scan ──
+
+    // 1. Restore last scan from server (if available)
     fetch(`${RANDOMNESS_API}/api/utxo/latest`).then(r => r.ok ? r.json() : null).then(scan => {
-      if (scan && scan.summary) utxoUpdateCard(scan);
+      if (scan && scan.summary) {
+        utxoUpdateCard(scan);
+        utxoLastScanData = scan;
+        utxoLocalHistory.push(scan);
+      }
     }).catch(() => {});
+
+    // 2. Auto-scan on startup after delay (if no previous scan)
+    setTimeout(() => {
+      if (utxoTotalAnchored === 0 && !utxoScanRunning) {
+        runUtxoScan({ auto: true });
+      }
+    }, UTXO_AUTO_SCAN_DELAY);
+
+    // 3. Periodic re-scan every 5 minutes
+    setInterval(() => {
+      if (!utxoScanRunning) {
+        runUtxoScan({ auto: true });
+      }
+    }, UTXO_RESCAN_INTERVAL);
 
     els.refreshEntropy.addEventListener('click', () => {
       if (entropyState.initialized) tickEntropyPipeline();

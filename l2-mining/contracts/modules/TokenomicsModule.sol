@@ -17,8 +17,8 @@ contract TokenomicsModule is ModuleBase, ITokenomicsModule {
     uint256 private constant BPS_SCALE = 10_000;
 
     uint256 public constant TOTAL_SUPPLY_CAP = 2_000_000_000 ether;
-    uint256 public constant MINING_ALLOCATION = 700_000_000 ether;
-    uint256 public constant STALE_BLOCK_ALLOCATION = 25_000_000 ether;
+    uint256 public constant MINING_ALLOCATION = 1_900_000_000 ether;
+    uint256 public constant STALE_BLOCK_ALLOCATION = 75_000_000 ether;
     uint256 public constant MAX_BONUS_MULTIPLIER = 500;
     uint256 public constant DEFAULT_BONUS_THRESHOLD = 2;
     uint16 public constant DEFAULT_BONUS_MULTIPLIER = 125;
@@ -50,7 +50,9 @@ contract TokenomicsModule is ModuleBase, ITokenomicsModule {
         uint256 blocksPerEpoch,
         uint256 halvingInterval,
         uint256 initialBonusThreshold,
-        uint16 initialBonusMultiplier
+        uint16 initialBonusMultiplier,
+        uint256 initialTotalMined,
+        uint256 initialTotalStaleRewards
     ) external {
         __ModuleBase_init(coreAddress);
 
@@ -59,7 +61,8 @@ contract TokenomicsModule is ModuleBase, ITokenomicsModule {
 
         tgbtToken = ITGBT(tokenAddress);
         TokenomicsLib.initializeEpochState(epochState, initialReward, blocksPerEpoch, halvingInterval);
-        totalMined = 0;
+        totalMined = initialTotalMined;            // seed from old module on redeploy (0 for fresh)
+        totalStaleRewards = initialTotalStaleRewards; // seed from old module on redeploy (0 for fresh)
         bonusThreshold = initialBonusThreshold == 0 ? DEFAULT_BONUS_THRESHOLD : initialBonusThreshold;
         bonusMultiplier = initialBonusMultiplier == 0 ? DEFAULT_BONUS_MULTIPLIER : initialBonusMultiplier;
 

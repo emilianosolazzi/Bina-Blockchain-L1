@@ -349,4 +349,137 @@ function getLastScan() { return lastScan; }
 function getScanHistory() { return scanHistory; }
 function getInventoryInfo() { return loadInventory(); }
 
-module.exports = { runFullScan, getLastScan, getScanHistory, getInventoryInfo };
+// ── Live Discovery — scan Bitcoin blocks for dead UTXOs ──
+
+/**
+ * Discovers new dead UTXOs by scanning recent Bitcoin blocks via mempool.space.
+ * Looks for OP_RETURN outputs, dust outputs (<546 sat), and spent outputs.
+ * Appends newly discovered UTXOs to the CSV inventory.
+ *
+ * @param {object} opts
+ * @param {number} opts.blocks — how many recent blocks to scan (default 3, max 10)
+ * @param {number} opts.startHeight — optional starting block height (default: latest - blocks)
+ * @returns {object} { discovered, added, skippedDuplicates, errors, scannedBlocks, duration }
+ */
+async function discoverDeadUtxos(opts = {}) {
+  const maxBlocks = Math.min(opts.blocks || 3, 10);
+  const startTime = Date.now();
+  const results = { discovered: [], added: 0, skippedDuplicates: 0, errors: [], scannedBlocks: [], durationMs: 0 };
+
+  // Load existing inventory txids to deduplicate
+  const existing = new Set();
+  try {
+    const inv = loadInventory();
+    if (inv.items) inv.items.forEach(i => existing.add(`${i.txid}:${i.vout}`));
+  } catch {}
+
+  try {
+    // Get current block height
+    let tipHeight = opts.startHeight;
+    if (!tipHeight) {
+      const tipResp = await fetch(`${MEMPOOL_API}/blocks/tip/height`, { signal: AbortSignal.timeout(10000) });
+      if (!tipResp.ok) throw new Error(`Failed to get tip height: HTTP ${tipResp.status}`);
+      tipHeight = Number(await tipResp.text());
+    }
+
+    for (let i = 0; i < maxBlocks; i++) {
+      const height = tipHeight - i;
+      try {
+        // Get block hash
+        const hashResp = await fetch(`${MEMPOOL_API}/block-height/${height}`, { signal: AbortSignal.timeout(10000) });
+        if (!hashResp.ok) continue;
+        const blockHash = await hashResp.text();
+
+        // Get first page of transactions (up to 25)
+        const txsResp = await fetch(`${MEMPOOL_API}/block/${blockHash}/txs/0`, { signal: AbortSignal.timeout(15000) });
+        if (!txsResp.ok) continue;
+        const txs = await txsResp.json();
+
+        let blockFound = 0;
+        for (const tx of txs) {
+          if (!tx.vout || !Array.isArray(tx.vout)) continue;
+          for (let vIdx = 0; vIdx < tx.vout.length; vIdx++) {
+            const vout = tx.vout[vIdx];
+            let type = null;
+            let data = '';
+
+            if (vout.scriptpubkey_type === 'op_return') {
+              type = 'op_return';
+              // OP_RETURN data is in scriptpubkey after the OP_RETURN opcode (6a)
+              const sp = vout.scriptpubkey || '';
+              // Strip the 6a prefix + push-data length byte
+              if (sp.startsWith('6a')) {
+                const afterOp = sp.slice(2);
+                // Skip push-data length byte(s)
+                if (afterOp.length > 2) {
+                  const pushLen = parseInt(afterOp.slice(0, 2), 16);
+                  data = (pushLen <= 80 && afterOp.length >= 2 + pushLen * 2) ? afterOp.slice(2) : afterOp;
+                } else {
+                  data = afterOp;
+                }
+              }
+            } else if (vout.value !== undefined && vout.value > 0 && vout.value < 546) {
+              type = 'dust';
+            }
+
+            if (type) {
+              const key = `${tx.txid}:${vIdx}`;
+              if (existing.has(key)) {
+                results.skippedDuplicates++;
+                continue;
+              }
+              existing.add(key);
+              const entry = {
+                type,
+                txid: tx.txid,
+                vout: vIdx,
+                block_height: height,
+                data: data || '',
+                satoshis: vout.value || 0,
+                decoded: type === 'op_return' ? decodeHex(data) : null,
+              };
+              results.discovered.push(entry);
+              blockFound++;
+            }
+          }
+        }
+        results.scannedBlocks.push({ height, hash: blockHash.slice(0, 16) + '…', txsScanned: txs.length, found: blockFound });
+      } catch (blockErr) {
+        results.errors.push({ height, error: blockErr.message });
+      }
+
+      // Rate-limit: mempool.space allows ~10 req/s, be conservative
+      if (i < maxBlocks - 1) await new Promise(r => setTimeout(r, 500));
+    }
+
+    // Append newly discovered UTXOs to CSV
+    if (results.discovered.length > 0) {
+      try {
+        const csvLines = results.discovered.map(d =>
+          `${d.type},${d.txid},${d.vout},${d.block_height},${d.data},${d.satoshis},,,`
+        );
+        // Ensure CSV has a trailing newline before appending
+        let existing_content = '';
+        if (fs.existsSync(CSV_PATH)) {
+          existing_content = fs.readFileSync(CSV_PATH, 'utf8');
+          if (!existing_content.endsWith('\n')) existing_content += '\n';
+        } else {
+          existing_content = 'type,txid,vout,block_height,data,satoshis,fee_rate_threshold,address,spent_in_block,spent_at_height\n';
+        }
+        fs.writeFileSync(CSV_PATH, existing_content + csvLines.join('\n') + '\n');
+        results.added = results.discovered.length;
+        // Reset inventory cache so next scan picks up new entries
+        inventory = [];
+      } catch (writeErr) {
+        results.errors.push({ write: true, error: writeErr.message });
+      }
+    }
+  } catch (err) {
+    results.errors.push({ fatal: true, error: err.message });
+  }
+
+  results.durationMs = Date.now() - startTime;
+  return results;
+}
+
+module.exports = { runFullScan, getLastScan, getScanHistory, getInventoryInfo, discoverDeadUtxos };

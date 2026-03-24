@@ -7,7 +7,7 @@ Production randomness API serving verifiable on-chain randomness to dApp custome
 ```
 Client dApp → beacon-api-server → Redis (cache + rate limits)
                                 → PostgreSQL (usage logs)
-                                → Sepolia contracts (randomness source)
+                                → Arbitrum One contracts (randomness source)
 ```
 
 Supports **two mining stacks**:
@@ -23,16 +23,15 @@ npm install
 
 # 2. Set up environment
 cp .env.example .env
-# Edit .env with your PostgreSQL, Redis, and JWT secret
+# Edit .env with your PostgreSQL, Redis, RPC, and JWT secret
 
-# 3. Generate JWT secret
-node scripts/generate-jwt-secret.js
-# Copy output to .env JWT_SECRET
+# 3. Generate JWT secret (paste output into .env JWT_SECRET)
+node -e "console.log(require('crypto').randomBytes(64).toString('hex'))"
 
 # 4. Run database migrations
 node db/migrate.js
 
-# 5. Start the server
+# 5. Start the server (port 3100 by default)
 npm start
 ```
 
@@ -41,6 +40,7 @@ npm start
 - **Node.js** ≥ 18
 - **PostgreSQL** (any version with JSONB support)
 - **Redis** (for rate limiting and caching)
+- **Arbitrum One RPC** (NativeBTC FastPath or any Arbitrum RPC)
 
 ## Endpoints
 
@@ -70,15 +70,14 @@ Three strategies (fail-closed):
 2. **JWT Bearer** — `Authorization: Bearer <token>` (session-based)
 3. **EIP-191 Signature** — `x-signature` + `x-signer-address` + `x-timestamp` (Web3 native)
 
-## Contract Addresses (Sepolia)
+## Contract Addresses (Arbitrum One — chain ID 42161)
 
 | Contract | Address |
 |----------|---------|
-| Core | `0xa1fB393D33819C4ef85f3457FCC339BF56f8AF1F` |
-| MiningModule | `0x99B9f244104cbE8653274a3936580D29B5E74871` |
-| TokenomicsModule | `0x305393D146e958cbDFda5830506e468984259F28` |
-| TGBT Token | `0x496598fDeab78fb2986e89d396249779595418E9` |
-| BatchMiningModule | `0xd52467e0C442c0817665fdB11f86FC47dC56ef3E` |
+| Core (TemporalGradientBeacon) | `0xF6556DDC7CdD3635A05428BD85BCf33A09F752e6` |
+| BatchMiningModule | `0xAf07E37D104E9be17639FE7a51B36972D4738651` |
+| TokenomicsModule | `0xF6069614FE09B91e5B00DA0a13A11B2BFcCabC36` |
+| TGBT Token | `0x31228eE520e895DA19f728DE5459b1b317d9b8D8` |
 
 ## Rate Limits
 

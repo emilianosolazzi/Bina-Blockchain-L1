@@ -25,6 +25,15 @@ const { ethers } = require('ethers');
 const { getEpochFilePath, verifyEpochStorage } = require('./storage-attestation');
 const utxoScanner = require('./utxo-scanner');
 
+// ── Load .env file (same as epoch-builder.js) ───────────
+const envFile = path.resolve(__dirname, '.env');
+if (fs.existsSync(envFile)) {
+	fs.readFileSync(envFile, 'utf8').split('\n').forEach(line => {
+		const m = line.match(/^\s*([^#][^=]*?)\s*=\s*(.*?)\s*$/);
+		if (m && !process.env[m[1]]) process.env[m[1]] = m[2];
+	});
+}
+
 // ── Config ──────────────────────────────────────────────
 const HOST = process.env.RANDOMNESS_HOST || '127.0.0.1';
 const PORT = Number(process.env.RANDOMNESS_PORT || 4271);
@@ -450,6 +459,14 @@ const server = http.createServer((req, res) => {
 		if (req.method === 'GET' && p === '/api/utxo/history') {
 			return sendJson(res, 200, { scans: utxoScanner.getScanHistory() });
 		}
+		if (req.method === 'GET' && p === '/api/utxo/discover') {
+			const url = new URL(req.url, `http://${req.headers.host}`);
+			const blocks = Math.min(parseInt(url.searchParams.get('blocks') || '3', 10), 10);
+			utxoScanner.discoverDeadUtxos({ blocks })
+				.then(result => sendJson(res, 200, result))
+				.catch(err => sendJson(res, 500, { error: err.message }));
+			return;
+		}
 
 		sendJson(res, 404, { error: 'Not found' });
 	} catch (err) {
@@ -460,6 +477,42 @@ const server = http.createServer((req, res) => {
 
 // ── Boot ────────────────────────────────────────────────
 loadEpochStore();
+
+// Sign any unsigned leaves on startup (in case MINER_PRIVATE_KEY was missing before)
+(async () => {
+	if (!MINER_PRIVATE_KEY) {
+		console.warn('[EpochStore] No MINER_PRIVATE_KEY — leaf signatures will be unavailable');
+		return;
+	}
+	let signed = 0;
+	for (const [epochId, leaves] of Object.entries(epochLeaves)) {
+		let dirty = false;
+		for (const leaf of leaves) {
+			if (!leaf.signature && leaf.outputHash) {
+				leaf.signature = await signOutput(leaf.outputHash);
+				if (leaf.signature) { signed++; dirty = true; }
+			}
+		}
+		if (dirty) {
+			// Update the epoch file on disk
+			const file = path.join(EPOCH_STORE_DIR, `epoch-${epochId}.json`);
+			if (fs.existsSync(file)) {
+				try {
+					const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+					data.leaves = leaves;
+					fs.writeFileSync(file, JSON.stringify(data, null, 2));
+				} catch (err) {
+					console.error(`[EpochStore] Failed to re-save epoch ${epochId}:`, err.message);
+				}
+			}
+		}
+	}
+	// Update latestOutput signature if it was null
+	if (latestOutput && !latestOutput.signature && latestOutput.outputHash) {
+		latestOutput.signature = await signOutput(latestOutput.outputHash);
+	}
+	if (signed > 0) console.log(`[EpochStore] Signed ${signed} previously-unsigned leaves`);
+})();
 
 server.listen(PORT, HOST, () => {
 	console.log(`\n🎲 Randomness API listening on http://${HOST}:${PORT}`);
@@ -472,7 +525,8 @@ server.listen(PORT, HOST, () => {
 	console.log(`    GET  /api/utxo/scan`);
 	console.log(`    GET  /api/utxo/latest`);
 	console.log(`    GET  /api/utxo/inventory`);
-	console.log(`    GET  /api/utxo/history\n`);
+	console.log(`    GET  /api/utxo/history`);
+	console.log(`    GET  /api/utxo/discover?blocks=3\n`);
 });
 
 module.exports = { saveEpoch, epochIndex, epochLeaves };
