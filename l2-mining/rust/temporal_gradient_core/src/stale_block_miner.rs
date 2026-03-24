@@ -646,12 +646,14 @@ impl LoserChainTracker {
         };
 
         let max_reorg = self.fork_events.iter().map(|e| e.reorg_depth).max().unwrap_or(0);
+        let max_zeros = self.stale_proofs.values().map(|p| p.leading_zeros).max().unwrap_or(0);
 
         LoserChainStats {
             total_stale_blocks: self.total_stale_count,
             total_reorg_events: self.total_reorg_count,
             average_quality_score: avg_quality,
             max_reorg_depth: max_reorg,
+            max_leading_zeros: max_zeros,
             active_tips: self.tips.iter().filter(|t| t.status == TipStatus::Active).count() as u32,
             competing_tips: self.tips.iter().filter(|t| t.status == TipStatus::Competing).count() as u32,
             cumulative_entropy_hex: hex::encode(self.cumulative_entropy),
@@ -695,6 +697,7 @@ pub struct LoserChainStats {
     pub total_reorg_events: u64,
     pub average_quality_score: u32,
     pub max_reorg_depth: u32,
+    pub max_leading_zeros: u32,
     pub active_tips: u32,
     pub competing_tips: u32,
     pub cumulative_entropy_hex: String,
@@ -785,6 +788,8 @@ pub struct StaleBlockMiner {
     tracker: LoserChainTracker,
     /// Pending proofs ready for L2 submission.
     pending_proofs: VecDeque<StaleWorkProof>,
+    /// Pending fork events ready for L2 submission.
+    pending_fork_events: VecDeque<ChainForkEvent>,
 }
 
 impl StaleBlockMiner {
@@ -793,6 +798,7 @@ impl StaleBlockMiner {
             config,
             tracker: LoserChainTracker::new(),
             pending_proofs: VecDeque::new(),
+            pending_fork_events: VecDeque::new(),
         }
     }
 
@@ -801,6 +807,11 @@ impl StaleBlockMiner {
     pub fn process_tips(&mut self, tips: Vec<ChainTip>) -> Vec<StaleWorkProof> {
         let fork_events = self.tracker.update_tips(tips);
         let mut new_proofs = Vec::new();
+
+        // Queue fork events for on-chain submission
+        for event in &fork_events {
+            self.pending_fork_events.push_back(event.clone());
+        }
 
         for event in &fork_events {
             for loser_hash in &event.loser_hashes {
@@ -905,6 +916,28 @@ impl StaleBlockMiner {
     /// Get the number of pending proofs.
     pub fn pending_count(&self) -> usize {
         self.pending_proofs.len()
+    }
+
+    /// Peek the newest pending proof without removing it.
+    pub fn latest_pending_proof(&self) -> Option<StaleWorkProof> {
+        self.pending_proofs.back().cloned()
+    }
+
+    /// Drain all pending fork events (for batch submission to L2).
+    pub fn drain_pending_fork_events(&mut self) -> Vec<ChainForkEvent> {
+        self.pending_fork_events.drain(..).collect()
+    }
+
+    /// Requeue fork events that could not be submitted yet.
+    pub fn requeue_fork_events(&mut self, events: Vec<ChainForkEvent>) {
+        for event in events.into_iter().rev() {
+            self.pending_fork_events.push_front(event);
+        }
+    }
+
+    /// Get the number of pending fork events.
+    pub fn pending_fork_event_count(&self) -> usize {
+        self.pending_fork_events.len()
     }
 
     /// Get an entropy report for a specific stale block.

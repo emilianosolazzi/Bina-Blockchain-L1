@@ -15,6 +15,7 @@ const TELEMETRY_FILE = process.env.TELEMETRY_FILE || (process.env.LOCALAPPDATA
 	? path.join(process.env.LOCALAPPDATA, 'entropy', 'TemporalGradientMiner', 'data', 'logs', 'telemetry.jsonl')
 	: path.resolve(ROOT, '..', 'rust', 'miner-telemetry.jsonl'));
 const RELAY_STATUS_FILE = process.env.RELAY_STATUS_FILE || path.join(path.dirname(TELEMETRY_FILE), `${path.parse(TELEMETRY_FILE).name}.relay-status.json`);
+const CONTROL_FILE = process.env.CONTROL_FILE || path.join(path.dirname(TELEMETRY_FILE), 'miner-control.json');
 const RANDOMNESS_API_URL = process.env.RANDOMNESS_API_URL || 'http://127.0.0.1:4271';
 const RANDOMNESS_API_FALLBACK_URL = process.env.RANDOMNESS_API_FALLBACK_URL || 'http://127.0.0.1:3100';
 const HEARTBEAT_API_URL = process.env.HEARTBEAT_API_URL || 'http://127.0.0.1:4380';
@@ -32,6 +33,7 @@ const RPC_API_KEY = process.env.RPC_API_KEY || 'fp_2d93df5e6cebe485b69c363a62e23
 const CHALLENGE_WINDOW = Number(process.env.CHALLENGE_WINDOW || 28800);
 const MODULE_IDS = {
 	BATCH_MINING_MODULE: ethers.id('BATCH_MINING_MODULE'),
+	STALE_BLOCK_MODULE: ethers.id('STALE_BLOCK_MODULE'),
 	TOKENOMICS_MODULE: ethers.id('TOKENOMICS_MODULE'),
 };
 
@@ -50,6 +52,12 @@ const BATCH_ABI = [
 	'function currentEpochId() view returns (uint256)',
 	'function getEpochInfo(uint256 epochId) view returns (tuple(bytes32 merkleRoot, uint64 startBlock, uint64 endBlock, uint32 leafCount, address operator, uint8 poolId, bool finalized, uint256 totalReward, bool storageAttested, bytes32 attestationHash))',
 ];
+const STALE_ORACLE_ABI = [
+	'function getStaleProof(bytes32 blockHash) view returns ((bytes32 blockHash, bytes32 canonicalHash, bytes32 entropyDigest, uint64 height, uint32 reorgDepth, uint32 leadingZeros, uint32 qualityScore, uint64 submittedAt, address submitter, bool rewarded))',
+	'function pendingReward(bytes32 blockHash) view returns (uint256)',
+	'event StaleBlockSubmitted(bytes32 indexed blockHash, bytes32 indexed canonicalHash, address indexed submitter, uint64 height, uint32 reorgDepth, uint32 qualityScore, bytes32 entropyDigest)',
+	'event StaleRewardClaimed(bytes32 indexed blockHash, address indexed submitter, uint256 reward)',
+];
 
 // Difficulty-based reward estimate (mirrors miner Rust logic)
 const DIFFICULTY_BITS = 11;
@@ -64,6 +72,28 @@ function toChecksumOrNull(value) {
 	} catch {
 		return value;
 	}
+}
+
+function toBytes32HexOrNull(value) {
+	if (!value) return null;
+	try {
+		return ethers.hexlify(ethers.zeroPadValue(ethers.getBytes(value), 32));
+	} catch {
+		try {
+			const normalized = String(value).trim().replace(/^0x/i, '');
+			if (!/^[0-9a-fA-F]{64}$/.test(normalized)) return null;
+			return `0x${normalized.toLowerCase()}`;
+		} catch {
+			return null;
+		}
+	}
+}
+
+function reverseBytes32Hex(value) {
+	const normalized = toBytes32HexOrNull(value);
+	if (!normalized) return null;
+	const bytes = Array.from(ethers.getBytes(normalized)).reverse();
+	return ethers.hexlify(Uint8Array.from(bytes));
 }
 
 function shortError(err) {
@@ -776,6 +806,38 @@ function detectAndStoreSolution(snap) {
 	const currAcc = snap.accepted_submissions || 0;
 	const currRej = snap.rejected_submissions || 0;
 
+	// Detect new stale blocks and insert them as stale-type solution entries
+	const prevStale = prevSnap.stale_block_count || 0;
+	const currStale = snap.stale_block_count || 0;
+	if (currStale > prevStale) {
+		const sq = snap.stale_quality || 0;
+		const sd = snap.stale_fork_depth || 0;
+		const staleReward = sq > 0 ? (50 * sq * Math.min(sd + 1, 7)) / 100 : 0;
+		for (let i = 0; i < (currStale - prevStale); i++) {
+			store.insertSolution({
+				timestamp: new Date(Number(snap.timestamp_unix_ms)).toISOString(),
+				timestampMs: Number(snap.timestamp_unix_ms),
+				type: 'stale',
+				nonce: null,
+				hash: snap.stale_xor_hex || null,
+				commitHash: null,
+				outputHash: snap.stale_xor_hex || null,
+				reward: staleReward,
+				estimated: true,
+				accepted: true,
+				phase: 'stale_harvest',
+				uptime: snap.uptime_seconds,
+				hashrate: snap.hashrate_hs,
+				totalHashes: snap.hashes,
+				solutionNumber: null,
+				staleQuality: sq,
+				staleForkDepth: sd,
+				staleZeroBits: snap.stale_zero_bits || 0,
+				bitcoinTipHeight: snap.bitcoin_tip_height || 0,
+			}).catch(err => console.error('[SolutionStore] stale insert error:', err.message));
+		}
+	}
+
 	// Detect new accepted solutions
 	if (currAcc > prevAcc) {
 		const onChainDelta = (snap.total_rewards_estimate || 0) - (prevSnap.total_rewards_estimate || 0);
@@ -870,6 +932,179 @@ function latestSnapshot() {
 	return snapshots[0] || null;
 }
 
+function latestSnapshotWithStaleProof() {
+	const snapshots = readSnapshots(Number.MAX_SAFE_INTEGER);
+	for (let i = snapshots.length - 1; i >= 0; i--) {
+		const snap = snapshots[i];
+		if (snap?.stale_block_hash_hex || snap?.stale_proof_id || snap?.stale_raw_header_hex) {
+			return snap;
+		}
+	}
+	return null;
+}
+
+async function resolveStaleOracleAddress() {
+	const core = new ethers.Contract(CORE_ADDRESS, CORE_ABI, provider);
+	const addr = await core.moduleAddress(MODULE_IDS.STALE_BLOCK_MODULE);
+	return addr && addr !== ethers.ZeroAddress ? addr : null;
+}
+
+async function fetchOnChainStaleProof(blockHashHex) {
+	const normalizedBlockHash = toBytes32HexOrNull(blockHashHex);
+	if (!normalizedBlockHash) return null;
+	const staleOracleAddress = await resolveStaleOracleAddress();
+	if (!staleOracleAddress) return null;
+	const oracle = new ethers.Contract(staleOracleAddress, STALE_ORACLE_ABI, provider);
+	const iface = new ethers.Interface(STALE_ORACLE_ABI);
+	const candidateHashes = [normalizedBlockHash];
+	const reversedBlockHash = reverseBytes32Hex(normalizedBlockHash);
+	if (reversedBlockHash && reversedBlockHash !== normalizedBlockHash) {
+		candidateHashes.push(reversedBlockHash);
+	}
+
+	let proof = null;
+	let matchedHash = null;
+	for (const candidateHash of candidateHashes) {
+		const candidateProof = await oracle.getStaleProof(candidateHash).catch(() => null);
+		if (candidateProof && Number(candidateProof.submittedAt || 0n) > 0) {
+			proof = candidateProof;
+			matchedHash = candidateHash;
+			break;
+		}
+	}
+
+	if (!proof || !matchedHash) {
+		return null;
+	}
+	const [pendingRewardWei, submitLogs, claimLogs] = await Promise.all([
+		oracle.pendingReward(matchedHash).catch(() => 0n),
+		provider.getLogs({
+			address: staleOracleAddress,
+			fromBlock: 0,
+			toBlock: 'latest',
+			topics: iface.encodeFilterTopics('StaleBlockSubmitted', [matchedHash]),
+		}).catch(() => []),
+		provider.getLogs({
+			address: staleOracleAddress,
+			fromBlock: 0,
+			toBlock: 'latest',
+			topics: iface.encodeFilterTopics('StaleRewardClaimed', [matchedHash]),
+		}).catch(() => []),
+	]);
+	const submitTxHash = submitLogs.length ? submitLogs[submitLogs.length - 1].transactionHash : null;
+	const claimTxHash = claimLogs.length ? claimLogs[claimLogs.length - 1].transactionHash : null;
+	return {
+		oracleAddress: staleOracleAddress,
+		lookupBlockHash: matchedHash,
+		displayBlockHash: normalizedBlockHash,
+		blockHash: proof.blockHash,
+		canonicalHash: proof.canonicalHash,
+		entropyDigest: proof.entropyDigest,
+		height: Number(proof.height),
+		reorgDepth: Number(proof.reorgDepth),
+		leadingZeros: Number(proof.leadingZeros),
+		qualityScore: Number(proof.qualityScore),
+		submittedAt: Number(proof.submittedAt),
+		submitter: toChecksumOrNull(proof.submitter),
+		rewarded: !!proof.rewarded,
+		submitTxHash,
+		claimTxHash,
+		pendingRewardWei: pendingRewardWei.toString(),
+		pendingRewardTgbt: Number(ethers.formatUnits(pendingRewardWei, 18)),
+	};
+}
+
+async function getLatestStaleDeveloperProof() {
+	const latest = latestSnapshot();
+	const latestProofSnap = latestSnapshotWithStaleProof();
+	const recent = await store.getSolutions({ limit: 500, skip: 0, sort: 'desc' });
+	const latestStale = recent.find(s => s.type === 'stale') || null;
+	const staleCount = Number(latest?.stale_block_count || 0);
+	const pendingProofs = Number(latest?.stale_pending_proofs || 0);
+	const proofSnap = latestProofSnap || latest;
+	const proofId = proofSnap?.stale_proof_id || null;
+	const rawHeaderHex = proofSnap?.stale_raw_header_hex || null;
+	const blockHashHex = proofSnap?.stale_block_hash_hex || null;
+	const canonicalHash = proofSnap?.stale_canonical_hash || null;
+	const entropyDigest = proofSnap?.stale_entropy_digest || null;
+	const submitter = proofSnap?.stale_submitter || null;
+	const createdAt = proofSnap?.stale_created_at || null;
+	const hasTelemetryProof = Boolean(
+		proofId ||
+		rawHeaderHex ||
+		blockHashHex ||
+		canonicalHash ||
+		entropyDigest ||
+		submitter
+	);
+	const onChainProof = await fetchOnChainStaleProof(blockHashHex).catch(() => null);
+	const reorgDepth = onChainProof?.reorgDepth ?? latest?.stale_fork_depth ?? latestStale?.staleForkDepth ?? null;
+	const qualityScore = onChainProof?.qualityScore ?? latest?.stale_quality ?? latestStale?.staleQuality ?? null;
+	const leadingZeros = onChainProof?.leadingZeros ?? latest?.stale_zero_bits ?? latestStale?.staleZeroBits ?? null;
+	const bitcoinTipHeight = latest?.bitcoin_tip_height ?? latestStale?.bitcoinTipHeight ?? null;
+	const timestampMs = createdAt ? createdAt * 1000 : (latestStale?.timestampMs || null);
+	const detectedAt = createdAt
+		? new Date(createdAt * 1000).toISOString()
+		: (latestStale?.timestamp || null);
+	const estimatedRewardTgbt = onChainProof
+		? (onChainProof.rewarded
+			? (50 * onChainProof.qualityScore * Math.min(onChainProof.reorgDepth + 1, 7)) / 100
+			: (onChainProof.pendingRewardTgbt || 0))
+		: Number.isFinite(qualityScore)
+		? (50 * qualityScore * Math.min((reorgDepth ?? 0) + 1, 7)) / 100
+		: (latestStale?.reward ?? null);
+	const submitTxHash = onChainProof?.submitTxHash || null;
+	const claimTxHash = onChainProof?.claimTxHash || null;
+	const status = onChainProof
+		? (onChainProof.rewarded ? 'reward_claimed' : 'submitted_onchain')
+		: (latestStale || staleCount > 0 || pendingProofs > 0 || hasTelemetryProof)
+			? (pendingProofs > 0 ? 'pending_submit' : 'summary_only')
+			: 'no-stale-detected';
+
+	return {
+		source: onChainProof ? 'dashboard+onchain' : 'dashboard-summary',
+		status,
+		proof: status === 'no-stale-detected' ? null : {
+			proofId,
+			rawHeaderHex,
+			telemetryBlockHash: blockHashHex,
+			blockHash: onChainProof?.blockHash || blockHashHex || null,
+			canonicalHash: onChainProof?.canonicalHash || canonicalHash,
+			entropyDigest: onChainProof?.entropyDigest || entropyDigest,
+			submitter: onChainProof?.submitter || submitter,
+			createdAt,
+			detectedAt,
+			timestampMs,
+			bitcoinTipHeight,
+			height: onChainProof?.height ?? null,
+			reorgDepth,
+			leadingZeros,
+			qualityScore,
+			rewarded: onChainProof?.rewarded ?? null,
+			estimatedRewardTgbt,
+			pendingProofs,
+			telemetryStaleCount: staleCount,
+		},
+		tx: {
+			submitTxHash,
+			claimTxHash,
+		},
+		onChain: onChainProof ? {
+			oracleAddress: onChainProof.oracleAddress,
+			lookupBlockHash: onChainProof.lookupBlockHash,
+			displayBlockHash: onChainProof.displayBlockHash,
+			submittedAt: onChainProof.submittedAt,
+			height: onChainProof.height,
+			reorgDepth: onChainProof.reorgDepth,
+			leadingZeros: onChainProof.leadingZeros,
+			qualityScore: onChainProof.qualityScore,
+			rewarded: onChainProof.rewarded,
+			pendingRewardWei: onChainProof.pendingRewardWei,
+			pendingRewardTgbt: onChainProof.pendingRewardTgbt,
+		} : null,
+	};
+}
+
 function sendEvent(res, event, data) {
 	res.write(`event: ${event}\n`);
 	res.write(`data: ${JSON.stringify(data)}\n\n`);
@@ -933,6 +1168,69 @@ const server = http.createServer(async (req, res) => {
 			telemetryPath: TELEMETRY_FILE,
 			latest: latestSnapshot(),
 		});
+		return;
+	}
+
+	// ── Mining control (pause / power rate) ──────────────────────────
+	if (url.pathname === '/api/miner/control' && req.method === 'GET') {
+		try {
+			const data = fs.existsSync(CONTROL_FILE)
+				? JSON.parse(fs.readFileSync(CONTROL_FILE, 'utf8'))
+				: { paused: false, power_pct: 100, submit_stale_now: false };
+			sendJson(res, 200, { paused: !!data.paused, power_pct: Number(data.power_pct) || 100 });
+		} catch (err) {
+			sendJson(res, 200, { paused: false, power_pct: 100 });
+		}
+		return;
+	}
+	if (url.pathname === '/api/miner/control' && req.method === 'POST') {
+		let body = '';
+		req.on('data', (c) => (body += c));
+		req.on('end', () => {
+			try {
+				const payload = JSON.parse(body);
+				const existing = fs.existsSync(CONTROL_FILE)
+					? JSON.parse(fs.readFileSync(CONTROL_FILE, 'utf8'))
+					: { submit_stale_now: false };
+				const ctrl = {
+					paused: !!payload.paused,
+					power_pct: [25, 50, 75, 100].includes(Number(payload.power_pct))
+						? Number(payload.power_pct) : 100,
+					submit_stale_now: !!existing.submit_stale_now,
+				};
+				fs.mkdirSync(path.dirname(CONTROL_FILE), { recursive: true });
+				fs.writeFileSync(CONTROL_FILE, JSON.stringify(ctrl, null, 2));
+				sendJson(res, 200, ctrl);
+			} catch (err) {
+				sendJson(res, 400, { error: 'Invalid JSON body' });
+			}
+		});
+		return;
+	}
+
+	if (url.pathname === '/api/stale/submit' && req.method === 'POST') {
+		try {
+			const existing = fs.existsSync(CONTROL_FILE)
+				? JSON.parse(fs.readFileSync(CONTROL_FILE, 'utf8'))
+				: { paused: false, power_pct: 100 };
+			const ctrl = {
+				paused: !!existing.paused,
+				power_pct: [25, 50, 75, 100].includes(Number(existing.power_pct))
+					? Number(existing.power_pct) : 100,
+				submit_stale_now: true,
+			};
+			fs.mkdirSync(path.dirname(CONTROL_FILE), { recursive: true });
+			fs.writeFileSync(CONTROL_FILE, JSON.stringify(ctrl, null, 2));
+			const latest = latestSnapshot();
+			sendJson(res, 200, {
+				ok: true,
+				queued: true,
+				pendingProofs: Number(latest?.stale_pending_proofs || 0),
+				message: 'Manual stale proof submit requested. The miner will retry shortly.',
+			});
+		} catch (err) {
+			sendJson(res, 500, { ok: false, error: shortError(err) });
+		}
 		return;
 	}
 
@@ -1090,6 +1388,16 @@ const server = http.createServer(async (req, res) => {
 	}
 
 	// ── Solution storage API ─────────────────────────────
+	if (url.pathname === '/api/stale/developer-proof' && req.method === 'GET') {
+		try {
+			const payload = await getLatestStaleDeveloperProof();
+			sendJson(res, 200, payload);
+		} catch (err) {
+			sendJson(res, 500, { error: err.message });
+		}
+		return;
+	}
+
 	if (url.pathname === '/api/solutions' && req.method === 'GET') {
 		try {
 			const limit = Math.max(1, Math.min(200, Number(url.searchParams.get('limit') || 50)));
@@ -1097,15 +1405,17 @@ const server = http.createServer(async (req, res) => {
 			const filter = url.searchParams.get('filter'); // 'accepted' | 'rejected' | null
 			const sinceMs = Number(url.searchParams.get('sinceMs') || 0);
 			let solutions = await store.getSolutions({ limit: 100000, skip: 0 });
-			if (filter === 'accepted') solutions = solutions.filter(s => s.accepted);
+			if (filter === 'accepted') solutions = solutions.filter(s => s.accepted && s.type !== 'stale');
 			if (filter === 'rejected') solutions = solutions.filter(s => !s.accepted);
+			if (filter === 'stale') solutions = solutions.filter(s => s.type === 'stale');
 			if (sinceMs > 0) {
 				solutions = solutions.filter(s => Number(s.timestampMs || Date.parse(s.timestamp || s.createdAt || 0)) >= sinceMs);
 			}
 			const stats = {
 				total: solutions.length,
-				accepted: solutions.filter(s => s.accepted).length,
+				accepted: solutions.filter(s => s.accepted && s.type !== 'stale').length,
 				rejected: solutions.filter(s => !s.accepted).length,
+				stale: solutions.filter(s => s.type === 'stale').length,
 				totalRewards: solutions.reduce((sum, s) => sum + Number(s.reward || 0), 0),
 			};
 			solutions = solutions.slice(skip, skip + limit);

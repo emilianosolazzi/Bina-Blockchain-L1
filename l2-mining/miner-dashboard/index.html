@@ -158,6 +158,9 @@
     }
     .sol-badge.ok { background: rgba(34,197,94,.15); color: var(--accent-2); }
     .sol-badge.fail { background: rgba(239,68,68,.15); color: var(--danger); }
+    .sol-badge.stale { background: rgba(251,191,36,.15); color: var(--gold); }
+    .sol-table tr.stale-row td { border-left: 3px solid var(--gold); }
+    .sol-table tr.stale-row:hover td { background: rgba(251,191,36,.06); }
     .sol-nonce { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; color: #cfe6ff; }
     .sol-hash-cell { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; color: #8ba3c7; font-size: 11px; }
     .sol-empty { text-align: center; padding: 32px; color: var(--muted); }
@@ -243,6 +246,81 @@
     }
     .action-btn:hover { border-color: var(--accent); color: var(--accent); }
     .action-btn:disabled { opacity: .5; cursor: not-allowed; }
+
+    /* ── Mining controls bar ── */
+    .mining-ctrl {
+      grid-column: span 12;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 14px 20px;
+      background: linear-gradient(135deg, rgba(56,189,248,.08), rgba(15,23,42,.85));
+      border: 1px solid rgba(56,189,248,.3);
+      border-radius: 16px;
+      flex-wrap: wrap;
+    }
+    .mining-ctrl .ctrl-label {
+      font-size: 13px;
+      color: var(--muted);
+      font-weight: 500;
+      white-space: nowrap;
+    }
+    .mining-ctrl .pause-btn {
+      padding: 8px 20px;
+      border-radius: 10px;
+      border: 1px solid var(--accent-2);
+      background: rgba(34,197,94,.12);
+      color: var(--accent-2);
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 600;
+      transition: all .2s ease;
+      min-width: 100px;
+      text-align: center;
+    }
+    .mining-ctrl .pause-btn:hover {
+      background: rgba(34,197,94,.22);
+      border-color: var(--accent-2);
+    }
+    .mining-ctrl .pause-btn.paused {
+      border-color: var(--warn);
+      background: rgba(245,158,11,.12);
+      color: var(--warn);
+    }
+    .mining-ctrl .pause-btn.paused:hover {
+      background: rgba(245,158,11,.22);
+    }
+    .power-group {
+      display: flex;
+      gap: 4px;
+      align-items: center;
+    }
+    .power-group .pwr-btn {
+      padding: 6px 12px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: rgba(15,23,42,.75);
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 600;
+      transition: all .2s ease;
+      min-width: 44px;
+      text-align: center;
+    }
+    .power-group .pwr-btn:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+    .power-group .pwr-btn.active {
+      background: rgba(56,189,248,.15);
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+    .power-group .pwr-btn:disabled {
+      opacity: .4;
+      cursor: not-allowed;
+    }
     .stack {
       display: grid;
       gap: 12px;
@@ -1097,6 +1175,20 @@
         </div>
       </div>
 
+      <!-- ── Mining controls (pause / power) ── -->
+      <div class="mining-ctrl" id="miningCtrl">
+        <span class="ctrl-label">Mining:</span>
+        <button class="pause-btn" id="pauseBtn" onclick="toggleMiningPause()">⏸ Pause</button>
+        <span class="ctrl-label" style="margin-left:8px;">Power:</span>
+        <div class="power-group" id="powerGroup">
+          <button class="pwr-btn" data-pwr="25" onclick="setMiningPower(25)">25%</button>
+          <button class="pwr-btn" data-pwr="50" onclick="setMiningPower(50)">50%</button>
+          <button class="pwr-btn" data-pwr="75" onclick="setMiningPower(75)">75%</button>
+          <button class="pwr-btn active" data-pwr="100" onclick="setMiningPower(100)">100%</button>
+        </div>
+        <span class="ctrl-label" style="margin-left:auto;" id="ctrlStatus"></span>
+      </div>
+
       <!-- ── Metric cards ── -->
       <div class="card"><h3>Phase</h3><p class="metric" id="phaseMetric">—</p><div class="small" id="phaseEta">—</div></div>
       <div class="card"><h3>Hashrate</h3><p class="metric" id="hashrate">—</p><div class="small" id="hashes">—</div></div>
@@ -1173,7 +1265,7 @@
               <button class="action-btn" id="refreshEntropy">Refresh sources</button>
             </div>
           </summary>
-        <p class="helper" style="margin:4px 0 8px;">Three independent entropy streams are harvested and mixed into every beacon output. Currently only <strong>PoW Mining</strong> mints TGBT on Arbitrum L2 (via MiningModule → TokenomicsModule). Stale Block rewards are calculated on-chain but <em>claimReward()</em> does not yet mint. UTXO anchoring contributes entropy only.</p>
+        <p class="helper" style="margin:4px 0 8px;">Three independent entropy streams are harvested and mixed into every beacon output. <strong>PoW Mining</strong> mints TGBT on Arbitrum L2 (via MiningModule → TokenomicsModule). <strong style="color:var(--gold);">Stale Block rewards are now live</strong> — the StaleBlockOracle submits proofs and claims TGBT automatically (base 50 TGBT × quality × fork depth). UTXO anchoring contributes entropy and Bitcoin-grade timestamps.</p>
         <details style="margin:0 0 16px;font-size:12px;color:var(--muted);">
           <summary style="cursor:pointer;color:var(--accent);font-weight:600;">Why three entropy sources?</summary>
           <div style="margin:8px 0 0 12px;line-height:1.6;">
@@ -1290,6 +1382,7 @@
               <div class="source-metric-row"><span title="How many leading zero bits the orphan block's hash has. More zeros = harder proof-of-work = higher-quality entropy. This shows the mining difficulty the orphan satisfied.">Leading zero bits <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span class="val" id="epStaleZeroBits">—</span></div>
               <div class="source-metric-row"><span title="All discovered orphan block hashes XOR'd together into one cumulative pool. XOR mixing ensures every new orphan changes the entire pool value. 'Scanning for forks…' means listening but no orphans caught yet.">Cumulative XOR pool <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span class="val ok" id="epStaleXorStatus">—</span></div>
               <div class="source-metric-row"><span title="The latest Bitcoin block height the scanner is monitoring. Confirms the scanner is connected and tracking the live Bitcoin chain.">Bitcoin tip height <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span class="val" id="epStaleTipHeight">—</span></div>
+              <div class="source-metric-row"><span title="Number of stale block proofs waiting to be submitted on-chain to the StaleBlockOracle on Arbitrum. The miner auto-retries these periodically, and you can force a one-shot retry with the button below. If they stay pending, check gas balance or RPC errors.">Pending proofs <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span class="val" id="epStalePending">—</span></div>
             </div>
             <div class="helper" style="font-size:10px;color:var(--muted);margin:6px 0 2px;">↓ XOR pool hash — all orphan block hashes mixed together. This entropy is XOR'd into the final beacon output</div>
             <div class="source-entropy-hash" id="epStaleHash">Monitoring loser chain…</div>
@@ -1298,8 +1391,12 @@
               <span title="Quality score (0-100) of the loser-chain entropy. Starts at 0 when no orphans are found. Each orphan block discovered adds quality. 60+ is considered good randomness.">Loser-chain quality <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span id="epStaleQualityLabel">—</span>
             </div>
             <div class="source-tgbt-reward">
-              <div style="font-size:11px;opacity:.7;margin-bottom:2px;">TGBT REWARD (pending) <span title="The StaleBlockOracle contract calculates rewards but the mint function isn't deployed yet. When it goes live, each orphan block you find will earn TGBT proportional to its quality and fork depth." style="cursor:help;font-size:10px;">ⓘ why pending?</span></div>
-              <span id="epStaleTgbt">0.00 TGBT (pending)</span>
+              <div style="font-size:11px;opacity:.7;margin-bottom:2px;">STALE BLOCK REWARD <span id="epStaleRewardStatus" style="font-size:10px;"></span> <span title="Stale block proofs are submitted to the StaleBlockOracle on Arbitrum. Rewards are calculated as: baseReward(50) × qualityScore(0-100) × min(forkDepth+1, 7) ÷ 100. Higher quality = more TGBT. The miner auto-retries pending proofs periodically and auto-claims when submit succeeds. Use the manual retry button below if you do not want to wait for the next retry tick." style="cursor:help;font-size:10px;">ⓘ</span></div>
+              <span id="epStaleTgbt">Waiting for stale blocks…</span>
+              <div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+                <button class="action-btn" id="retryStaleSubmitBtn" onclick="requestManualStaleSubmit()" title="Force an immediate stale-proof submit retry instead of waiting for the next automatic retry tick.">↻ Submit pending proof now</button>
+                <span class="helper" id="retryStaleSubmitHint" style="font-size:10px;">Manual retry sends a one-shot submit request to the miner.</span>
+              </div>
             </div>
           </div>
         </div>
@@ -1697,16 +1794,16 @@ curl -s "http://127.0.0.1:4271/api/utxo/scan?seed=$BINARY_HASH" \
                 <span class="tgbt-val" style="color:var(--accent-2);font-size:11px;" id="epBreakdownUtxo">—</span>
               </div>
               <div class="tgbt-breakdown-item">
-                <div class="source-name"><span class="source-dot" style="background:var(--gold);opacity:.4;"></span>Stale Blocks <span style="font-size:10px;color:var(--muted);" title="The StaleBlockOracle contract can CALCULATE rewards (baseReward × quality × forkDepth) but claimReward() doesn't actually mint TGBT yet — it's a TODO in the contract. Will go live in a future update.">(pending) ⓘ</span></div>
-                <span class="tgbt-val" style="color:var(--muted);" id="epBreakdownStale">—</span>
+                <div class="source-name"><span class="source-dot" style="background:var(--gold);"></span>Stale Blocks <span id="epBreakdownStaleStatus" style="font-size:10px;color:var(--gold);" title="StaleBlockOracle is LIVE on Arbitrum. Each accepted orphan block submits a proof and auto-claims TGBT. Reward formula: 50 TGBT × quality(0-100) × min(depth+1, 7) ÷ 100. If pending > 0, the proof hasn't submitted yet (check gas).">(on-chain ✓) ⓘ</span></div>
+                <span class="tgbt-val" style="color:var(--gold);" id="epBreakdownStale">—</span>
               </div>
               <div class="tgbt-breakdown-item" style="border-color:rgba(148,163,184,.3);background:rgba(15,23,42,.85);">
-                <div class="source-name" style="font-weight:700;"><span class="source-dot" style="background:var(--text);"></span>Total Minted</div>
+                <div class="source-name" style="font-weight:700;"><span class="source-dot" style="background:var(--text);"></span>Total Status</div>
                 <span class="tgbt-val" style="color:var(--text);" id="epBreakdownTotal">—</span>
               </div>
             </div>
             <div style="margin-top:12px;font-size:11px;color:var(--muted);text-align:center;">
-              <strong>TL;DR:</strong> PoW solutions earn TGBT right now (✓ on-chain). UTXO and Stale Block sources make the randomness stronger but don't pay tokens yet — reward contracts are in development.
+              <strong>TL;DR:</strong> PoW solutions earn TGBT (✓). Stale block orphans can earn TGBT via StaleBlockOracle after proof submission + claim. If proofs are pending, the stale reward is not minted yet. UTXO anchoring provides Bitcoin-grade timestamps (no token reward).
             </div>
           </div>
         </div>
@@ -1717,6 +1814,17 @@ curl -s "http://127.0.0.1:4271/api/utxo/scan?seed=$BINARY_HASH" \
           <div class="stale-block-log" id="epStaleLog">
             <div class="helper">Monitoring Bitcoin network for orphaned blocks…</div>
           </div>
+        </div>
+        <div class="stale-section-collapsible" style="margin-top:16px;">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;">
+            <div style="font-size:13px;color:var(--gold);font-weight:600;">Developer Stale Proof JSON</div>
+            <div style="display:flex;gap:8px;">
+              <button class="copy-btn" id="refreshStaleDevProof">Refresh JSON</button>
+              <button class="copy-btn" id="copyStaleDevProof">Copy JSON</button>
+            </div>
+          </div>
+          <div class="helper" style="margin-bottom:8px;">Shows the exact stale-proof fields the dashboard currently has, plus the fields still missing for full verification.</div>
+          <pre id="staleDevProofJson" style="margin:0;padding:12px;border-radius:12px;background:rgba(5,10,18,.92);border:1px solid var(--border);color:var(--text);font-size:11px;line-height:1.45;overflow:auto;max-height:280px;">Loading stale developer JSON…</pre>
         </div>
         </details>
       </div>
@@ -1741,6 +1849,7 @@ curl -s "http://127.0.0.1:4271/api/utxo/scan?seed=$BINARY_HASH" \
               <div class="sol-filter active" data-filter="all">All</div>
               <div class="sol-filter" data-filter="accepted">Accepted</div>
               <div class="sol-filter" data-filter="rejected">Failed</div>
+              <div class="sol-filter" data-filter="stale" style="color:var(--gold);">🔗 Stale</div>
               </div>
             </div>
           </summary>
@@ -2453,6 +2562,92 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
       reward_received: ['Reward received!', 'The reveal completed successfully — TGBT has been minted to your address!']
     };
 
+    /* ── Mining controls (pause / power) ───────────────────── */
+    let miningCtrlState = { paused: false, power_pct: 100 };
+
+    async function fetchMiningControl() {
+      try {
+        const r = await fetch('/api/miner/control');
+        if (r.ok) miningCtrlState = await r.json();
+      } catch (_) { /* use cached */ }
+      syncMiningControlUI();
+    }
+
+    async function postMiningControl(data) {
+      try {
+        const r = await fetch('/api/miner/control', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(data),
+        });
+        if (r.ok) miningCtrlState = await r.json();
+      } catch (err) {
+        console.warn('Failed to update mining control:', err);
+      }
+      syncMiningControlUI();
+    }
+
+    function toggleMiningPause() {
+      postMiningControl({ ...miningCtrlState, paused: !miningCtrlState.paused });
+    }
+
+    function setMiningPower(pct) {
+      postMiningControl({ ...miningCtrlState, power_pct: pct });
+    }
+
+    async function requestManualStaleSubmit() {
+      try {
+        const res = await fetch('/api/stale/submit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data.ok === false) {
+          throw new Error(data.error || data.message || 'Manual stale submit request failed');
+        }
+        showToast(data.message || 'Manual stale proof submit requested.');
+        setTimeout(() => {
+          tickEntropyPipeline();
+          loadStaleDeveloperProof();
+        }, 2500);
+      } catch (err) {
+        console.warn('Failed to request manual stale submit:', err);
+        showToast(`Manual stale submit failed: ${err.message}`, true);
+      }
+    }
+
+    function syncMiningControlUI() {
+      const btn = document.getElementById('pauseBtn');
+      const statusEl = document.getElementById('ctrlStatus');
+      if (btn) {
+        if (miningCtrlState.paused) {
+          btn.textContent = '\u25b6 Resume';
+          btn.classList.add('paused');
+        } else {
+          btn.textContent = '\u23f8 Pause';
+          btn.classList.remove('paused');
+        }
+      }
+      document.querySelectorAll('.power-group .pwr-btn').forEach(b => {
+        const pwr = Number(b.dataset.pwr);
+        b.classList.toggle('active', pwr === (miningCtrlState.power_pct || 100));
+        b.disabled = miningCtrlState.paused;
+      });
+      if (statusEl) {
+        if (miningCtrlState.paused) {
+          statusEl.textContent = '\u23f8 PAUSED';
+          statusEl.style.color = 'var(--warn)';
+        } else {
+          statusEl.textContent = `\u26a1 ${miningCtrlState.power_pct || 100}% power`;
+          statusEl.style.color = 'var(--accent-2)';
+        }
+      }
+    }
+
+    // Load control state on page load, refresh every 5 s
+    fetchMiningControl();
+    setInterval(fetchMiningControl, 5000);
+
     function fmtNum(v) {
       if (v == null) return '—';
       return Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(v);
@@ -2738,8 +2933,14 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
       // ── TGBT rewards ──
       const rewards = effectiveRewards(snap);
       const estLabel = rewards.estimated ? ' (est)' : '';
-      els.tgbtTotal.innerHTML = `${fmtTGBT(rewards.total)} <span class="unit">TGBT${estLabel}</span>`;
-      els.rewardDetail.textContent = `${fmtTGBT(rewards.total)} TGBT${estLabel}`;
+      // Include stale block rewards in the hero total (entropyState.tgbt.stale is computed from on-chain formula)
+      const staleReward = (entropyState && entropyState.tgbt) ? entropyState.tgbt.stale : 0;
+      const stalePendingHero = (entropyState && entropyState.stale) ? (entropyState.stale.pendingProofs || 0) : 0;
+      const combinedTotal = rewards.total + staleReward;
+      const stalePendingLabel = (staleReward > 0 && stalePendingHero > 0) ? ' ⏳' : '';
+      const sourceLabel = staleReward > 0 ? ` (PoW + Stale${stalePendingLabel})` : '';
+      els.tgbtTotal.innerHTML = `${fmtTGBT(combinedTotal)} <span class="unit">TGBT${estLabel}${sourceLabel}</span>`;
+      els.rewardDetail.textContent = `${fmtTGBT(combinedTotal)} TGBT${estLabel}${sourceLabel}`;
 
       const acc = snap.accepted_submissions || 0;
       const rej = snap.rejected_submissions || 0;
@@ -3577,18 +3778,19 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
     }
 
     // ── Unified Entropy Pipeline ──────────────────────────────
-    // REWARD TRUTH: Only PoW mining actually mints TGBT on Arbitrum via
-    // MiningModule → TokenomicsModule.onBlockMined() → tgbtToken.mint().
-    // StaleBlockOracle.claimReward() calculates but does NOT mint (TODO in contract).
-    // Dead UTXO has NO on-chain reward mechanism yet.
-    // All entropy sources contribute to beacon quality; only PoW has live rewards.
+    // REWARD TRUTH:
+    // 1) PoW mining mints TGBT via MiningModule → TokenomicsModule.onBlockMined() → tgbtToken.mint().
+    // 2) Stale blocks mint TGBT via StaleBlockOracle.claimReward() → TokenomicsModule.onStaleBlockReward().
+    //    Formula: baseReward(50) × quality(0-100) × min(depth+1, 7) / 100 → 0 to 350 TGBT per orphan.
+    // 3) Dead UTXO has NO on-chain reward mechanism — entropy + timestamp only.
+    // Both PoW and stale block sources have live on-chain rewards.
     const entropyState = {
       initialized: false,
       tick: 0,
       btcTipHeight: 941529,
       pow: { hashrate: 0, nonces: 0, solutions: 0, accepted: 0, quality: 0, hash: '', phase: 'searching', diffBits: 11 },
       utxo: { anchored: 0, scanned: 0, height: 0, quality: 0, hash: '', fresh: false, status: 'offline' },
-      stale: { count: 0, forkDepth: 0, zeroBits: 0, quality: 0, hash: '', xorPool: '', blocks: [], status: 'offline' },
+      stale: { count: 0, forkDepth: 0, zeroBits: 0, quality: 0, hash: '', xorPool: '', blocks: [], status: 'offline', pendingProofs: 0, firstSeenMs: 0, _lastCount: 0 },
       combined: { hash: '', quality: 0, divergence: 0, mixRounds: 8 },
       tgbt: { pow: 0, utxo: 0, stale: 0, total: 0, powOnChain: false },
     };
@@ -3650,11 +3852,47 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
         entropyState.utxo.status = 'offline';
       }
 
-      // Stale block: respect the stale mining toggle instead of hardcoding offline
+      // Stale block: use real telemetry data, respect the stale mining toggle
       entropyState.stale.count = snap?.stale_block_count || 0;
       entropyState.stale.forkDepth = snap?.stale_fork_depth || 0;
       entropyState.stale.zeroBits = snap?.stale_zero_bits || 0;
-      entropyState.stale.blocks = [];
+      entropyState.stale.realQuality = snap?.stale_quality ?? null;
+      entropyState.stale.realXorHex = snap?.stale_xor_hex || null;
+      entropyState.stale.realTipHeight = snap?.bitcoin_tip_height || 0;
+      entropyState.stale.pendingProofs = snap?.stale_pending_proofs || 0;
+      entropyState.stale._lastCount = entropyState.stale.count;
+      if (entropyState.stale.count > 0 && !entropyState.stale.firstSeenMs) {
+        entropyState.stale.firstSeenMs = Number(snap?.timestamp_unix_ms || Date.now());
+      }
+
+      // Auto-detect: if the miner IS harvesting stale blocks, force the toggle on.
+      // This ensures the card shows values even on first visit (no localStorage yet).
+      if (entropyState.stale.count > 0 && !staleMiningEnabled) {
+        staleMiningEnabled = true;
+        localStorage.setItem(STALE_MINING_KEY, 'true');
+        syncStaleToggleUI();
+      }
+      // Build block entries from aggregate telemetry stats.
+      // The miner reports totals (count, quality, zeroBits, forkDepth, xorHex)
+      // rather than per-block details, so we synthesize a summary entry.
+      if (entropyState.stale.count > 0 && entropyState.stale.realXorHex) {
+        const quality = entropyState.stale.realQuality || 0;
+        const depth = entropyState.stale.forkDepth || 0;
+        const reward = quality > 0 ? (50 * quality * Math.min(depth + 1, 7)) / 100 : 0;
+        const tipH = entropyState.stale.realTipHeight || 0;
+        const ageSecs = entropyState.stale.firstSeenMs > 0
+          ? Math.max(0, Math.floor((Date.now() - entropyState.stale.firstSeenMs) / 1000))
+          : 0;
+        entropyState.stale.blocks = [{
+          hash: entropyState.stale.realXorHex,
+          height: tipH > 0 ? tipH : '?',
+          zeroBits: entropyState.stale.zeroBits,
+          age: ageSecs,
+          reward: fmtTGBT(reward),
+        }];
+      } else {
+        entropyState.stale.blocks = [];
+      }
       if (staleMiningEnabled) {
         entropyState.stale.status = entropyState.stale.count > 0 ? 'active' : 'scanning';
       } else {
@@ -3667,10 +3905,13 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
         entropyState.tgbt.pow = rewards.total;
         entropyState.tgbt.powOnChain = !rewards.estimated;
       }
-      // Stale & UTXO: no on-chain mint exists yet
+      // UTXO: no on-chain mint exists — entropy + timestamps only
       entropyState.tgbt.utxo = 0;
-      entropyState.tgbt.stale = 0;
-      entropyState.tgbt.total = entropyState.tgbt.pow;
+      // Stale: estimate from on-chain formula: baseReward(50) × quality × min(depth+1, 7) / 100
+      const initQ = entropyState.stale.quality || 0;
+      const initD = entropyState.stale.forkDepth || 0;
+      entropyState.tgbt.stale = initQ > 0 ? (50 * initQ * Math.min(initD + 1, 7)) / 100 : 0;
+      entropyState.tgbt.total = entropyState.tgbt.pow + entropyState.tgbt.stale;
 
       entropyState.initialized = true;
       tickEntropyPipeline();
@@ -3711,32 +3952,60 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
         ? Math.min(100, 55 + Math.round(entropyState.utxo.anchored * 0.8))
         : 0;
       entropyState.utxo.fresh = entropyState.utxo.anchored > 0;
-      entropyState.tgbt.utxo = 0; // No on-chain mint — StaleBlockOracle/UTXO contracts don't transfer TGBT
+      entropyState.tgbt.utxo = 0; // No on-chain mint — UTXO provides entropy + timestamps only
 
-      // ── Stale Block source: entropy visualization (claimReward TODO in contract) ──
-      // StaleBlockOracle._calculateReward() computes baseReward * qualityScore * (reorgDepth+1) / 100
-      // but claimReward() only emits an event — no actual tgbtToken.mint() call yet
+      // ── Stale Block source: use REAL telemetry data when available ──
+      // Refresh stale stats from latest telemetry on every tick
+      if (snap) {
+        const newCount = snap.stale_block_count || 0;
+        const prevCount = entropyState.stale.count || 0;
+        if (newCount > prevCount) {
+          entropyState.stale.firstSeenMs = Number(snap.timestamp_unix_ms || Date.now());
+        }
+        if (newCount > entropyState.stale.count) entropyState.stale.count = newCount;
+        entropyState.stale.forkDepth = snap.stale_fork_depth || entropyState.stale.forkDepth;
+        entropyState.stale.zeroBits = snap.stale_zero_bits || entropyState.stale.zeroBits;
+        if (snap.stale_quality != null) entropyState.stale.realQuality = snap.stale_quality;
+        if (snap.stale_xor_hex) entropyState.stale.realXorHex = snap.stale_xor_hex;
+        if (snap.bitcoin_tip_height) entropyState.stale.realTipHeight = snap.bitcoin_tip_height;
+        entropyState.stale.pendingProofs = snap.stale_pending_proofs || 0;
+        entropyState.stale._lastCount = newCount;
+        // Auto-enable toggle when miner reports stale blocks
+        if (newCount > 0 && !staleMiningEnabled) {
+          staleMiningEnabled = true;
+          localStorage.setItem(STALE_MINING_KEY, 'true');
+          syncStaleToggleUI();
+        }
+      }
       entropyState.stale.hash = pseudoHash(`stale-${t}-${entropyState.stale.count}-${Date.now()}`);
-      entropyState.stale.xorPool = entropyState.stale.count > 0
-        ? xorHashes(entropyState.stale.hash, pseudoHash(`stale-xor-${t}-pool`))
-        : pseudoHash(`stale-pool-empty-${t}`);
-      entropyState.stale.quality = entropyState.stale.count > 0
-        ? Math.min(100, 60 + entropyState.stale.count * 4)
-        : 0;
-      entropyState.tgbt.stale = 0; // claimReward() has TODO — no mint yet
+      // Use real XOR pool hex from miner telemetry if available
+      entropyState.stale.xorPool = entropyState.stale.realXorHex
+        ? `0x${entropyState.stale.realXorHex}`
+        : (entropyState.stale.count > 0
+          ? xorHashes(entropyState.stale.hash, pseudoHash(`stale-xor-${t}-pool`))
+          : pseudoHash(`stale-pool-empty-${t}`));
+      // Use real quality from miner telemetry if available
+      entropyState.stale.quality = entropyState.stale.realQuality != null
+        ? entropyState.stale.realQuality
+        : (entropyState.stale.count > 0 ? Math.min(100, 60 + entropyState.stale.count * 4) : 0);
+      // Stale reward: on-chain via StaleBlockOracle.claimReward() → TokenomicsModule.onStaleBlockReward()
+      // Formula: baseReward(50) × quality(0-100) × min(depth+1, 7) / 100
+      const sq = entropyState.stale.quality || 0;
+      const sd = entropyState.stale.forkDepth || 0;
+      entropyState.tgbt.stale = sq > 0 ? (50 * sq * Math.min(sd + 1, 7)) / 100 : 0;
 
       // ── Combine all three entropy sources ──
       const intermediate = xorHashes(entropyState.pow.hash, entropyState.utxo.hash);
       entropyState.combined.hash = pseudoHash(intermediate + entropyState.stale.xorPool + t);
       entropyState.combined.divergence = countDivergentBits(entropyState.pow.hash, entropyState.combined.hash);
-      // Weighted quality: PoW is the only minting source so it dominates
+      // Weighted quality: PoW dominates since it produces more frequent rewards
       const activeCount = [entropyState.pow.quality > 0, entropyState.utxo.quality > 0, entropyState.stale.quality > 0].filter(Boolean).length;
       const avgQ = activeCount > 0
         ? (entropyState.pow.quality * 0.6 + entropyState.utxo.quality * 0.2 + entropyState.stale.quality * 0.2) / Math.max(activeCount * 0.34, 1)
         : 0;
       entropyState.combined.quality = Math.min(100, Math.round(avgQ));
 
-      // Total TGBT = only PoW (stale + utxo contracts not minting)
+      // Total TGBT = PoW + Stale (UTXO has no token reward)
       entropyState.tgbt.total = entropyState.tgbt.pow + entropyState.tgbt.utxo + entropyState.tgbt.stale;
 
       // Bump BTC tip estimate every ~10 min (20 ticks × 3s)
@@ -3802,16 +4071,84 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
         : 'Waiting for UTXO subsystem…';
       setBadge(els.utxoStatus, utxoActive ? 'Active' : 'Offline', utxoActive ? 'ok' : 'fail');
 
-      // ── Stale Block card (entropy only — claimReward TODO) ──
+      // ── Stale Block card (on-chain rewards via StaleBlockOracle) ──
       els.epStaleCount.textContent = staleDisabled ? 'Disabled' : fmtNum(ep.stale.count);
-      els.epStaleForkDepth.textContent = staleDisabled ? '—' : (ep.stale.forkDepth > 0 ? `${ep.stale.forkDepth} blocks` : '—');
-      els.epStaleZeroBits.textContent = staleDisabled ? '—' : (ep.stale.zeroBits > 0 ? `${ep.stale.zeroBits} bits` : '—');
+      els.epStaleForkDepth.textContent = staleDisabled ? '—' : (ep.stale.forkDepth > 0 ? `${ep.stale.forkDepth} blocks` : (ep.stale.count > 0 ? '0 (REST harvest)' : '—'));
+      els.epStaleZeroBits.textContent = staleDisabled ? '—' : (ep.stale.zeroBits > 0 ? `${ep.stale.zeroBits} bits` : (ep.stale.count > 0 ? '0 (pending)' : '—'));
       els.epStaleXorStatus.textContent = staleDisabled ? 'Disabled' : (ep.stale.count > 0 ? `${ep.stale.count} blocks XOR'd` : 'Scanning for forks…');
-      els.epStaleTipHeight.textContent = staleDisabled ? '—' : fmtNum(ep.btcTipHeight);
+      // Use real Bitcoin tip height from telemetry if available, fallback to estimate
+      const realTip = ep.stale.realTipHeight || 0;
+      const stalePending = ep.stale.pendingProofs || 0;
+      const staleSubmitted = staleActive && stalePending === 0;
+      els.epStaleTipHeight.textContent = staleDisabled ? '—' : fmtNum(realTip > 0 ? realTip : ep.btcTipHeight);
+      // Pending proofs row
+      if (els.epStalePending) {
+        if (staleDisabled) {
+          els.epStalePending.textContent = '—';
+          els.epStalePending.style.color = '';
+        } else if (stalePending > 0) {
+          els.epStalePending.textContent = `${stalePending} ⚠ awaiting submit`;
+          els.epStalePending.style.color = 'var(--warn)';
+        } else if (ep.stale.count > 0) {
+          els.epStalePending.textContent = '0 ✔ all submitted';
+          els.epStalePending.style.color = 'var(--accent-2)';
+        } else {
+          els.epStalePending.textContent = '0';
+          els.epStalePending.style.color = '';
+        }
+      }
+      if (els.retryStaleSubmitBtn) {
+        els.retryStaleSubmitBtn.disabled = staleDisabled || stalePending === 0;
+        els.retryStaleSubmitBtn.style.opacity = (staleDisabled || stalePending === 0) ? '.45' : '1';
+        els.retryStaleSubmitBtn.style.cursor = (staleDisabled || stalePending === 0) ? 'not-allowed' : 'pointer';
+      }
+      if (els.retryStaleSubmitHint) {
+        els.retryStaleSubmitHint.textContent = staleDisabled
+          ? 'Enable stale mining to submit proofs.'
+          : stalePending > 0
+            ? `Manual retry available now — ${stalePending} proof${stalePending > 1 ? 's are' : ' is'} queued.`
+            : 'No pending stale proofs right now.';
+      }
+      // Reward header status badge
+      if (els.epStaleRewardStatus) {
+        if (staleActive && stalePending > 0) {
+          els.epStaleRewardStatus.textContent = '⏳ pending submit';
+          els.epStaleRewardStatus.style.color = 'var(--warn)';
+        } else if (staleActive && staleSubmitted) {
+          els.epStaleRewardStatus.textContent = '✓ on-chain';
+          els.epStaleRewardStatus.style.color = 'var(--accent-2)';
+        } else {
+          els.epStaleRewardStatus.textContent = '';
+        }
+      }
+      // Breakdown section status
+      if (els.epBreakdownStaleStatus) {
+        if (staleActive && stalePending > 0) {
+          els.epBreakdownStaleStatus.textContent = '(⏳ pending) ⓘ';
+          els.epBreakdownStaleStatus.style.color = 'var(--warn)';
+        } else if (staleActive && staleSubmitted) {
+          els.epBreakdownStaleStatus.textContent = '(on-chain ✓) ⓘ';
+          els.epBreakdownStaleStatus.style.color = 'var(--gold)';
+        } else {
+          els.epBreakdownStaleStatus.textContent = '(on-chain ✓) ⓘ';
+          els.epBreakdownStaleStatus.style.color = 'var(--gold)';
+        }
+      }
       els.epStaleHash.textContent = staleDisabled ? 'Stale mining disabled — enable via toggle above' : ep.stale.xorPool;
       els.epStaleQuality.style.width = staleDisabled ? '0%' : `${ep.stale.quality}%`;
       els.epStaleQualityLabel.textContent = staleDisabled ? 'Off' : `${ep.stale.quality}/100`;
-      els.epStaleTgbt.textContent = staleDisabled ? 'Disabled' : (staleActive ? `${fmtTGBT(ep.tgbt.stale)} TGBT` : '0.000 TGBT (no mint)');
+      // Stale reward label: show actual submission status, not fake checkmark
+      if (staleDisabled) {
+        els.epStaleTgbt.textContent = 'Disabled';
+      } else if (staleActive && stalePending > 0) {
+        els.epStaleTgbt.innerHTML = `<span style="color:var(--warn);">${fmtTGBT(ep.tgbt.stale)} TGBT (pending — ${stalePending} proof${stalePending > 1 ? 's' : ''} awaiting on-chain submit)</span>`;
+      } else if (staleActive && staleSubmitted) {
+        els.epStaleTgbt.textContent = `${fmtTGBT(ep.tgbt.stale)} TGBT ✓ on-chain`;
+      } else if (staleActive) {
+        els.epStaleTgbt.textContent = `${fmtTGBT(ep.tgbt.stale)} TGBT (est)`;
+      } else {
+        els.epStaleTgbt.textContent = '0.000 TGBT (scanning)';
+      }
       const staleScanning = staleMiningEnabled && !staleActive;
       setBadge(els.staleStatus, staleDisabled ? 'Disabled' : (staleActive ? 'Active' : 'Scanning'), staleDisabled ? 'warn' : (staleActive ? 'ok' : (staleScanning ? 'warn' : 'fail')));
 
@@ -3826,14 +4163,29 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
       els.epSourcesActive.textContent = `${sourcesUp}/3`;
       els.epMixRounds.textContent = `${ep.combined.mixRounds}`;
 
-      // ── TGBT breakdown (honest: only PoW mints, others pending) ──
+      // ── TGBT breakdown (PoW + Stale on-chain, UTXO = entropy only) ──
       els.epBreakdownPow.textContent = `${fmtTGBT(ep.tgbt.pow)} TGBT` + (ep.tgbt.powOnChain ? ' ✓' : ' (est)');
       els.epBreakdownUtxo.textContent = utxoActive ? `✓ Anchored at BTC #${fmtNum(ep.utxo.height)}` : 'Offline — not anchoring';
-      els.epBreakdownStale.textContent = staleDisabled ? 'Disabled' : (staleActive ? `${fmtTGBT(ep.tgbt.stale)} TGBT` : '0.000 TGBT — pending');
-      els.epBreakdownTotal.textContent = `${fmtTGBT(ep.tgbt.total)} TGBT` + (ep.tgbt.total > 0 ? ' (PoW only)' : '');
+      if (staleDisabled) {
+        els.epBreakdownStale.textContent = 'Disabled';
+      } else if (staleActive && stalePending > 0) {
+        els.epBreakdownStale.innerHTML = `<span style="color:var(--warn);">${fmtTGBT(ep.tgbt.stale)} TGBT ⏳ pending</span>`;
+      } else if (staleActive && staleSubmitted) {
+        els.epBreakdownStale.textContent = `${fmtTGBT(ep.tgbt.stale)} TGBT ✓`;
+      } else if (staleActive) {
+        els.epBreakdownStale.textContent = `${fmtTGBT(ep.tgbt.stale)} TGBT (est)`;
+      } else {
+        els.epBreakdownStale.textContent = '0.000 TGBT (scanning)';
+      }
+      if (!staleDisabled && stalePending > 0 && ep.tgbt.stale > 0) {
+        els.epBreakdownTotal.textContent = `${fmtTGBT(ep.tgbt.pow)} TGBT minted + ${fmtTGBT(ep.tgbt.stale)} pending`;
+      } else {
+        els.epBreakdownTotal.textContent = `${fmtTGBT(ep.tgbt.total)} TGBT` + (ep.tgbt.stale > 0 ? ' (PoW + Stale)' : ep.tgbt.pow > 0 ? ' (PoW)' : '');
+      }
 
       // ── Stale block log ──
       if (ep.stale.blocks.length > 0) {
+        const logPending = stalePending > 0;
         els.epStaleLog.innerHTML = ep.stale.blocks.map(b => `
           <div class="stale-block-entry">
             <div>
@@ -3842,7 +4194,9 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
             </div>
             <div style="display:flex;gap:10px;align-items:center;">
               <span class="sb-meta">${b.age < 60 ? b.age + 's ago' : Math.floor(b.age / 60) + 'm ago'}</span>
-              <span style="color:var(--muted);font-weight:600;font-size:12px;">+${b.reward} TGBT (pending)</span>
+              ${logPending
+                ? `<span style="color:var(--warn);font-weight:600;font-size:12px;">⏳ ${b.reward} TGBT (pending)</span>`
+                : `<span style="color:var(--gold);font-weight:600;font-size:12px;">+${b.reward} TGBT</span>`}
             </div>
           </div>
         `).join('');
@@ -3859,7 +4213,9 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
 
     // ── Stale Mining Toggle ──────────────────────────────────
     const STALE_MINING_KEY = 'tgbt-stale-mining-enabled';
-    let staleMiningEnabled = localStorage.getItem(STALE_MINING_KEY) === 'true';
+    // Default to TRUE — the miner config has stale_block.enabled:true.
+    // Only respect localStorage if user has explicitly toggled it off.
+    let staleMiningEnabled = localStorage.getItem(STALE_MINING_KEY) !== 'false';
 
     function syncStaleToggleUI() {
       const headerToggle = els.staleMiningToggle;
@@ -4565,6 +4921,8 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
 
     els.solPrev.addEventListener('click', () => { if (solState.page > 0) { solState.page--; loadSolutions(); } });
     els.solNext.addEventListener('click', () => { solState.page++; loadSolutions(); });
+    els.refreshStaleDevProof.addEventListener('click', () => loadStaleDeveloperProof(true));
+    els.copyStaleDevProof.addEventListener('click', () => copyText(JSON.stringify(state.staleDeveloperProof || {}, null, 2), 'Stale developer JSON'));
 
     async function loadSolutions() {
       try {
@@ -4581,7 +4939,8 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
         solState.total = stats.total || 0;
 
           const scopeLabel = solState.scope === 'session' ? 'current session' : 'all history';
-          els.solStatus.textContent = `${stats.accepted || 0} accepted, ${stats.rejected || 0} failed submits — ${stats.total || 0} total stored (${scopeLabel})`;
+          const staleLabel = stats.stale ? `, ${stats.stale} stale` : '';
+          els.solStatus.textContent = `${stats.accepted || 0} accepted${staleLabel}, ${stats.rejected || 0} failed submits — ${stats.total || 0} total stored (${scopeLabel})`;
 
         els.solPrev.disabled = solState.page === 0;
         els.solNext.disabled = solutions.length < solState.pageSize;
@@ -4592,27 +4951,41 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
         }
 
         els.solBody.innerHTML = solutions.map((s, i) => {
-          const num = s.solutionNumber || s.id || (skip + i + 1);
+          const isStale = s.type === 'stale';
+          const num = isStale ? '🔗' : (s.solutionNumber || s.id || (skip + i + 1));
           const time = new Date(s.timestamp || s.createdAt).toLocaleString();
-          const badge = s.accepted
-            ? '<span class="sol-badge ok">Accepted</span>'
-            : '<span class="sol-badge fail">Failed submit</span>';
-          const nonce = s.nonce != null ? s.nonce.toLocaleString() : '—';
-          const reward = s.accepted ? `<span style="color:var(--gold);">${fmtTGBT(s.reward)} TGBT${s.estimated ? ' (est)' : ''}</span>` : '—';
-          const hr = (s.hashrate || (s.totalHashes > 0 && s.uptime > 0 ? s.totalHashes / s.uptime : 0)) > 0
-            ? `${fmtNum(s.hashrate || s.totalHashes / s.uptime)} H/s` : '—';
-          const phase = s.phase || '—';
-            const outputHash = s.outputHash || s.hash || null;
+          const badge = isStale
+            ? '<span class="sol-badge stale">Stale Block</span>'
+            : (s.accepted
+              ? '<span class="sol-badge ok">Accepted</span>'
+              : '<span class="sol-badge fail">Failed submit</span>');
+          const nonce = isStale
+            ? (s.bitcoinTipHeight ? `BTC #${fmtNum(s.bitcoinTipHeight)}` : '—')
+            : (s.nonce != null ? s.nonce.toLocaleString() : '—');
+          const stalePendingSol = (entropyState && entropyState.stale) ? (entropyState.stale.pendingProofs || 0) : 0;
+          const reward = isStale
+            ? `<span style="color:${stalePendingSol > 0 ? 'var(--warn)' : 'var(--gold)'};">${fmtTGBT(s.reward)} TGBT${stalePendingSol > 0 ? ' ⏳' : ''}${s.estimated ? ' (est)' : ''}</span>`
+            : (s.accepted ? `<span style="color:var(--gold);">${fmtTGBT(s.reward)} TGBT${s.estimated ? ' (est)' : ''}</span>` : '—');
+          const hr = isStale
+            ? (s.staleZeroBits ? `${s.staleZeroBits} zero bits` : '—')
+            : ((s.hashrate || (s.totalHashes > 0 && s.uptime > 0 ? s.totalHashes / s.uptime : 0)) > 0
+              ? `${fmtNum(s.hashrate || s.totalHashes / s.uptime)} H/s` : '—');
+          const phase = isStale
+            ? `<span style="color:var(--gold);">orphan harvest</span>`
+            : (s.phase || '—');
+          const outputHash = s.outputHash || s.hash || null;
           const qualityHash = outputHash || s.commitHash || s.hash || null;
-          const quality = hashQualityScore(qualityHash);
-          const hash = s.accepted
-            ? [
-                s.commitHash ? `<div title="${s.commitHash}"><span style="color:var(--muted);">commit:</span> ${s.commitHash.slice(0, 16)}…</div>` : '',
-                  outputHash ? `<div title="${outputHash}"><span style="color:var(--muted);">output:</span> ${outputHash.slice(0, 16)}…</div>` : '',
-                (!s.commitHash && s.hash) ? `<div title="${s.hash}">${s.hash.slice(0, 16)}…</div>` : ''
-              ].filter(Boolean).join('')
-            : (s.hash ? s.hash.slice(0, 16) + '…' : '—');
-          return `<tr>
+          const quality = isStale ? (s.staleQuality || 0) : hashQualityScore(qualityHash);
+          const hash = isStale
+            ? (s.hash ? `<div title="${s.hash}"><span style="color:var(--gold);">XOR pool:</span> ${s.hash.slice(0, 16)}…</div>` + (s.staleForkDepth != null ? `<div style="font-size:10px;color:var(--muted);">depth ${s.staleForkDepth} • quality ${s.staleQuality}/100</div>` : '') : '—')
+            : (s.accepted
+              ? [
+                  s.commitHash ? `<div title="${s.commitHash}"><span style="color:var(--muted);">commit:</span> ${s.commitHash.slice(0, 16)}…</div>` : '',
+                    outputHash ? `<div title="${outputHash}"><span style="color:var(--muted);">output:</span> ${outputHash.slice(0, 16)}…</div>` : '',
+                  (!s.commitHash && s.hash) ? `<div title="${s.hash}">${s.hash.slice(0, 16)}…</div>` : ''
+                ].filter(Boolean).join('')
+              : (s.hash ? s.hash.slice(0, 16) + '…' : '—'));
+          return `<tr${isStale ? ' class="stale-row"' : ''}>
             <td>${num}</td>
             <td>${time}</td>
             <td>${badge}</td>
@@ -4629,9 +5002,29 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
       }
     }
 
+    async function loadStaleDeveloperProof(showNotice = false) {
+      try {
+        const res = await fetch('/api/stale/developer-proof');
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to load stale developer proof');
+        state.staleDeveloperProof = data;
+        if (els.staleDevProofJson) {
+          els.staleDevProofJson.textContent = JSON.stringify(data, null, 2);
+        }
+        if (showNotice) showToast('Stale developer JSON refreshed.');
+      } catch (err) {
+        if (els.staleDevProofJson) {
+          els.staleDevProofJson.textContent = JSON.stringify({ error: err.message }, null, 2);
+        }
+        if (showNotice) showToast(`Stale JSON refresh failed: ${err.message}`, true);
+      }
+    }
+
     // Poll solutions every 10s (live updates)
     loadSolutions();
+    loadStaleDeveloperProof();
     setInterval(loadSolutions, 10000);
+    setInterval(loadStaleDeveloperProof, 10000);
 
     Promise.allSettled([
       loadSecurity(),

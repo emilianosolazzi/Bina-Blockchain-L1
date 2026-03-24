@@ -69,3 +69,6 @@ l2-mining/rust/miner-run.log.err
 # Temporary files
 *.tmp
 *.temp
+
+# Copilot instructions (machine-specific project knowledge)
+.github/copilot-instructions.md

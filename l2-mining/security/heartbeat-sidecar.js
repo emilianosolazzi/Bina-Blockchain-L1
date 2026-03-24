@@ -329,8 +329,20 @@ function evaluateSnapshots(snapshots, fileSize) {
   const waitingPhases = ['waiting_for_clearance', 'commitment_locked', 'committing', 'revealing'];
   const isWaitingPhase = currentPhase && waitingPhases.includes(currentPhase);
 
+  // Operator paused mining via dashboard — intentional idle, not an anomaly
+  const isPaused = latest.mining_paused === true;
+
+  // Stale-block / UTXO entropy sources can keep the miner "alive" even at 0 PoW hashrate.
+  // If stale_block_count increased in the last N snapshots, the miner is doing useful work.
+  const recentStale = snapshots.slice(-HASHRATE_BASELINE_SAMPLES).map(s => Number(s.stale_block_count || 0));
+  const staleGrowing = recentStale.length >= 2 && recentStale[recentStale.length - 1] > recentStale[0];
+  const isEntropyActive = staleGrowing;
+
+  // Combined: suppress hashrate/gap alerts when any of these is true
+  const suppressHashrateAlerts = isWaitingPhase || isPaused || isEntropyActive;
+
   if (solutionGapMs != null && solutionGapMs > derivedGapMs) {
-    if (!isWaitingPhase) {
+    if (!suppressHashrateAlerts) {
       candidateAlerts.push({
         type: 'heartbeat_gap',
         severity: solutionGapMs > derivedGapMs * 2 ? 'critical' : 'high',
@@ -346,8 +358,8 @@ function evaluateSnapshots(snapshots, fileSize) {
   }
 
   if (hashrateRatio != null && baselineHashrateHs > 0 && hashrateRatio < HASHRATE_DROP_RATIO) {
-    // 0 H/s during waiting phases is normal — miner is idle between commit-reveal rounds
-    if (!isWaitingPhase) {
+    // 0 H/s during waiting/paused/entropy-active phases is expected — not anomalous
+    if (!suppressHashrateAlerts) {
       candidateAlerts.push({
         type: 'hashrate_drop',
         severity: hashrateRatio < HASHRATE_DROP_RATIO / 2 ? 'high' : 'medium',

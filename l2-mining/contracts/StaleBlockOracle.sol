@@ -299,14 +299,24 @@ contract StaleBlockOracle is ModuleBase, IStaleBlockOracle {
     }
 
     /**
-     * @dev Count leading zero bits of a bytes32 value.
-     *      Bitcoin convention: the "leading zeros" of a block hash refer to
-     *      the number of zero bits from the most significant bit downward.
-     *      In Solidity, bytes32 is big-endian, so we scan from byte 0.
+     * @dev Count leading zero bits of a Bitcoin block hash (bytes32).
+     *
+     *      Bitcoin convention: SHA-256 output is big-endian, but Bitcoin
+     *      interprets the hash as a little-endian 256-bit number for PoW.
+     *      The "leading zeros" in Bitcoin refer to the most-significant bits
+     *      of this LE number, which live in the LAST bytes of the bytes32.
+     *
+     *      Example: a block hash displayed as 0000000000000000000259...
+     *      has 80+ "leading zeros".  In the raw SHA-256 output (and
+     *      Solidity bytes32), those zero bytes sit at indices [31], [30],
+     *      [29], … — i.e. the END of the array.
+     *
+     *      We therefore scan from byte[31] toward byte[0].
      */
     function _countLeadingZeroBits(bytes32 hash) internal pure returns (uint32) {
         uint32 count = 0;
-        for (uint256 i = 0; i < 32;) {
+        for (uint256 i = 32; i > 0;) {
+            unchecked { --i; }
             uint8 b = uint8(hash[i]);
             if (b == 0) {
                 count += 8;
@@ -321,7 +331,6 @@ contract StaleBlockOracle is ModuleBase, IStaleBlockOracle {
                 if (b < 0x80) { count++; } // 7th zero → b was 0x01
                 return count;
             }
-            unchecked { ++i; }
         }
         return count; // All zeros → 256
     }

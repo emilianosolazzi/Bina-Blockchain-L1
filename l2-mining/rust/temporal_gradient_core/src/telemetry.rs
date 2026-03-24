@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::sync::MutexGuard;
 
@@ -73,6 +74,12 @@ pub struct TelemetrySnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phase_eta_seconds: Option<u64>,
 
+    // ── Mining control state ──
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mining_paused: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mining_power_pct: Option<u8>,
+
     // ── Stale block mining telemetry ──
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stale_block_count: Option<u64>,
@@ -88,6 +95,20 @@ pub struct TelemetrySnapshot {
     pub bitcoin_tip_height: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stale_pending_proofs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_proof_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_raw_header_hex: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_block_hash_hex: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_canonical_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_entropy_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_submitter: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_created_at: Option<u64>,
 }
 
 // ---------- Stale block telemetry shared state ----------
@@ -103,6 +124,13 @@ pub struct StaleBlockTelemetryState {
     pub cumulative_xor_hex: String,
     pub bitcoin_tip_height: u64,
     pub pending_proofs: u64,
+    pub latest_proof_id: Option<String>,
+    pub latest_raw_header_hex: Option<String>,
+    pub latest_block_hash_hex: Option<String>,
+    pub latest_canonical_hash_hex: Option<String>,
+    pub latest_entropy_digest_hex: Option<String>,
+    pub latest_submitter: Option<String>,
+    pub latest_created_at: Option<u64>,
 }
 
 /// Thread-safe handle for sharing stale block telemetry between the stale
@@ -210,5 +238,80 @@ impl PhaseTracker {
 impl Default for PhaseTracker {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ---------- Mining control (pause / power throttle) ----------
+
+/// External mining control state, read from a JSON file written by the dashboard.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MiningControl {
+    #[serde(default)]
+    pub paused: bool,
+    /// Mining power percentage: 25, 50, 75, or 100. Clamped to these values.
+    #[serde(default = "default_power_pct")]
+    pub power_pct: u8,
+    /// One-shot trigger: request an immediate stale-proof submission attempt.
+    #[serde(default)]
+    pub submit_stale_now: bool,
+}
+
+fn default_power_pct() -> u8 { 100 }
+
+impl Default for MiningControl {
+    fn default() -> Self {
+        Self { paused: false, power_pct: 100, submit_stale_now: false }
+    }
+}
+
+impl MiningControl {
+    /// Clamp power_pct to nearest valid tier (25/50/75/100).
+    pub fn normalized_power_pct(&self) -> u8 {
+        match self.power_pct {
+            0..=37 => 25,
+            38..=62 => 50,
+            63..=87 => 75,
+            _ => 100,
+        }
+    }
+
+    /// Effective worker count for a given max thread count.
+    pub fn effective_workers(&self, max_threads: usize) -> usize {
+        let pct = self.normalized_power_pct() as usize;
+        (max_threads * pct / 100).max(1)
+    }
+
+    /// Read control file. Returns default if file doesn't exist or is invalid.
+    pub fn read_from_file(path: &Path) -> Self {
+        match std::fs::read_to_string(path) {
+            Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+            Err(_) => Self::default(),
+        }
+    }
+
+    /// Write control file.
+    pub fn write_to_file(&self, path: &Path) -> std::io::Result<()> {
+        let content = serde_json::to_string_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, content)
+    }
+
+    /// Standard control file path next to the telemetry file.
+    pub fn control_file_path(telemetry_path: &Path) -> PathBuf {
+        telemetry_path.with_file_name("miner-control.json")
+    }
+
+    /// Consume the one-shot stale submit trigger, resetting it to `false`.
+    pub fn take_submit_stale_now(path: &Path) -> bool {
+        let mut control = Self::read_from_file(path);
+        if !control.submit_stale_now {
+            return false;
+        }
+        control.submit_stale_now = false;
+        let _ = control.write_to_file(path);
+        true
     }
 }

@@ -7,7 +7,7 @@ use crate::crypto::{
 };
 use crate::memory::SecureBuffer;
 use crate::seed::{decode_temporal_seed_timestamp, generate_temporal_seed};
-use crate::telemetry::{MinerState, MiningPhase, PhaseTracker, StaleBlockTelemetry, TelemetrySnapshot};
+use crate::telemetry::{MinerState, MiningControl, MiningPhase, PhaseTracker, StaleBlockTelemetry, TelemetrySnapshot};
 use crate::tg_output_filter::{MemoryBackend, Ready, SledBackend, TgOutputFilter};
 use anyhow::{anyhow, Result};
 use ethers::signers::LocalWallet;
@@ -252,11 +252,12 @@ async fn run_runtime(
         let sb_cfg = config.stale_block.as_ref().unwrap().to_miner_config();
         let sb_shutdown = shutdown.clone();
         let sb_telemetry = stale_telemetry.clone().unwrap();
+        let sb_control_file = config.control_file_path().ok();
         info!(
             "Stale-block mining enabled — WebSocket stream primary, {}s fallback poll | {}",
             sb_cfg.poll_interval_secs, sb_cfg.bitcoin_api_url
         );
-        Some(tokio::spawn(run_stale_block_loop(sb_cfg, live_client.clone(), sb_shutdown, sb_telemetry)))
+        Some(tokio::spawn(run_stale_block_loop(sb_cfg, live_client.clone(), sb_shutdown, sb_telemetry, sb_control_file)))
     } else {
         debug!("Stale-block mining disabled (not configured or enabled: false)");
         None
@@ -428,6 +429,10 @@ async fn run_live_runtime(
     let mut retry_count = 0usize;
     let mut nonce_cursor = 0u64;
 
+    // ── Control file for pause / power throttle ──────────────
+    let control_file_path = config.control_file_path().ok();
+    let mut last_control = MiningControl::default();
+
     // ── Resume a saved commitment from a previous run ──────────────
     let _ = try_resume_pending_commitment(
         &live_client,
@@ -440,6 +445,21 @@ async fn run_live_runtime(
     .await?;
 
     while !shutdown.is_cancelled() {
+        // ── Read mining control (pause / power) from sideband file ───────
+        if let Some(ref ctrl_path) = control_file_path {
+            last_control = MiningControl::read_from_file(ctrl_path);
+        }
+
+        // ── Pause gate: sleep in a tight loop while paused ────────────
+        if last_control.paused {
+            if phase_tracker.get().phase != Some(MiningPhase::Searching) {
+                phase_tracker.set(MiningPhase::Searching, None); // mark as idle
+            }
+            tracing::debug!("Mining paused by operator — sleeping 2s");
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            continue;
+        }
+
         // ── Pre-check: read on-chain commitment state and handle intelligently ──
         match live_client.get_onchain_commitment().await {
             Ok(Some(commitment)) if !commitment.expired => {
@@ -552,6 +572,7 @@ async fn run_live_runtime(
             &hashrate_window,
             &mut nonce_cursor,
             started_at,
+            last_control.effective_workers(config.threads.max(1)),
         ).await? {
             phase_tracker.set(MiningPhase::SolutionFound, None);
 
@@ -743,6 +764,7 @@ async fn attempt_live_solution(
     hashrate_window: &Arc<StdMutex<HashrateWindow>>,
     nonce_cursor: &mut u64,
     started_at: Instant,
+    effective_workers: usize,
 ) -> Result<Option<LiveSubmission>> {
     let miner_address = live_client.miner_address();
     let miner_address_bytes: [u8; 20] = miner_address.0;
@@ -750,7 +772,7 @@ async fn attempt_live_solution(
     let solution_found = Arc::new(AtomicBool::new(false));
     let base_nonce = *nonce_cursor;
     let batch_size = config.batch_size.max(1);
-    let worker_count = config.threads.max(1);
+    let worker_count = effective_workers.max(1);
     let signer = live_client.signer_clone();
 
     let mut tasks = Vec::with_capacity(worker_count);
@@ -1125,6 +1147,8 @@ fn snapshot_from_guard(
         mining_phase: None,
         phase_blocks_remaining: None,
         phase_eta_seconds: None,
+        mining_paused: None,
+        mining_power_pct: None,
         stale_block_count: None,
         stale_fork_depth: None,
         stale_zero_bits: None,
@@ -1132,6 +1156,13 @@ fn snapshot_from_guard(
         stale_xor_hex: None,
         bitcoin_tip_height: None,
         stale_pending_proofs: None,
+        stale_proof_id: None,
+        stale_raw_header_hex: None,
+        stale_block_hash_hex: None,
+        stale_canonical_hash: None,
+        stale_entropy_digest: None,
+        stale_submitter: None,
+        stale_created_at: None,
     }
 }
 
@@ -1160,6 +1191,13 @@ async fn snapshot_with_phase(
     snapshot.phase_blocks_remaining = ps.blocks_remaining;
     snapshot.phase_eta_seconds = ps.eta_seconds;
 
+    // Merge mining control state (pause / power)
+    if let Ok(ctrl_path) = config.control_file_path() {
+        let mc = MiningControl::read_from_file(&ctrl_path);
+        snapshot.mining_paused = Some(mc.paused);
+        snapshot.mining_power_pct = Some(mc.normalized_power_pct());
+    }
+
     // Merge stale block telemetry if available
     if let Some(st) = stale_telemetry {
         let sb = st.get();
@@ -1170,6 +1208,13 @@ async fn snapshot_with_phase(
         snapshot.stale_xor_hex = if sb.cumulative_xor_hex.is_empty() { None } else { Some(sb.cumulative_xor_hex) };
         snapshot.bitcoin_tip_height = if sb.bitcoin_tip_height > 0 { Some(sb.bitcoin_tip_height) } else { None };
         snapshot.stale_pending_proofs = Some(sb.pending_proofs);
+        snapshot.stale_proof_id = sb.latest_proof_id.clone();
+        snapshot.stale_raw_header_hex = sb.latest_raw_header_hex.clone();
+        snapshot.stale_block_hash_hex = sb.latest_block_hash_hex.clone();
+        snapshot.stale_canonical_hash = sb.latest_canonical_hash_hex.clone();
+        snapshot.stale_entropy_digest = sb.latest_entropy_digest_hex.clone();
+        snapshot.stale_submitter = sb.latest_submitter.clone();
+        snapshot.stale_created_at = sb.latest_created_at;
     }
 
     snapshot
@@ -1363,6 +1408,7 @@ async fn run_stale_block_loop(
     live_client: Option<LiveMiningClient>,
     shutdown: CancellationToken,
     stale_telemetry: StaleBlockTelemetry,
+    control_file_path: Option<PathBuf>,
 ) {
     use crate::stale_block_miner::{StaleBlockMiner, MempoolStats};
 
@@ -1408,6 +1454,7 @@ async fn run_stale_block_loop(
                     &mut latest_mempool,
                     &shutdown,
                     &stale_telemetry,
+                    control_file_path.as_deref(),
                 ).await;
                 // If we get here, the WS dropped. Fall through to reconnect.
                 if shutdown.is_cancelled() {
@@ -1435,6 +1482,7 @@ async fn run_stale_block_loop(
                     &mut latest_mempool,
                     &shutdown,
                     &stale_telemetry,
+                    control_file_path.as_deref(),
                 ).await;
                 if shutdown.is_cancelled() {
                     break;
@@ -1526,6 +1574,7 @@ async fn run_ws_event_loop(
     latest_mempool: &mut crate::stale_block_miner::MempoolStats,
     shutdown: &CancellationToken,
     stale_telemetry: &StaleBlockTelemetry,
+    control_file_path: Option<&Path>,
 ) {
     use tokio_tungstenite::tungstenite::Message;
 
@@ -1544,6 +1593,12 @@ async fn run_ws_event_loop(
     // Also set up a keepalive ping every 30s to prevent idle disconnects
     let mut keepalive = time::interval(Duration::from_secs(30));
     keepalive.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+
+    // Retry pending stale proofs periodically, even if no new stale block was harvested.
+    let mut retry_tick = time::interval(Duration::from_secs(45));
+    retry_tick.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+    let mut manual_tick = time::interval(Duration::from_secs(3));
+    manual_tick.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
 
     // Periodic harvest poll — NativeBTC WS has no block push events, so we
     // must poll /v1/chain/tips ourselves to discover orphan/stale blocks.
@@ -1564,6 +1619,25 @@ async fn run_ws_event_loop(
                 if let Err(err) = ws_tx.send(Message::Ping(vec![0x54, 0x47])).await {
                     warn!("Stale-block WS: keepalive ping failed: {err}");
                     break; // Let reconnect logic handle it
+                }
+            }
+            _ = manual_tick.tick() => {
+                let manual = control_file_path
+                    .map(MiningControl::take_submit_stale_now)
+                    .unwrap_or(false);
+                if manual {
+                    info!("Stale-block: manual submit requested from dashboard");
+                    submit_pending_proofs(miner, live_client, config, true).await;
+                    submit_pending_fork_events(miner, live_client, config).await;
+                    update_stale_telemetry(stale_telemetry, miner);
+                }
+            }
+            _ = retry_tick.tick() => {
+                if miner.pending_count() > 0 {
+                    debug!("Stale-block: periodic retry tick for pending proofs");
+                    submit_pending_proofs(miner, live_client, config, false).await;
+                    submit_pending_fork_events(miner, live_client, config).await;
+                    update_stale_telemetry(stale_telemetry, miner);
                 }
             }
             _ = harvest_poll.tick() => {
@@ -1593,7 +1667,8 @@ async fn run_ws_event_loop(
                                 }
                                 Err(err) => warn!("Stale-block WS+poll: harvest failed: {err:#}"),
                             }
-                            submit_pending_proofs(miner, live_client, config).await;
+                            submit_pending_proofs(miner, live_client, config, false).await;
+                            submit_pending_fork_events(miner, live_client, config).await;
                             update_stale_telemetry(stale_telemetry, miner);
                         } else {
                             debug!("Stale-block: tip unchanged at {h}");
@@ -1683,7 +1758,8 @@ async fn handle_ws_message(
                 }
                 Err(err) => warn!("Stale-block WS: harvest failed: {err:#}"),
             }
-            submit_pending_proofs(miner, live_client, config).await;
+            submit_pending_proofs(miner, live_client, config, false).await;
+            submit_pending_fork_events(miner, live_client, config).await;
             update_stale_telemetry(stale_telemetry, miner);
         }
 
@@ -1857,9 +1933,14 @@ async fn run_http_fallback_loop(
     latest_mempool: &mut crate::stale_block_miner::MempoolStats,
     shutdown: &CancellationToken,
     stale_telemetry: &StaleBlockTelemetry,
+    control_file_path: Option<&Path>,
 ) {
     let mut poll = time::interval(Duration::from_secs(config.poll_interval_secs));
     poll.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+    let mut retry_tick = time::interval(Duration::from_secs(45));
+    retry_tick.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+    let mut manual_tick = time::interval(Duration::from_secs(3));
+    manual_tick.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
     let mut last_known_height: u64 = 0;
     let mut consecutive_failures = 0u32;
 
@@ -1870,6 +1951,25 @@ async fn run_http_fallback_loop(
             _ = shutdown.cancelled() => {
                 info!("Stale-block: HTTP fallback loop shutting down");
                 break;
+            }
+            _ = manual_tick.tick() => {
+                let manual = control_file_path
+                    .map(MiningControl::take_submit_stale_now)
+                    .unwrap_or(false);
+                if manual {
+                    info!("Stale-block: manual submit requested from dashboard (HTTP fallback)");
+                    submit_pending_proofs(miner, live_client, config, true).await;
+                    submit_pending_fork_events(miner, live_client, config).await;
+                    update_stale_telemetry(stale_telemetry, miner);
+                }
+            }
+            _ = retry_tick.tick() => {
+                if miner.pending_count() > 0 {
+                    debug!("Stale-block: periodic retry tick for pending proofs (HTTP fallback)");
+                    submit_pending_proofs(miner, live_client, config, false).await;
+                    submit_pending_fork_events(miner, live_client, config).await;
+                    update_stale_telemetry(stale_telemetry, miner);
+                }
             }
             _ = poll.tick() => {
                 // Step 1: Lightweight tip height check
@@ -1915,7 +2015,8 @@ async fn run_http_fallback_loop(
                     }
                     Err(err) => warn!("Stale-block (HTTP): harvest failed: {err:#}"),
                 }
-                submit_pending_proofs(miner, live_client, config).await;
+                submit_pending_proofs(miner, live_client, config, false).await;
+                submit_pending_fork_events(miner, live_client, config).await;
                 update_stale_telemetry(stale_telemetry, miner);
             }
         }
@@ -1929,13 +2030,14 @@ async fn submit_pending_proofs(
     miner: &mut crate::stale_block_miner::StaleBlockMiner,
     live_client: &Option<LiveMiningClient>,
     config: &crate::stale_block_miner::StaleBlockMinerConfig,
+    force_submit: bool,
 ) {
     let pending = miner.drain_pending_proofs();
     if pending.is_empty() {
         return;
     }
 
-    if config.auto_submit {
+    if config.auto_submit || force_submit {
         if let Some(live_client) = live_client {
             let mut retry = Vec::new();
             for proof in pending {
@@ -1945,15 +2047,32 @@ async fn submit_pending_proofs(
                     }
                     Err(err) => {
                         let err_str = format!("{err:#}");
-                        // Permanent failures — do NOT requeue
-                        if err_str.contains("reverted")
-                            || err_str.contains("STALE_BLOCK_MODULE")
+                        // Distinguish empty revert data (RPC stripped the error)
+                        // from non-empty revert data (deterministic contract rejection).
+                        //
+                        // Empty:     "data: 0x"        → transient (RPC proxy bug)
+                        // Non-empty: "data: 0x89e71cb0..." → permanent (real error selector)
+                        let has_empty_revert_data = if let Some(pos) = err_str.find("data: 0x") {
+                            let after = &err_str[pos + 8..]; // past "data: 0x"
+                            after.is_empty() || !after.starts_with(|c: char| c.is_ascii_hexdigit())
+                        } else {
+                            false
+                        };
+
+                        // Truly permanent failures — do NOT requeue
+                        // (contract-level logic rejections with specific error data)
+                        let is_permanent = (err_str.contains("STALE_BLOCK_MODULE")
                             || err_str.contains("address(0)")
                             || err_str.contains("module not registered")
-                        {
+                            || err_str.contains("Pre-flight rejected"))
+                            // Only empty revert data is transient (RPC stripped the info).
+                            // Non-empty revert data means the contract gave a real error.
+                            && !has_empty_revert_data;
+
+                        if is_permanent {
                             warn!(
                                 proof_id = %proof.proof_id,
-                                "Stale-block: proof dropped (permanent on-chain failure, StaleBlockModule likely not deployed): {}",
+                                "Stale-block: proof dropped (permanent on-chain rejection): {}",
                                 err_str.chars().take(200).collect::<String>(),
                             );
                         } else {
@@ -1977,6 +2096,68 @@ async fn submit_pending_proofs(
     }
 }
 
+/// Drain pending fork events and submit them on-chain (or requeue on transient failure).
+/// Permanent errors (e.g. OnlyCoreOrModule revert) → drop event, don't requeue.
+#[cfg(feature = "stale-mining")]
+async fn submit_pending_fork_events(
+    miner: &mut crate::stale_block_miner::StaleBlockMiner,
+    live_client: &Option<LiveMiningClient>,
+    config: &crate::stale_block_miner::StaleBlockMinerConfig,
+) {
+    let events = miner.drain_pending_fork_events();
+    if events.is_empty() {
+        return;
+    }
+
+    if config.auto_submit {
+        if let Some(live_client) = live_client {
+            let mut retry = Vec::new();
+            for event in events {
+                match live_client.record_fork_event_onchain(&event).await {
+                    Ok(_) => {
+                        info!(
+                            height = event.fork_height,
+                            reorg_depth = event.reorg_depth,
+                            losers = event.loser_hashes.len(),
+                            "Fork event submitted on-chain"
+                        );
+                    }
+                    Err(err) => {
+                        let err_str = format!("{err:#}");
+                        // Permanent failures — do NOT requeue
+                        if err_str.contains("reverted")
+                            || err_str.contains("OnlyCoreOrModule")
+                            || err_str.contains("STALE_BLOCK_MODULE")
+                            || err_str.contains("address(0)")
+                        {
+                            warn!(
+                                height = event.fork_height,
+                                "Fork event dropped (permanent on-chain failure — is hot wallet registered as module?): {}",
+                                err_str.chars().take(200).collect::<String>(),
+                            );
+                        } else {
+                            warn!(
+                                height = event.fork_height,
+                                "Fork event: transient submit failure, will retry: {err:#}"
+                            );
+                            retry.push(event);
+                        }
+                    }
+                }
+            }
+            if !retry.is_empty() {
+                warn!("Fork events: requeued {} event(s) after transient failures", retry.len());
+                miner.requeue_fork_events(retry);
+            }
+        } else {
+            miner.requeue_fork_events(events);
+        }
+    } else {
+        info!("Fork events: queued {} event(s) for manual submission", events.len());
+        miner.requeue_fork_events(events);
+    }
+}
+
 /// Sync shared telemetry state from the stale block miner's internal stats.
 #[cfg(feature = "stale-mining")]
 fn update_stale_telemetry(
@@ -1985,14 +2166,30 @@ fn update_stale_telemetry(
 ) {
     use crate::telemetry::StaleBlockTelemetryState;
     let stats = miner.stats();
+    let latest_pending = miner.latest_pending_proof();
     telem.update(StaleBlockTelemetryState {
         stale_block_count: stats.total_stale_blocks as u64,
         max_fork_depth: stats.max_reorg_depth,
-        max_leading_zeros: 0, // per-proof; overall max not in LoserChainStats
+        max_leading_zeros: stats.max_leading_zeros,
         average_quality: stats.average_quality_score,
         cumulative_xor_hex: stats.cumulative_entropy_hex.clone(),
         bitcoin_tip_height: 0, // tip height managed by set_tip_height()
         pending_proofs: miner.pending_count() as u64,
+        latest_proof_id: latest_pending.as_ref().map(|p| p.proof_id.clone()),
+        latest_raw_header_hex: latest_pending.as_ref().map(|p| hex::encode(&p.raw_header)),
+        latest_block_hash_hex: latest_pending.as_ref().map(|p| {
+            let mut reversed = p.block_hash;
+            reversed.reverse();
+            hex::encode(reversed)
+        }),
+        latest_canonical_hash_hex: latest_pending.as_ref().map(|p| {
+            let mut reversed = p.canonical_hash;
+            reversed.reverse();
+            hex::encode(reversed)
+        }),
+        latest_entropy_digest_hex: latest_pending.as_ref().map(|p| hex::encode(p.entropy)),
+        latest_submitter: latest_pending.as_ref().map(|p| p.submitter.clone()),
+        latest_created_at: latest_pending.as_ref().map(|p| p.created_at),
     });
 }
 

@@ -93,6 +93,8 @@ abigen!(
         function claimReward(bytes32 blockHash) external
         function pendingReward(bytes32 blockHash) external view returns (uint256)
         function isSubmitted(bytes32 blockHash) external view returns (bool)
+        function recordForkEvent(uint64 forkHeight, bytes32 winnerHash, bytes32[] loserHashes, uint32 reorgDepth) external
+        function forkEventsAtHeight(uint64 height) external view returns (uint256)
     ]"#
 );
 
@@ -190,6 +192,33 @@ impl LiveMiningClient {
                 proof.canonical_hash,
                 proof.reorg_depth,
             );
+
+            // Pre-flight eth_call to get detailed revert data (some RPCs strip it
+            // from eth_estimateGas, returning data: 0x instead of the custom error).
+            if let Err(preflight_err) = submit_call.call().await {
+                let err_str = format!("{preflight_err:#}");
+                tracing::warn!(
+                    proof_id = %proof.proof_id,
+                    lz = proof.leading_zeros,
+                    depth = proof.reorg_depth,
+                    height = proof.height,
+                    header_len = proof.raw_header.len(),
+                    "Stale proof pre-flight failed: {err_str}"
+                );
+                return Err(anyhow!("Pre-flight rejected stale proof {}: {err_str}", proof.proof_id));
+            }
+
+            // Set explicit gas limit (500k) to bypass eth_estimateGas which can
+            // fail with empty revert data on some RPC endpoints (e.g. NativeBTC).
+            // Use the same low-cost legacy gas mode as commit/reveal on Arbitrum;
+            // leaving this as the default transaction type can cause the signer
+            // to pick an inflated fee model and reject with insufficient funds
+            // even when the wallet has enough for the actual network gas price.
+            let submit_call = submit_call.gas(500_000u64);
+            let submit_call = submit_call
+                .legacy()
+                .gas_price(self.legacy_gas_price().await?);
+
             let pending_tx = submit_call
                 .send()
                 .await
@@ -217,7 +246,13 @@ impl LiveMiningClient {
             .with_context(|| format!("Failed to query pending stale reward for {}", proof.proof_id))?;
 
         if pending_reward > U256::zero() {
-            let claim_call = oracle.claim_reward(proof.block_hash);
+            // Explicit gas limit for claim too, and force legacy gas pricing to
+            // match the normal mining transaction path on Arbitrum.
+            let claim_call = oracle
+                .claim_reward(proof.block_hash)
+                .legacy()
+                .gas(300_000u64)
+                .gas_price(self.legacy_gas_price().await?);
             let pending_tx = claim_call
                 .send()
                 .await
@@ -235,6 +270,76 @@ impl LiveMiningClient {
                 "Claimed stale block reward"
             );
         }
+
+        Ok(())
+    }
+
+    /// Submit a fork event to the StaleBlockOracle on-chain.
+    /// Requires that msg.sender (our hot wallet) is registered as a module in Core.
+    #[cfg(feature = "stale-mining")]
+    pub async fn record_fork_event_onchain(
+        &self,
+        event: &crate::stale_block_miner::ChainForkEvent,
+    ) -> Result<()> {
+        let stale_oracle = self.stale_block_oracle_address().await?;
+        let oracle_view = StaleBlockOracleContract::new(stale_oracle, Arc::clone(&self.provider));
+        let oracle = StaleBlockOracleContract::new(stale_oracle, Arc::clone(&self.client));
+
+        // Skip if fork events already recorded at this height
+        // (cheap view call to avoid wasting gas on duplicates)
+        let existing_count = oracle_view
+            .fork_events_at_height(event.fork_height)
+            .call()
+            .await
+            .unwrap_or_default();
+
+        if existing_count > U256::zero() {
+            tracing::debug!(
+                height = event.fork_height,
+                existing = %existing_count,
+                "Fork event already recorded at this height, skipping"
+            );
+            return Ok(());
+        }
+
+        let loser_hashes: Vec<[u8; 32]> = event.loser_hashes.clone();
+        let record_call = oracle.record_fork_event(
+            event.fork_height,
+            event.winner_hash,
+            loser_hashes,
+            event.reorg_depth,
+        );
+        let record_call = record_call
+            .legacy()
+            .gas(300_000u64)
+            .gas_price(self.legacy_gas_price().await?);
+
+        let pending_tx = record_call
+            .send()
+            .await
+            .with_context(|| format!(
+                "Failed to submit fork event at height {}",
+                event.fork_height
+            ))?;
+
+        let receipt = pending_tx
+            .await
+            .with_context(|| format!(
+                "Failed while awaiting fork event tx at height {}",
+                event.fork_height
+            ))?
+            .ok_or_else(|| anyhow!(
+                "Fork event submission returned no receipt at height {}",
+                event.fork_height
+            ))?;
+
+        tracing::info!(
+            tx_hash = ?receipt.transaction_hash,
+            height = event.fork_height,
+            reorg_depth = event.reorg_depth,
+            losers = event.loser_hashes.len(),
+            "Recorded fork event on-chain"
+        );
 
         Ok(())
     }

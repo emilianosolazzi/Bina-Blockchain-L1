@@ -48,7 +48,7 @@ pub use storage_verification::{
     SettlementGateDecision, StorageAttestation, StorageChallenge, StorageProof, StorageProtocol,
     VerificationResult, VerificationStats,
 };
-pub use telemetry::{MinerState, MiningPhase, PhaseTracker, TelemetrySnapshot};
+pub use telemetry::{MinerState, MiningControl, MiningPhase, PhaseTracker, TelemetrySnapshot};
 pub use tg_output_filter::{FilterConfig, FilterError, OutputRecord, Ready, TgOutputFilter, Uninitialized};
 pub use tg_relay_transport::{
     relay_connect, relay_connect_pinned, ReliableRelayChannel, RelayChannel, SecureTransport,

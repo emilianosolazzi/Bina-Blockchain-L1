@@ -204,6 +204,12 @@ impl MinerConfig {
         Ok(paths.telemetry_file)
     }
 
+    /// Path to the mining control file (`miner-control.json` next to the
+    /// telemetry file).
+    pub fn control_file_path(&self) -> Result<PathBuf> {
+        Ok(crate::telemetry::MiningControl::control_file_path(&self.telemetry_path()?))
+    }
+
     pub fn save_to_path(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)

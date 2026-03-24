@@ -22,6 +22,56 @@ class FileStore {
 		this._load();
 	}
 
+	_makeFingerprint(doc) {
+		if (!doc) return null;
+		if (doc.type === 'stale') {
+			const staleHash = doc.hash || doc.outputHash || 'no-hash';
+			return `stale:${staleHash}`;
+		}
+		if (doc.accepted) {
+			const nonce = doc.nonce != null ? doc.nonce : 'no-nonce';
+			const out = doc.outputHash || doc.hash || doc.commitHash || 'no-hash';
+			return `accepted:${nonce}:${out}`;
+		}
+		const nonce = doc.nonce != null ? doc.nonce : 'no-nonce';
+		const phase = doc.phase || 'no-phase';
+		const hash = doc.hash || doc.commitHash || doc.outputHash || 'no-hash';
+		return `rejected:${nonce}:${phase}:${hash}`;
+	}
+
+	_recomputeStats() {
+		const solutions = Array.isArray(this._data.solutions) ? this._data.solutions : [];
+		this._data.stats = {
+			totalRewards: solutions.reduce((sum, s) => sum + Number(s.reward || 0), 0),
+			accepted: solutions.filter(s => s.accepted).length,
+			rejected: solutions.filter(s => !s.accepted).length,
+		};
+	}
+
+	_dedupeSolutions() {
+		const source = Array.isArray(this._data.solutions) ? this._data.solutions : [];
+		const seen = new Set();
+		const deduped = [];
+		let removed = 0;
+
+		for (const item of source) {
+			const key = this._makeFingerprint(item);
+			if (key && seen.has(key)) {
+				removed++;
+				continue;
+			}
+			if (key) seen.add(key);
+			deduped.push(item);
+		}
+
+		if (removed > 0) {
+			this._data.solutions = deduped.map((item, idx) => ({ ...item, id: idx + 1 }));
+			this._recomputeStats();
+			this._save();
+			console.log(`[SolutionStore/File] Removed ${removed} duplicate solution entr${removed === 1 ? 'y' : 'ies'}.`);
+		}
+	}
+
 	_load() {
 		try {
 			if (fs.existsSync(this.filePath)) {
@@ -56,6 +106,8 @@ class FileStore {
 				} else {
 					console.warn('[SolutionStore/File] Unexpected data format, starting fresh.');
 				}
+				this._recomputeStats();
+				this._dedupeSolutions();
 			}
 		} catch (err) {
 			console.warn('[SolutionStore/File] Could not load existing data, starting fresh:', err.message);
@@ -75,12 +127,15 @@ class FileStore {
 	}
 
 	async insertSolution(doc) {
+		const fingerprint = this._makeFingerprint(doc);
+		if (fingerprint) {
+			const exists = this._data.solutions.some(item => this._makeFingerprint(item) === fingerprint);
+			if (exists) return null;
+		}
 		doc.id = this._data.solutions.length + 1;
 		doc.createdAt = new Date().toISOString();
 		this._data.solutions.push(doc);
-		this._data.stats.totalRewards = (this._data.stats.totalRewards || 0) + (doc.reward || 0);
-		if (doc.accepted) this._data.stats.accepted++;
-		else this._data.stats.rejected++;
+		this._recomputeStats();
 		this._save();
 		return doc;
 	}
