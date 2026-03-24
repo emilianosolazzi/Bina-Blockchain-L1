@@ -7,7 +7,7 @@ use crate::crypto::{
 };
 use crate::memory::SecureBuffer;
 use crate::seed::{decode_temporal_seed_timestamp, generate_temporal_seed};
-use crate::telemetry::{MinerState, MiningPhase, PhaseTracker, TelemetrySnapshot};
+use crate::telemetry::{MinerState, MiningPhase, PhaseTracker, StaleBlockTelemetry, TelemetrySnapshot};
 use crate::tg_output_filter::{MemoryBackend, Ready, SledBackend, TgOutputFilter};
 use anyhow::{anyhow, Result};
 use ethers::signers::LocalWallet;
@@ -243,14 +243,20 @@ async fn run_runtime(
 
     // ── Optional stale-block mining sidecar ──────────────────────
     #[cfg(feature = "stale-mining")]
+    let stale_telemetry: Option<StaleBlockTelemetry> = if config.stale_mining_enabled() { Some(StaleBlockTelemetry::new()) } else { None };
+    #[cfg(not(feature = "stale-mining"))]
+    let stale_telemetry: Option<StaleBlockTelemetry> = None;
+
+    #[cfg(feature = "stale-mining")]
     let _stale_handle: Option<JoinHandle<()>> = if config.stale_mining_enabled() {
         let sb_cfg = config.stale_block.as_ref().unwrap().to_miner_config();
         let sb_shutdown = shutdown.clone();
+        let sb_telemetry = stale_telemetry.clone().unwrap();
         info!(
             "Stale-block mining enabled — WebSocket stream primary, {}s fallback poll | {}",
             sb_cfg.poll_interval_secs, sb_cfg.bitcoin_api_url
         );
-        Some(tokio::spawn(run_stale_block_loop(sb_cfg, live_client.clone(), sb_shutdown)))
+        Some(tokio::spawn(run_stale_block_loop(sb_cfg, live_client.clone(), sb_shutdown, sb_telemetry)))
     } else {
         debug!("Stale-block mining disabled (not configured or enabled: false)");
         None
@@ -268,6 +274,7 @@ async fn run_runtime(
             telemetry_tx,
             shutdown,
             live_client,
+            stale_telemetry,
         ).await;
     }
 
@@ -374,6 +381,7 @@ async fn run_live_runtime(
     telemetry_tx: broadcast::Sender<TelemetrySnapshot>,
     shutdown: CancellationToken,
     live_client: LiveMiningClient,
+    stale_telemetry: Option<StaleBlockTelemetry>,
 ) -> Result<()> {
     {
         let mut guard = stats.lock().await;
@@ -393,6 +401,7 @@ async fn run_live_runtime(
         let bg_shutdown = shutdown.clone();
         let bg_config = config.clone();
         let bg_phase = phase_tracker.clone();
+        let bg_stale = stale_telemetry.clone();
         tokio::spawn(async move {
             let mut interval = time::interval(Duration::from_secs(1));
             loop {
@@ -407,6 +416,7 @@ async fn run_live_runtime(
                             &bg_hashrate_window,
                             &bg_filter,
                             &bg_phase,
+                            &bg_stale,
                         ).await;
                         let _ = bg_tx.send(snapshot);
                     }
@@ -1115,6 +1125,13 @@ fn snapshot_from_guard(
         mining_phase: None,
         phase_blocks_remaining: None,
         phase_eta_seconds: None,
+        stale_block_count: None,
+        stale_fork_depth: None,
+        stale_zero_bits: None,
+        stale_quality: None,
+        stale_xor_hex: None,
+        bitcoin_tip_height: None,
+        stale_pending_proofs: None,
     }
 }
 
@@ -1126,6 +1143,7 @@ async fn snapshot_with_phase(
     hashrate_window: &Arc<StdMutex<HashrateWindow>>,
     output_filter: &SharedOutputFilter,
     phase_tracker: &PhaseTracker,
+    stale_telemetry: &Option<StaleBlockTelemetry>,
 ) -> TelemetrySnapshot {
     let ps = phase_tracker.get();
     let guard = stats.lock().await.clone();
@@ -1141,6 +1159,19 @@ async fn snapshot_with_phase(
     snapshot.mining_phase = ps.phase;
     snapshot.phase_blocks_remaining = ps.blocks_remaining;
     snapshot.phase_eta_seconds = ps.eta_seconds;
+
+    // Merge stale block telemetry if available
+    if let Some(st) = stale_telemetry {
+        let sb = st.get();
+        snapshot.stale_block_count = Some(sb.stale_block_count);
+        snapshot.stale_fork_depth = Some(sb.max_fork_depth);
+        snapshot.stale_zero_bits = Some(sb.max_leading_zeros);
+        snapshot.stale_quality = Some(sb.average_quality);
+        snapshot.stale_xor_hex = if sb.cumulative_xor_hex.is_empty() { None } else { Some(sb.cumulative_xor_hex) };
+        snapshot.bitcoin_tip_height = if sb.bitcoin_tip_height > 0 { Some(sb.bitcoin_tip_height) } else { None };
+        snapshot.stale_pending_proofs = Some(sb.pending_proofs);
+    }
+
     snapshot
 }
 
@@ -1331,6 +1362,7 @@ async fn run_stale_block_loop(
     config: crate::stale_block_miner::StaleBlockMinerConfig,
     live_client: Option<LiveMiningClient>,
     shutdown: CancellationToken,
+    stale_telemetry: StaleBlockTelemetry,
 ) {
     use crate::stale_block_miner::{StaleBlockMiner, MempoolStats};
 
@@ -1375,6 +1407,7 @@ async fn run_stale_block_loop(
                     &live_client,
                     &mut latest_mempool,
                     &shutdown,
+                    &stale_telemetry,
                 ).await;
                 // If we get here, the WS dropped. Fall through to reconnect.
                 if shutdown.is_cancelled() {
@@ -1401,6 +1434,7 @@ async fn run_stale_block_loop(
                     &live_client,
                     &mut latest_mempool,
                     &shutdown,
+                    &stale_telemetry,
                 ).await;
                 if shutdown.is_cancelled() {
                     break;
@@ -1491,6 +1525,7 @@ async fn run_ws_event_loop(
     live_client: &Option<LiveMiningClient>,
     latest_mempool: &mut crate::stale_block_miner::MempoolStats,
     shutdown: &CancellationToken,
+    stale_telemetry: &StaleBlockTelemetry,
 ) {
     use tokio_tungstenite::tungstenite::Message;
 
@@ -1541,6 +1576,7 @@ async fn run_ws_event_loop(
                             }
                             last_known_height = h;
 
+                            stale_telemetry.set_tip_height(h);
                             if let Err(err) = refresh_mempool_stats(client, config, latest_mempool).await {
                                 debug!("Stale-block: fee enrichment failed: {err:#}");
                             }
@@ -1558,6 +1594,7 @@ async fn run_ws_event_loop(
                                 Err(err) => warn!("Stale-block WS+poll: harvest failed: {err:#}"),
                             }
                             submit_pending_proofs(miner, live_client, config).await;
+                            update_stale_telemetry(stale_telemetry, miner);
                         } else {
                             debug!("Stale-block: tip unchanged at {h}");
                         }
@@ -1586,7 +1623,7 @@ async fn run_ws_event_loop(
                         consecutive_errors = 0;
                         handle_ws_message(
                             &text, client, config, miner, live_client,
-                            latest_mempool,
+                            latest_mempool, stale_telemetry,
                         ).await;
                     }
                     Some(Ok(Message::Ping(data))) => {
@@ -1612,6 +1649,7 @@ async fn handle_ws_message(
     miner: &mut crate::stale_block_miner::StaleBlockMiner,
     live_client: &Option<LiveMiningClient>,
     latest_mempool: &mut crate::stale_block_miner::MempoolStats,
+    stale_telemetry: &StaleBlockTelemetry,
 ) {
     let msg: Value = match serde_json::from_str(text) {
         Ok(v) => v,
@@ -1646,6 +1684,7 @@ async fn handle_ws_message(
                 Err(err) => warn!("Stale-block WS: harvest failed: {err:#}"),
             }
             submit_pending_proofs(miner, live_client, config).await;
+            update_stale_telemetry(stale_telemetry, miner);
         }
 
         // ── Mempool stats push ──────────────────────────────────────
@@ -1817,6 +1856,7 @@ async fn run_http_fallback_loop(
     live_client: &Option<LiveMiningClient>,
     latest_mempool: &mut crate::stale_block_miner::MempoolStats,
     shutdown: &CancellationToken,
+    stale_telemetry: &StaleBlockTelemetry,
 ) {
     let mut poll = time::interval(Duration::from_secs(config.poll_interval_secs));
     poll.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
@@ -1856,6 +1896,7 @@ async fn run_http_fallback_loop(
 
                 info!("Stale-block: new tip height {current_height} (was {last_known_height})");
                 last_known_height = current_height;
+                stale_telemetry.set_tip_height(current_height);
 
                 // Step 2: Fetch fee/stats enrichment
                 if let Err(err) = refresh_mempool_stats(client, config, latest_mempool).await {
@@ -1875,12 +1916,14 @@ async fn run_http_fallback_loop(
                     Err(err) => warn!("Stale-block (HTTP): harvest failed: {err:#}"),
                 }
                 submit_pending_proofs(miner, live_client, config).await;
+                update_stale_telemetry(stale_telemetry, miner);
             }
         }
     }
 }
 
-/// Drain pending proofs and submit them (or requeue on failure).
+/// Drain pending proofs and submit them (or requeue on transient failure).
+/// Permanent errors (e.g. StaleBlockModule not deployed) → drop proof, don't requeue.
 #[cfg(feature = "stale-mining")]
 async fn submit_pending_proofs(
     miner: &mut crate::stale_block_miner::StaleBlockMiner,
@@ -1896,13 +1939,33 @@ async fn submit_pending_proofs(
         if let Some(live_client) = live_client {
             let mut retry = Vec::new();
             for proof in pending {
-                if let Err(err) = live_client.submit_stale_proof(&proof).await {
-                    warn!(proof_id = %proof.proof_id, "Stale-block: failed to auto-submit proof: {err:#}");
-                    retry.push(proof);
+                match live_client.submit_stale_proof(&proof).await {
+                    Ok(_) => {
+                        info!(proof_id = %proof.proof_id, "Stale-block: proof submitted on-chain");
+                    }
+                    Err(err) => {
+                        let err_str = format!("{err:#}");
+                        // Permanent failures — do NOT requeue
+                        if err_str.contains("reverted")
+                            || err_str.contains("STALE_BLOCK_MODULE")
+                            || err_str.contains("address(0)")
+                            || err_str.contains("module not registered")
+                        {
+                            warn!(
+                                proof_id = %proof.proof_id,
+                                "Stale-block: proof dropped (permanent on-chain failure, StaleBlockModule likely not deployed): {}",
+                                err_str.chars().take(200).collect::<String>(),
+                            );
+                        } else {
+                            // Transient — requeue for retry
+                            warn!(proof_id = %proof.proof_id, "Stale-block: transient submit failure, will retry: {err:#}");
+                            retry.push(proof);
+                        }
+                    }
                 }
             }
             if !retry.is_empty() {
-                warn!("Stale-block: requeued {} proof(s) after submission failures", retry.len());
+                warn!("Stale-block: requeued {} proof(s) after transient failures", retry.len());
                 miner.requeue_pending_proofs(retry);
             }
         } else {
@@ -1914,6 +1977,26 @@ async fn submit_pending_proofs(
     }
 }
 
+/// Sync shared telemetry state from the stale block miner's internal stats.
+#[cfg(feature = "stale-mining")]
+fn update_stale_telemetry(
+    telem: &StaleBlockTelemetry,
+    miner: &crate::stale_block_miner::StaleBlockMiner,
+) {
+    use crate::telemetry::StaleBlockTelemetryState;
+    let stats = miner.stats();
+    telem.update(StaleBlockTelemetryState {
+        stale_block_count: stats.total_stale_blocks as u64,
+        max_fork_depth: stats.max_reorg_depth,
+        max_leading_zeros: 0, // per-proof; overall max not in LoserChainStats
+        average_quality: stats.average_quality_score,
+        cumulative_xor_hex: stats.cumulative_entropy_hex.clone(),
+        bitcoin_tip_height: 0, // tip height managed by set_tip_height()
+        pending_proofs: miner.pending_count() as u64,
+    });
+}
+
+#[allow(dead_code)]
 #[cfg(feature = "stale-mining")]
 fn decode_bitcoin_display_hash(value: &str) -> Option<[u8; 32]> {
     let trimmed = value.trim();
@@ -1966,32 +2049,55 @@ async fn fetch_block_header_json(
     Ok((bytes, height))
 }
 
-/// Fetch the canonical block hash at a given height via `/v1/blocks/:height`.
+/// Fetch the canonical block hash at a given height.
+/// Tries NativeBTC `/v1/blocks/:height` first, falls back to mempool.space.
 #[cfg(feature = "stale-mining")]
 async fn fetch_canonical_hash_at_height(
     client: &reqwest::Client,
     config: &crate::stale_block_miner::StaleBlockMinerConfig,
     height: u64,
 ) -> Result<[u8; 32]> {
+    // ── Primary: NativeBTC API ────────────────────────────────────
     let path = format!("v1/blocks/{}", height);
     let url = api_url(config, &path);
-    let resp: Value = client
-        .get(&url)
+    match client.get(&url).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            if let Ok(body) = resp.json::<Value>().await {
+                let hash_str = body
+                    .as_str()
+                    .or_else(|| body.get("hash").and_then(Value::as_str))
+                    .or_else(|| body.get("id").and_then(Value::as_str));
+                if let Some(hs) = hash_str {
+                    if let Some(decoded) = decode_bitcoin_display_hash(hs) {
+                        return Ok(decoded);
+                    }
+                }
+            }
+        }
+        Ok(resp) => {
+            debug!("Stale-block: NativeBTC /v1/blocks/{height} returned {}, trying mempool.space", resp.status());
+        }
+        Err(err) => {
+            debug!("Stale-block: NativeBTC /v1/blocks/{height} failed: {err:#}, trying mempool.space");
+        }
+    }
+
+    // ── Fallback: mempool.space public API ────────────────────────
+    let mempool_url = format!("https://mempool.space/api/block-height/{}", height);
+    let hash_str = client
+        .get(&mempool_url)
         .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
+        .await
+        .map_err(|e| anyhow!("mempool.space block-height/{height} failed: {e}"))?
+        .error_for_status()
+        .map_err(|e| anyhow!("mempool.space block-height/{height} HTTP error: {e}"))?
+        .text()
+        .await
+        .map_err(|e| anyhow!("mempool.space block-height/{height} body error: {e}"))?;
 
-    // The response may be a wrapped object { success, hash, ... } or a direct hash string (verbosity 0).
-    let hash_str = resp
-        .as_str()                                         // verbosity 0: plain hash string
-        .or_else(|| resp.get("hash").and_then(Value::as_str))   // { hash: "0000..." }
-        .or_else(|| resp.get("id").and_then(Value::as_str))     // mempool-style { id: "0000..." }
-        .ok_or_else(|| anyhow!("no hash found in /v1/blocks/{} response", height))?;
-
-    decode_bitcoin_display_hash(hash_str)
-        .ok_or_else(|| anyhow!("invalid canonical hash at height {}: {}", height, hash_str))
+    let trimmed = hash_str.trim();
+    decode_bitcoin_display_hash(trimmed)
+        .ok_or_else(|| anyhow!("invalid canonical hash from mempool.space at height {}: {}", height, trimmed))
 }
 
 /// Harvest stale-block proofs via `/v1/chain/tips`.

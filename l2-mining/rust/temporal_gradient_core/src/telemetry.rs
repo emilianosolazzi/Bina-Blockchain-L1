@@ -72,6 +72,82 @@ pub struct TelemetrySnapshot {
     pub phase_blocks_remaining: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phase_eta_seconds: Option<u64>,
+
+    // ── Stale block mining telemetry ──
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_block_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_fork_depth: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_zero_bits: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_quality: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_xor_hex: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bitcoin_tip_height: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_pending_proofs: Option<u64>,
+}
+
+// ---------- Stale block telemetry shared state ----------
+
+/// Snapshot of stale block mining status, updated by the stale block loop
+/// and read by the telemetry ticker.
+#[derive(Debug, Clone, Default)]
+pub struct StaleBlockTelemetryState {
+    pub stale_block_count: u64,
+    pub max_fork_depth: u32,
+    pub max_leading_zeros: u32,
+    pub average_quality: u32,
+    pub cumulative_xor_hex: String,
+    pub bitcoin_tip_height: u64,
+    pub pending_proofs: u64,
+}
+
+/// Thread-safe handle for sharing stale block telemetry between the stale
+/// block mining loop and the main telemetry system.
+#[derive(Debug, Clone)]
+pub struct StaleBlockTelemetry {
+    inner: Arc<Mutex<StaleBlockTelemetryState>>,
+}
+
+impl StaleBlockTelemetry {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(StaleBlockTelemetryState::default())),
+        }
+    }
+
+    pub fn update(&self, state: StaleBlockTelemetryState) {
+        let mut s = self.lock_state();
+        let tip = s.bitcoin_tip_height; // preserve tip height set independently
+        *s = state;
+        if s.bitcoin_tip_height == 0 {
+            s.bitcoin_tip_height = tip;
+        }
+    }
+
+    pub fn get(&self) -> StaleBlockTelemetryState {
+        self.lock_state().clone()
+    }
+
+    pub fn set_tip_height(&self, height: u64) {
+        self.lock_state().bitcoin_tip_height = height;
+    }
+
+    fn lock_state(&self) -> MutexGuard<'_, StaleBlockTelemetryState> {
+        match self.inner.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+}
+
+impl Default for StaleBlockTelemetry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ---------- Phase tracking for cross-module communication ----------
