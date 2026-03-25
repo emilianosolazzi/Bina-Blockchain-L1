@@ -72,3 +72,6 @@ l2-mining/rust/miner-run.log.err
 
 # Copilot instructions (machine-specific project knowledge)
 .github/copilot-instructions.md
+
+# Local planning notes
+l2-mining/docs/SERVER_VS_SELF_MINING.md

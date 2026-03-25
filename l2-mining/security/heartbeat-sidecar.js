@@ -39,6 +39,69 @@ const MINER_NAME = process.env.HEARTBEAT_MINER_NAME || process.env.MINER_NAME ||
 const MINER_REGION = process.env.HEARTBEAT_MINER_REGION || 'unknown';
 const MINER_OPERATOR = process.env.HEARTBEAT_MINER_OPERATOR || null;
 const MAX_ALERT_HISTORY = readBoundedNumber('HEARTBEAT_MAX_ALERT_HISTORY', 200, 10, 5000);
+const RANSOMWARE_STATUS_FILE = process.env.RANSOMWARE_STATUS_FILE
+  ? path.resolve(process.cwd(), process.env.RANSOMWARE_STATUS_FILE)
+  : path.join(path.dirname(TELEMETRY_FILE), 'ransomware-status.json');
+const RANSOMWARE_EVIDENCE_DIR = process.env.RANSOMWARE_EVIDENCE_DIR
+  ? path.resolve(process.cwd(), process.env.RANSOMWARE_EVIDENCE_DIR)
+  : path.join(path.dirname(TELEMETRY_FILE), 'ransomware-evidence');
+const RANSOMWARE_MAX_SCAN_FILES = readBoundedNumber('RANSOMWARE_MAX_SCAN_FILES', 1024, 32, 10000);
+const RANSOMWARE_MAX_SCAN_DEPTH = readBoundedNumber('RANSOMWARE_MAX_SCAN_DEPTH', 4, 1, 16);
+const RANSOMWARE_ENCRYPTED_FILE_THRESHOLD = readBoundedNumber('RANSOMWARE_ENCRYPTED_FILE_THRESHOLD', 3, 1, 1000);
+const MINER_DATA_ROOT = process.env.LOCALAPPDATA
+  ? path.join(process.env.LOCALAPPDATA, 'entropy', 'TemporalGradientMiner', 'data')
+  : path.dirname(TELEMETRY_FILE);
+const MINER_CONFIG_ROOT = process.env.APPDATA
+  ? path.join(process.env.APPDATA, 'entropy', 'TemporalGradientMiner', 'config')
+  : null;
+
+const RANSOM_NOTE_PATTERNS = [
+  /readme/i,
+  /decrypt/i,
+  /recover/i,
+  /restore/i,
+  /ransom/i,
+  /how_to/i,
+  /payment/i,
+];
+
+const RANSOMWARE_EXTENSIONS = new Set([
+  '.encrypted', '.encrypt', '.crypted', '.crypt', '.enc', '.lockbit', '.locked',
+  '.ryk', '.conti', '.zepto', '.wnry', '.cerber', '.clop', '.akira', '.pay',
+]);
+
+const RANSOMWARE_IGNORED_FILES = new Set([
+  'telemetry.jsonl',
+  'miner-control.json',
+  'miner-trust-seal.json',
+  'ransomware-status.json',
+  'heartbeat-sidecar.out.log',
+  'heartbeat-sidecar.err.log',
+]);
+
+const RANSOMWARE_IGNORED_DIRS = new Set([
+  'ransomware-evidence',
+  'node_modules',
+  '.git',
+  'target',
+]);
+
+const RANSOMWARE_IGNORED_EXTENSIONS = new Set([
+  '.log',
+  '.jsonl',
+  '.tmp',
+  '.part',
+]);
+
+const PROTECTED_ASSET_BASENAMES = new Set([
+  'miner-config.json',
+  'temporal-gradient-miner.exe',
+  'miner.key',
+  'telemetry.jsonl',
+  'miner-control.json',
+  'miner-trust-seal.json',
+]);
+const MAX_RANSOMWARE_EVENTS = readBoundedNumber('RANSOMWARE_MAX_EVENTS', 20, 5, 500);
 
 const sseClients = new Set();
 const activeAlerts = new Map();
@@ -46,6 +109,11 @@ const alertHistory = [];
 let status = buildEmptyStatus('Waiting for telemetry…');
 let lastPublishedDigest = '';
 let nextAlertId = 1;
+let ransomwareBaseline = new Map();
+let lastRansomwareFingerprint = '';
+let lastRansomwareEvidencePath = null;
+let lastRansomwareSignalFingerprint = '';
+const ransomwareEventHistory = [];
 
 function nowIso() {
   return new Date().toISOString();
@@ -89,6 +157,20 @@ function buildEmptyStatus(message) {
       intrusionScore: 0,
       narrative: 'No telemetry yet.',
       activeAlerts: [],
+      ransomware: {
+        active: false,
+        status: 'clear',
+        reason: null,
+        detectedAtUnixMs: null,
+        detectedAt: null,
+        evidencePath: null,
+        indicators: [],
+        scannedFiles: 0,
+        protectedRoots: [],
+        protectedAssets: [...PROTECTED_ASSET_BASENAMES],
+        truncated: false,
+        recentEvents: [],
+      },
     },
     telemetry: {
       snapshotsAnalyzed: 0,
@@ -133,6 +215,276 @@ function readTailLines(filePath, maxBytes, maxLines) {
   } finally {
     fs.closeSync(fd);
   }
+}
+
+function uniquePaths(values) {
+  return [...new Set(values.filter(Boolean).map(value => path.resolve(value)))];
+}
+
+function protectedRoots() {
+  return uniquePaths([
+    MINER_CONFIG_ROOT,
+    path.join(MINER_DATA_ROOT, 'bin'),
+    path.join(MINER_DATA_ROOT, 'keys'),
+    path.dirname(TELEMETRY_FILE),
+  ]).filter(root => fs.existsSync(root));
+}
+
+function shouldIgnoreProtectedPath(filePath) {
+  const base = path.basename(filePath).toLowerCase();
+  const ext = path.extname(base).toLowerCase();
+  if (RANSOMWARE_IGNORED_FILES.has(base)) return true;
+  if (RANSOMWARE_IGNORED_EXTENSIONS.has(ext)) return true;
+  return false;
+}
+
+function walkProtectedFiles(root, files, state, depth = 0) {
+  if (!root || state.truncated || depth > RANSOMWARE_MAX_SCAN_DEPTH) return;
+  let entries = [];
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    return;
+  }
+
+  for (const entry of entries) {
+    if (state.truncated) break;
+    const fullPath = path.join(root, entry.name);
+    const lowerName = entry.name.toLowerCase();
+    if (entry.isDirectory()) {
+      if (RANSOMWARE_IGNORED_DIRS.has(lowerName)) continue;
+      walkProtectedFiles(fullPath, files, state, depth + 1);
+      continue;
+    }
+    if (!entry.isFile()) continue;
+    if (shouldIgnoreProtectedPath(fullPath)) continue;
+    files.push(fullPath);
+    if (files.length >= RANSOMWARE_MAX_SCAN_FILES) {
+      state.truncated = true;
+      break;
+    }
+  }
+}
+
+function snapshotProtectedFiles() {
+  const files = [];
+  const roots = protectedRoots();
+  const state = { truncated: false };
+  for (const root of roots) {
+    walkProtectedFiles(root, files, state, 0);
+    if (state.truncated) break;
+  }
+
+  const snapshot = new Map();
+  for (const filePath of files) {
+    try {
+      const stats = fs.statSync(filePath);
+      snapshot.set(path.resolve(filePath), {
+        path: path.resolve(filePath),
+        base: path.basename(filePath),
+        ext: path.extname(filePath).toLowerCase(),
+        size: stats.size,
+        mtimeMs: Math.trunc(stats.mtimeMs),
+      });
+    } catch {
+    }
+  }
+
+  return {
+    snapshot,
+    roots,
+    scannedFiles: snapshot.size,
+    truncated: state.truncated,
+  };
+}
+
+function isRansomNoteName(fileName) {
+  return RANSOM_NOTE_PATTERNS.some(pattern => pattern.test(fileName));
+}
+
+function buildRansomwareReason(indicators) {
+  if (!indicators.length) return null;
+  const note = indicators.find(item => item.type === 'ransom_note');
+  if (note) {
+    return `Ransom note pattern detected at ${note.relativePath}`;
+  }
+  return `${indicators.length} suspicious encrypted files appeared inside protected miner paths`;
+}
+
+function isProtectedAssetName(fileName) {
+  return PROTECTED_ASSET_BASENAMES.has(String(fileName || '').toLowerCase());
+}
+
+function summarizeIndicators(indicators) {
+  return (Array.isArray(indicators) ? indicators : []).slice(0, 6).map(item => ({
+    type: item.type,
+    fileName: item.fileName,
+    relativePath: item.relativePath,
+  }));
+}
+
+function rememberRansomwareObservation({ active, reason, indicators, evidencePath }) {
+  const normalizedIndicators = summarizeIndicators(indicators);
+  const fingerprint = normalizedIndicators.length
+    ? crypto.createHash('sha1').update(JSON.stringify({ active, reason, normalizedIndicators })).digest('hex')
+    : '';
+  if (!fingerprint || fingerprint === lastRansomwareSignalFingerprint) {
+    return;
+  }
+  lastRansomwareSignalFingerprint = fingerprint;
+  ransomwareEventHistory.unshift({
+    timestamp: nowIso(),
+    active,
+    escalation: active ? 'escalated' : 'observed_only',
+    reason: reason || (active ? 'Compound ransomware signal detected.' : 'Observed suspicious pattern did not meet escalation threshold.'),
+    evidencePath: evidencePath || null,
+    indicators: normalizedIndicators,
+  });
+  if (ransomwareEventHistory.length > MAX_RANSOMWARE_EVENTS) {
+    ransomwareEventHistory.length = MAX_RANSOMWARE_EVENTS;
+  }
+}
+
+function isEncryptedProtectedAsset(meta) {
+  const base = String(meta?.base || '');
+  const ext = String(meta?.ext || '').toLowerCase();
+  if (!RANSOMWARE_EXTENSIONS.has(ext)) return false;
+  const lower = base.toLowerCase();
+  return [...PROTECTED_ASSET_BASENAMES].some(asset => lower === `${asset}${ext}` || lower.startsWith(`${asset}.`));
+}
+
+function writeRansomwareEvidence(result) {
+  try {
+    fs.mkdirSync(RANSOMWARE_EVIDENCE_DIR, { recursive: true });
+    const evidencePath = path.join(RANSOMWARE_EVIDENCE_DIR, `ransomware-${result.detectedAtUnixMs}.json`);
+    fs.writeFileSync(evidencePath, JSON.stringify({
+      version: 1,
+      createdAt: nowIso(),
+      detector: 'heartbeat-sidecar',
+      ransomware: result,
+    }, null, 2));
+    return evidencePath;
+  } catch {
+    return null;
+  }
+}
+
+function persistRansomwareStatus(result) {
+  try {
+    fs.mkdirSync(path.dirname(RANSOMWARE_STATUS_FILE), { recursive: true });
+    fs.writeFileSync(RANSOMWARE_STATUS_FILE, JSON.stringify(result, null, 2));
+  } catch {
+  }
+}
+
+function evaluateRansomwareSignals() {
+  const observedAtUnixMs = Date.now();
+  const { snapshot, roots, scannedFiles, truncated } = snapshotProtectedFiles();
+  const previousSnapshot = ransomwareBaseline;
+  const indicators = [];
+  const noteIndicators = [];
+  const encryptedProtectedIndicators = [];
+
+  for (const [filePath, meta] of snapshot.entries()) {
+    const baseLower = String(meta.base || '').toLowerCase();
+    if (isRansomNoteName(baseLower)) {
+      const indicator = {
+        type: 'ransom_note',
+        path: filePath,
+        relativePath: path.relative(path.dirname(TELEMETRY_FILE), filePath) || meta.base,
+        fileName: meta.base,
+      };
+      indicators.push(indicator);
+      noteIndicators.push(indicator);
+      continue;
+    }
+
+    if (isEncryptedProtectedAsset(meta)) {
+      const indicator = {
+        type: 'encrypted_file',
+        path: filePath,
+        relativePath: path.relative(path.dirname(TELEMETRY_FILE), filePath) || meta.base,
+        fileName: meta.base,
+      };
+      indicators.push(indicator);
+      encryptedProtectedIndicators.push(indicator);
+    }
+  }
+
+  const missingProtectedIndicators = [];
+  for (const [filePath, meta] of previousSnapshot.entries()) {
+    if (!isProtectedAssetName(meta.base)) continue;
+    if (snapshot.has(filePath)) continue;
+    missingProtectedIndicators.push({
+      type: 'protected_asset_missing',
+      path: filePath,
+      relativePath: path.relative(path.dirname(TELEMETRY_FILE), filePath) || meta.base,
+      fileName: meta.base,
+    });
+  }
+  indicators.push(...missingProtectedIndicators);
+
+  ransomwareBaseline = snapshot;
+
+  const active = noteIndicators.length > 0
+    && (encryptedProtectedIndicators.length > 0 || missingProtectedIndicators.length > 0);
+  const reason = active ? buildRansomwareReason(indicators) : null;
+  const fingerprint = active
+    ? crypto.createHash('sha1').update(JSON.stringify({ reason, indicators: indicators.map(item => `${item.type}:${item.path}`) })).digest('hex')
+    : '';
+
+  let evidencePath = null;
+  if (active) {
+    if (fingerprint === lastRansomwareFingerprint && lastRansomwareEvidencePath) {
+      evidencePath = lastRansomwareEvidencePath;
+    } else {
+      evidencePath = writeRansomwareEvidence({
+        active: true,
+        status: 'ransomware_detected',
+        reason,
+        detectedAtUnixMs: observedAtUnixMs,
+        detectedAt: new Date(observedAtUnixMs).toISOString(),
+        evidencePath: null,
+        indicators: indicators.slice(0, 16),
+        scannedFiles,
+        protectedRoots: roots,
+        truncated,
+      });
+      lastRansomwareFingerprint = fingerprint;
+      lastRansomwareEvidencePath = evidencePath;
+    }
+  } else {
+    lastRansomwareFingerprint = '';
+    lastRansomwareEvidencePath = null;
+  }
+
+  const result = {
+    active,
+    status: active ? 'ransomware_detected' : 'clear',
+    reason,
+    detectedAtUnixMs: active ? observedAtUnixMs : null,
+    detectedAt: active ? new Date(observedAtUnixMs).toISOString() : null,
+    evidencePath,
+    indicators: active ? indicators.slice(0, 16) : [],
+    scannedFiles,
+    protectedRoots: roots,
+    protectedAssets: [...PROTECTED_ASSET_BASENAMES],
+    truncated,
+    recentEvents: ransomwareEventHistory.slice(0, 10),
+  };
+
+  if (indicators.length > 0) {
+    rememberRansomwareObservation({
+      active,
+      reason,
+      indicators,
+      evidencePath,
+    });
+    result.recentEvents = ransomwareEventHistory.slice(0, 10);
+  }
+
+  persistRansomwareStatus(result);
+  return result;
 }
 
 function deriveSolutionTransitions(snapshots) {
@@ -272,9 +624,12 @@ function resolveAlert(type, observedAt) {
 function evaluateSnapshots(snapshots, fileSize) {
   const latest = snapshots[snapshots.length - 1] || null;
   const generatedAt = nowIso();
+  const ransomware = evaluateRansomwareSignals();
 
   if (!latest) {
-    return buildEmptyStatus('Telemetry file exists but no valid snapshots were parsed.');
+    const empty = buildEmptyStatus('Telemetry file exists but no valid snapshots were parsed.');
+    empty.security.ransomware = ransomware;
+    return empty;
   }
 
   const nowMs = Date.now();
@@ -391,6 +746,19 @@ function evaluateSnapshots(snapshots, fileSize) {
     });
   }
 
+  if (ransomware.active) {
+    candidateAlerts.push({
+      type: 'ransomware_detected',
+      severity: 'critical',
+      message: ransomware.reason || 'Suspicious ransomware-like activity detected in protected miner paths.',
+      details: {
+        evidencePath: ransomware.evidencePath,
+        scannedFiles: ransomware.scannedFiles,
+        indicators: ransomware.indicators,
+      },
+    });
+  }
+
   const observedAt = generatedAt;
   const activeTypes = new Set(candidateAlerts.map(alert => alert.type));
   for (const alert of candidateAlerts) {
@@ -404,12 +772,14 @@ function evaluateSnapshots(snapshots, fileSize) {
 
   const activeAlertList = [...activeAlerts.values()].sort((a, b) => a.id - b.id);
   const intrusionScore = scoreAlerts(activeAlertList);
-  const suspicious = intrusionScore >= 25;
+  const suspicious = ransomware.active || intrusionScore >= 25;
 
   return {
     service: 'heartbeat-sidecar',
-    status: telemetryOnline ? 'ok' : suspicious ? 'alert' : 'degraded',
-    message: telemetryOnline ? 'Mining heartbeat sidecar is monitoring telemetry.' : 'Mining heartbeat sidecar detected degraded continuity.',
+    status: ransomware.active ? 'alert' : telemetryOnline ? 'ok' : suspicious ? 'alert' : 'degraded',
+    message: ransomware.active
+      ? 'Mining heartbeat sidecar detected ransomware-like activity in protected miner paths.'
+      : telemetryOnline ? 'Mining heartbeat sidecar is monitoring telemetry.' : 'Mining heartbeat sidecar detected degraded continuity.',
     generatedAt,
     miner: {
       name: MINER_NAME,
@@ -441,8 +811,11 @@ function evaluateSnapshots(snapshots, fileSize) {
     security: {
       suspicious,
       intrusionScore,
-      narrative: describeNarrative({ activeAlerts: activeAlertList }),
+      narrative: ransomware.active
+        ? (ransomware.reason || 'Ransomware-like activity detected in protected miner paths.')
+        : describeNarrative({ activeAlerts: activeAlertList }),
       activeAlerts: activeAlertList,
+      ransomware,
     },
     telemetry: {
       snapshotsAnalyzed: snapshots.length,
@@ -539,6 +912,7 @@ function handleRequest(req, res) {
       generatedAt: status.generatedAt,
       heartbeatOnline: status.heartbeat?.online ?? false,
       telemetryFresh: status.heartbeat?.telemetryFresh ?? false,
+      ransomwareActive: status.security?.ransomware?.active ?? false,
       telemetryFile: TELEMETRY_FILE,
       pollIntervalMs: POLL_INTERVAL_MS,
     });

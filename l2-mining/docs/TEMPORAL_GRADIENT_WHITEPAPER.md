@@ -194,7 +194,13 @@ The dashboard exposes:
 - storage verification state,
 - on-chain attestation state,
 - personal threat dashboard,
-- verified egress readiness profile.
+- verified egress readiness profile,
+- tamper-lock state and local trust-seal status,
+- operator mining controls for pause and power throttling.
+
+Those controls matter operationally. The current miner already supports an explicit pause state and discrete power tiers — 25%, 50%, 75%, and 100% — so operators can reduce resource consumption or temporarily halt active mining without losing visibility into the machine itself. Telemetry continues to flow while paused, the miner reports its paused state explicitly, and the monitoring layer can distinguish an intentional pause from an unexpected outage. That gives miners a practical sense of control: they are not forced into an all-or-nothing mode just to remain part of the continuity network.
+
+The dashboard also now exposes a local **tamper-lock** surface. If the miner detects a deterministic local trust violation — such as a debugger attachment or a mismatch between the sealed local trust profile and the current key/binary/config fingerprints — the dashboard can show that the node has entered a fail-shut mode and allow the operator to explicitly reseal the trust profile. This is intentionally different from heuristic threat scoring: it is a local custody and integrity control for the miner itself.
 
 ---
 
@@ -777,6 +783,8 @@ The system detects:
 - rejection bursts,
 - overheating.
 
+Importantly, continuity monitoring is not the same as forcing full-power mining at all times. The control layer already supports operator-selected pause and power-throttle settings, with normalized tiers at 25%, 50%, 75%, and 100%. When a miner is intentionally paused, telemetry can continue and the control state is visible, allowing the system to treat deliberate operator action differently from suspicious silence or failure.
+
 ### 9.3 Identity-bound signed outputs
 
 When configured with the miner key, latest randomness outputs can be signed by the miner wallet identity. This creates a direct trust link between off-chain output and on-chain operator identity.
@@ -824,7 +832,40 @@ This persistence layer also improves operational continuity. The Rust pending-co
 
 These protections mean that even if an attacker obtains a memory dump, a disk image, or attaches a debugger to the running process, the sensitive values required to impersonate the miner or front-run a reveal are not recoverable. The commit-reveal scheme's economic security is therefore defended at every layer: protocol, network, memory, and disk.
 
-### 9.8 NFT-backed proof of provenance
+### 9.8 Deterministic tamper-lock and local trust sealing
+
+The miner now includes a complementary protection above raw memory hardening: a **deterministic tamper-lock**.
+
+The purpose is simple. Monitoring alone is useful, but a miner benefits more when the software can fail shut after a provable local trust violation instead of continuing to sign, reveal, or submit in a potentially compromised state.
+
+The current implementation is intentionally strict and low-noise. It is designed to trigger only on deterministic conditions rather than heuristic suspicion. In practice, that means the miner can enter tamper-lock when it detects conditions such as:
+
+- a debugger attached to the miner process,
+- a mismatch between the sealed local trust profile and the current miner binary fingerprint,
+- a mismatch between the sealed local trust profile and the current miner key fingerprint,
+- a mismatch between the sealed local trust profile and the current config fingerprint,
+- or an unreadable / invalid local trust seal.
+
+When that happens, the miner suspends active mining and exposes the lock state through telemetry and the dashboard. The operator can then explicitly reseal the trust profile once the local environment is known to be safe again.
+
+This matters because it gives the miner a real self-protection capability with very low false positives. It is not antivirus and it is not general host hardening. It is a fail-shut protection boundary around miner custody, miner identity, and the secrets needed for commit-reveal participation.
+
+### 9.9 Conservative ransomware detection, evidence retention, and operator export
+
+The local trust boundary now extends beyond deterministic seal mismatches into a narrow ransomware-watch path for the miner's own critical assets.
+
+This layer is intentionally conservative. It does **not** claim to be a full endpoint detection and response platform. Instead, it watches the protected miner paths and only escalates when multiple concrete signals appear together, such as a ransom-note pattern combined with either:
+
+- an encrypted copy of a protected miner asset, or
+- disappearance of a protected miner asset that was previously present.
+
+That compound trigger matters because it keeps the false-positive rate low. A harmless note file or unrelated host noise is recorded as an observed event, but it does not immediately force the miner into a ransomware lock state.
+
+When escalation does occur, the sidecar writes a local JSON evidence bundle, records the protected roots and indicators that triggered the lock, and exposes that state to both the miner and the dashboard. The operator can review a recent evidence log, inspect the protected asset list, follow an explicit recovery flow, and export the full evidence package for incident handling or audit retention.
+
+This gives the miner a practical fail-shut response to destructive local interference without overstating what is implemented. The current system protects miner custody paths and preserves forensic context; it is not yet general-purpose host hardening.
+
+### 9.10 NFT-backed proof of provenance
 
 The protocol can now express provenance as an on-chain object, not only as an off-chain record.
 
@@ -1075,9 +1116,12 @@ The current system includes:
 - storage verification and on-chain attestation recording,
 - heartbeat sidecar for personal threat monitoring,
 - dashboard support for threat posture and verified egress readiness,
+- dashboard-visible tamper-lock status with explicit reseal action,
+- operator pause and power-throttle controls with 25/50/75/100% mining tiers,
 - persistent output deduplication and pre-filtering through the Rust output-filter pipeline,
 - hardware-aware CPU feature detection, thermal monitoring, and privacy-safe telemetry fingerprinting,
 - runtime memory hardening (VirtualLock, guard-byte sentinels, anti-debug gating, RAII scoped access, paranoid wipe),
+- local trust sealing and deterministic tamper-lock on debugger / fingerprint mismatch,
 - encrypted at-rest persistence for pending commitments (blake3-derived keystream, zero-scrub on delete).
 
 This means the whitepaper is not purely aspirational. Core building blocks already exist in working form.

@@ -523,6 +523,21 @@ function deriveHeartbeatSummary(limit = 720) {
 	};
 }
 
+function deriveTamperStatus(snapshot = latestSnapshot()) {
+	const locked = snapshot?.tamper_locked === true;
+	const status = snapshot?.tamper_status || (locked ? 'tamper_locked' : 'uninitialized');
+	const reason = snapshot?.tamper_reason || null;
+	return {
+		locked,
+		status,
+		reason,
+		triggeredAtUnixMs: snapshot?.tamper_triggered_at_unix_ms ?? null,
+		triggeredAt: snapshot?.tamper_triggered_at_unix_ms ? new Date(Number(snapshot.tamper_triggered_at_unix_ms)).toISOString() : null,
+		sealHash: snapshot?.tamper_seal_hash || null,
+		latestTimestampUnixMs: snapshot?.timestamp_unix_ms ?? null,
+	};
+}
+
 async function getHeartbeatStatus() {
 	const response = await requestJson(`${HEARTBEAT_API_URL}/api/heartbeat/status`, { timeoutMs: 4000 }).catch(err => ({
 		status: 503,
@@ -549,10 +564,61 @@ async function getThreatProfile() {
 		getHeartbeatAlerts(),
 	]);
 	const telemetry = deriveHeartbeatSummary();
+	const tamperStatus = deriveTamperStatus();
+	const ransomwareStatus = heartbeatStatus?.security?.ransomware || null;
+	const tamperAlert = tamperStatus.locked ? [{
+		type: 'tamper_lock',
+		severity: 'critical',
+		message: tamperStatus.reason || 'Miner entered tamper-lock mode.',
+		details: {
+			status: tamperStatus.status,
+			sealHash: tamperStatus.sealHash,
+			triggeredAt: tamperStatus.triggeredAt,
+		},
+	}] : [];
 	return {
 		heartbeatStatus,
-		heartbeatAlerts,
+		heartbeatAlerts: {
+			...(heartbeatAlerts || {}),
+			active: [...tamperAlert, ...(Array.isArray(heartbeatAlerts?.active) ? heartbeatAlerts.active : [])],
+		},
 		telemetry,
+		tamperStatus,
+		ransomwareStatus,
+	};
+}
+
+async function buildSecurityEvidenceExport() {
+	const [threatProfile, relayProfile, systemStatus] = await Promise.all([
+		getThreatProfile(),
+		getRelayProfile().catch(() => null),
+		getSystemStatus().catch(() => null),
+	]);
+	const latest = latestSnapshot();
+	const ransomwareStatus = threatProfile?.ransomwareStatus || null;
+	const evidencePath = ransomwareStatus?.evidencePath || null;
+	const ransomwareEvidence = tryReadJson(evidencePath);
+
+	return {
+		version: 1,
+		exportedAt: new Date().toISOString(),
+		source: 'miner-dashboard',
+		telemetryFile: TELEMETRY_FILE,
+		latestSnapshot: latest ? {
+			timestampUnixMs: latest.timestamp_unix_ms ?? null,
+			state: latest.state || null,
+			miningPhase: latest.mining_phase || null,
+			tamperLocked: latest.tamper_locked === true,
+			tamperStatus: latest.tamper_status || null,
+			tamperReason: latest.tamper_reason || null,
+		} : null,
+		tamperStatus: threatProfile?.tamperStatus || null,
+		ransomwareStatus,
+		ransomwareEvidencePath: evidencePath,
+		ransomwareEvidence,
+		threatProfile,
+		relayProfile,
+		systemStatus,
 	};
 }
 
@@ -904,6 +970,30 @@ function sendJson(res, status, payload) {
 	res.end(JSON.stringify(payload));
 }
 
+function sendJsonDownload(res, status, payload, filename) {
+	res.writeHead(status, {
+		'Content-Type': 'application/json; charset=utf-8',
+		'Content-Disposition': `attachment; filename="${filename}"`,
+		'Cache-Control': 'no-store',
+		'Access-Control-Allow-Origin': '*',
+	});
+	res.end(JSON.stringify(payload, null, 2));
+}
+
+function exportTimestampStamp(value = new Date()) {
+	const iso = value.toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
+	return iso.replace('T', '-');
+}
+
+function tryReadJson(filePath) {
+	if (!filePath || !fs.existsSync(filePath)) return null;
+	try {
+		return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+	} catch (err) {
+		return { error: shortError(err), path: filePath };
+	}
+}
+
 function readSnapshots(limit = 120) {
 	if (!fs.existsSync(TELEMETRY_FILE)) {
 		return [];
@@ -1234,10 +1324,14 @@ const server = http.createServer(async (req, res) => {
 		try {
 			const data = fs.existsSync(CONTROL_FILE)
 				? JSON.parse(fs.readFileSync(CONTROL_FILE, 'utf8'))
-				: { paused: false, power_pct: 100, submit_stale_now: false };
-			sendJson(res, 200, { paused: !!data.paused, power_pct: Number(data.power_pct) || 100 });
+				: { paused: false, power_pct: 100, submit_stale_now: false, tamper_reseal_now: false };
+			sendJson(res, 200, {
+				paused: !!data.paused,
+				power_pct: Number(data.power_pct) || 100,
+				tamper_reseal_now: !!data.tamper_reseal_now,
+			});
 		} catch (err) {
-			sendJson(res, 200, { paused: false, power_pct: 100 });
+			sendJson(res, 200, { paused: false, power_pct: 100, tamper_reseal_now: false });
 		}
 		return;
 	}
@@ -1249,12 +1343,13 @@ const server = http.createServer(async (req, res) => {
 				const payload = JSON.parse(body);
 				const existing = fs.existsSync(CONTROL_FILE)
 					? JSON.parse(fs.readFileSync(CONTROL_FILE, 'utf8'))
-					: { submit_stale_now: false };
+					: { submit_stale_now: false, tamper_reseal_now: false };
 				const ctrl = {
 					paused: !!payload.paused,
 					power_pct: [25, 50, 75, 100].includes(Number(payload.power_pct))
 						? Number(payload.power_pct) : 100,
 					submit_stale_now: !!existing.submit_stale_now,
+					tamper_reseal_now: !!existing.tamper_reseal_now,
 				};
 				fs.mkdirSync(path.dirname(CONTROL_FILE), { recursive: true });
 				fs.writeFileSync(CONTROL_FILE, JSON.stringify(ctrl, null, 2));
@@ -1270,12 +1365,13 @@ const server = http.createServer(async (req, res) => {
 		try {
 			const existing = fs.existsSync(CONTROL_FILE)
 				? JSON.parse(fs.readFileSync(CONTROL_FILE, 'utf8'))
-				: { paused: false, power_pct: 100 };
+				: { paused: false, power_pct: 100, tamper_reseal_now: false };
 			const ctrl = {
 				paused: !!existing.paused,
 				power_pct: [25, 50, 75, 100].includes(Number(existing.power_pct))
 					? Number(existing.power_pct) : 100,
 				submit_stale_now: true,
+				tamper_reseal_now: !!existing.tamper_reseal_now,
 			};
 			fs.mkdirSync(path.dirname(CONTROL_FILE), { recursive: true });
 			fs.writeFileSync(CONTROL_FILE, JSON.stringify(ctrl, null, 2));
@@ -1285,6 +1381,36 @@ const server = http.createServer(async (req, res) => {
 				queued: true,
 				pendingProofs: Number(latest?.stale_pending_proofs || 0),
 				message: 'Manual stale proof submit requested. The miner will retry shortly.',
+			});
+		} catch (err) {
+			sendJson(res, 500, { ok: false, error: shortError(err) });
+		}
+		return;
+	}
+
+	if (url.pathname === '/api/security/tamper-status' && req.method === 'GET') {
+		sendJson(res, 200, deriveTamperStatus());
+		return;
+	}
+
+	if (url.pathname === '/api/security/tamper-reseal' && req.method === 'POST') {
+		try {
+			const existing = fs.existsSync(CONTROL_FILE)
+				? JSON.parse(fs.readFileSync(CONTROL_FILE, 'utf8'))
+				: { paused: false, power_pct: 100, submit_stale_now: false };
+			const ctrl = {
+				paused: !!existing.paused,
+				power_pct: [25, 50, 75, 100].includes(Number(existing.power_pct))
+					? Number(existing.power_pct) : 100,
+				submit_stale_now: !!existing.submit_stale_now,
+				tamper_reseal_now: true,
+			};
+			fs.mkdirSync(path.dirname(CONTROL_FILE), { recursive: true });
+			fs.writeFileSync(CONTROL_FILE, JSON.stringify(ctrl, null, 2));
+			sendJson(res, 200, {
+				ok: true,
+				queued: true,
+				message: 'Tamper reseal requested. The miner will rebuild its local trust seal on the next control cycle.',
 			});
 		} catch (err) {
 			sendJson(res, 500, { ok: false, error: shortError(err) });
@@ -1326,6 +1452,17 @@ const server = http.createServer(async (req, res) => {
 		try {
 			const profile = await getThreatProfile();
 			sendJson(res, 200, profile);
+		} catch (err) {
+			sendJson(res, 500, { error: shortError(err) });
+		}
+		return;
+	}
+
+	if (url.pathname === '/api/security/evidence/export' && req.method === 'GET') {
+		try {
+			const payload = await buildSecurityEvidenceExport();
+			const filename = `temporal-gradient-security-evidence-${exportTimestampStamp()}.json`;
+			sendJsonDownload(res, 200, payload, filename);
 		} catch (err) {
 			sendJson(res, 500, { error: shortError(err) });
 		}

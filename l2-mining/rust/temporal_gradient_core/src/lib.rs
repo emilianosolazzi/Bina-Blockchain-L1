@@ -14,6 +14,7 @@ pub mod seed;
 #[cfg(feature = "stale-mining")]
 pub mod stale_block_miner;
 pub mod storage_verification;
+pub mod tamper_lock;
 pub mod telemetry;
 pub mod tg_output_filter;
 pub mod tg_relay_transport;
@@ -48,6 +49,7 @@ pub use storage_verification::{
     SettlementGateDecision, StorageAttestation, StorageChallenge, StorageProof, StorageProtocol,
     VerificationResult, VerificationStats,
 };
+pub use tamper_lock::{TamperLockHandle, TamperLockMonitor, TamperLockStatus, TamperSeal};
 pub use telemetry::{MinerState, MiningControl, MiningPhase, PhaseTracker, TelemetrySnapshot};
 pub use tg_output_filter::{FilterConfig, FilterError, OutputRecord, Ready, TgOutputFilter, Uninitialized};
 pub use tg_relay_transport::{

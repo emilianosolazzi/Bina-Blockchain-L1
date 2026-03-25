@@ -79,6 +79,16 @@ pub struct TelemetrySnapshot {
     pub mining_paused: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mining_power_pct: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tamper_locked: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tamper_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tamper_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tamper_triggered_at_unix_ms: Option<u128>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tamper_seal_hash: Option<String>,
 
     // ── Stale block mining telemetry ──
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -254,13 +264,16 @@ pub struct MiningControl {
     /// One-shot trigger: request an immediate stale-proof submission attempt.
     #[serde(default)]
     pub submit_stale_now: bool,
+    /// One-shot trigger: reseal and clear the local tamper-lock state.
+    #[serde(default)]
+    pub tamper_reseal_now: bool,
 }
 
 fn default_power_pct() -> u8 { 100 }
 
 impl Default for MiningControl {
     fn default() -> Self {
-        Self { paused: false, power_pct: 100, submit_stale_now: false }
+        Self { paused: false, power_pct: 100, submit_stale_now: false, tamper_reseal_now: false }
     }
 }
 
@@ -311,6 +324,17 @@ impl MiningControl {
             return false;
         }
         control.submit_stale_now = false;
+        let _ = control.write_to_file(path);
+        true
+    }
+
+    /// Consume the one-shot tamper reseal trigger, resetting it to `false`.
+    pub fn take_tamper_reseal_now(path: &Path) -> bool {
+        let mut control = Self::read_from_file(path);
+        if !control.tamper_reseal_now {
+            return false;
+        }
+        control.tamper_reseal_now = false;
         let _ = control.write_to_file(path);
         true
     }

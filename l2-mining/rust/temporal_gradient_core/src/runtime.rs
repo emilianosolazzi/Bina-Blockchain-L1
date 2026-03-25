@@ -7,6 +7,7 @@ use crate::crypto::{
 };
 use crate::memory::SecureBuffer;
 use crate::seed::{decode_temporal_seed_timestamp, generate_temporal_seed};
+use crate::tamper_lock::TamperLockMonitor;
 use crate::telemetry::{MinerState, MiningControl, MiningPhase, PhaseTracker, StaleBlockTelemetry, TelemetrySnapshot};
 use crate::tg_output_filter::{MemoryBackend, Ready, SledBackend, TgOutputFilter};
 use anyhow::{anyhow, Result};
@@ -390,6 +391,13 @@ async fn run_live_runtime(
     }
 
     let phase_tracker = PhaseTracker::with_block_time_millis(config.block_time_millis);
+    let tamper_monitor = Arc::new(StdMutex::new(TamperLockMonitor::new(&config)?));
+    let tamper_handle = {
+        match tamper_monitor.lock() {
+            Ok(guard) => guard.handle(),
+            Err(poisoned) => poisoned.into_inner().handle(),
+        }
+    };
 
     // Background telemetry ticker — emits snapshots every second so the
     // display stays updated even while submit_solution is blocking.
@@ -403,6 +411,7 @@ async fn run_live_runtime(
         let bg_config = config.clone();
         let bg_phase = phase_tracker.clone();
         let bg_stale = stale_telemetry.clone();
+        let bg_tamper = tamper_handle.clone();
         tokio::spawn(async move {
             let mut interval = time::interval(Duration::from_secs(1));
             loop {
@@ -418,8 +427,26 @@ async fn run_live_runtime(
                             &bg_filter,
                             &bg_phase,
                             &bg_stale,
+                            &bg_tamper,
                         ).await;
                         let _ = bg_tx.send(snapshot);
+                    }
+                }
+            }
+        });
+
+        let bg_shutdown = shutdown.clone();
+        let bg_tamper_monitor = Arc::clone(&tamper_monitor);
+        tokio::spawn(async move {
+            let mut interval = time::interval(Duration::from_secs(1));
+            loop {
+                tokio::select! {
+                    _ = bg_shutdown.cancelled() => break,
+                    _ = interval.tick() => {
+                        match bg_tamper_monitor.lock() {
+                            Ok(mut guard) => { let _ = guard.evaluate(); }
+                            Err(poisoned) => { let mut guard = poisoned.into_inner(); let _ = guard.evaluate(); }
+                        }
                     }
                 }
             }
@@ -434,20 +461,50 @@ async fn run_live_runtime(
     let mut last_control = MiningControl::default();
 
     // ── Resume a saved commitment from a previous run ──────────────
-    let _ = try_resume_pending_commitment(
-        &live_client,
-        &config,
-        &stats,
-        &output_filter,
-        &phase_tracker,
-        &shutdown,
-    )
-    .await?;
+    if !match tamper_monitor.lock() {
+        Ok(mut guard) => guard.evaluate().locked,
+        Err(poisoned) => poisoned.into_inner().evaluate().locked,
+    } {
+        let _ = try_resume_pending_commitment(
+            &live_client,
+            &config,
+            &stats,
+            &output_filter,
+            &phase_tracker,
+            &shutdown,
+        )
+        .await?;
+    }
 
     while !shutdown.is_cancelled() {
         // ── Read mining control (pause / power) from sideband file ───────
         if let Some(ref ctrl_path) = control_file_path {
             last_control = MiningControl::read_from_file(ctrl_path);
+            if MiningControl::take_tamper_reseal_now(ctrl_path) {
+                match match tamper_monitor.lock() {
+                    Ok(mut guard) => guard.reseal(),
+                    Err(poisoned) => poisoned.into_inner().reseal(),
+                } {
+                    Ok(status) => info!("Tamper lock resealed: status={} locked={}", status.status, status.locked),
+                    Err(err) => warn!("Tamper lock reseal failed: {err:#}"),
+                }
+            }
+        }
+
+        let tamper_status = match tamper_monitor.lock() {
+            Ok(mut guard) => guard.evaluate(),
+            Err(poisoned) => poisoned.into_inner().evaluate(),
+        };
+        if tamper_status.locked {
+            if phase_tracker.get().phase != Some(MiningPhase::Searching) {
+                phase_tracker.set(MiningPhase::Searching, None);
+            }
+            tracing::warn!(
+                "Tamper lock active — mining suspended: {}",
+                tamper_status.reason.clone().unwrap_or_else(|| "unknown local trust violation".to_string())
+            );
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            continue;
         }
 
         // ── Pause gate: sleep in a tight loop while paused ────────────
@@ -1149,6 +1206,11 @@ fn snapshot_from_guard(
         phase_eta_seconds: None,
         mining_paused: None,
         mining_power_pct: None,
+        tamper_locked: None,
+        tamper_status: None,
+        tamper_reason: None,
+        tamper_triggered_at_unix_ms: None,
+        tamper_seal_hash: None,
         stale_block_count: None,
         stale_fork_depth: None,
         stale_zero_bits: None,
@@ -1175,6 +1237,7 @@ async fn snapshot_with_phase(
     output_filter: &SharedOutputFilter,
     phase_tracker: &PhaseTracker,
     stale_telemetry: &Option<StaleBlockTelemetry>,
+    tamper_lock: &crate::tamper_lock::TamperLockHandle,
 ) -> TelemetrySnapshot {
     let ps = phase_tracker.get();
     let guard = stats.lock().await.clone();
@@ -1197,6 +1260,13 @@ async fn snapshot_with_phase(
         snapshot.mining_paused = Some(mc.paused);
         snapshot.mining_power_pct = Some(mc.normalized_power_pct());
     }
+
+    let tamper = tamper_lock.get();
+    snapshot.tamper_locked = Some(tamper.locked);
+    snapshot.tamper_status = Some(tamper.status);
+    snapshot.tamper_reason = tamper.reason;
+    snapshot.tamper_triggered_at_unix_ms = tamper.triggered_at_unix_ms;
+    snapshot.tamper_seal_hash = tamper.seal_hash;
 
     // Merge stale block telemetry if available
     if let Some(st) = stale_telemetry {

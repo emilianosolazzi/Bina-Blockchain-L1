@@ -16,6 +16,7 @@ $MINER_EXE_DEPLOY = Join-Path $env:LOCALAPPDATA "entropy\TemporalGradientMiner\d
 # Prefer the deployed binary (matches running process path); fall back to build output
 $MINER_EXE = if (Test-Path $MINER_EXE_DEPLOY) { $MINER_EXE_DEPLOY } else { $MINER_EXE_BUILD }
 $TELEMETRY_FILE = Join-Path $env:LOCALAPPDATA "entropy\TemporalGradientMiner\data\logs\telemetry.jsonl"
+$MINER_TRUST_SEAL = Join-Path $env:LOCALAPPDATA "entropy\TemporalGradientMiner\data\logs\miner-trust-seal.json"
 
 New-Item -ItemType Directory -Force -Path $LOGS | Out-Null
 
@@ -186,6 +187,9 @@ function Ensure-MinerBinary {
             $deployTs = (Get-Item $deployBin).LastWriteTimeUtc
             if ($buildTs -gt $deployTs) {
                 Copy-Item -Path $BinaryPath -Destination $deployBin -Force
+                if (Test-Path $MINER_TRUST_SEAL) {
+                    Remove-Item $MINER_TRUST_SEAL -Force -ErrorAction SilentlyContinue
+                }
                 Write-Host "  [OK] Synced newer build binary to $deployBin" -ForegroundColor Green
             }
         }
@@ -226,6 +230,9 @@ function Ensure-MinerBinary {
     if (Test-Path $BinaryPath) {
         New-Item -ItemType Directory -Force -Path $deployDir | Out-Null
         Copy-Item -Path $BinaryPath -Destination $deployBin -Force
+        if (Test-Path $MINER_TRUST_SEAL) {
+            Remove-Item $MINER_TRUST_SEAL -Force -ErrorAction SilentlyContinue
+        }
         Write-Host "  [OK] Synced patched binary to $deployBin" -ForegroundColor Green
     }
 
@@ -474,6 +481,23 @@ try {
     if ($hb) {
         $hbState = if ($hb.status) { $hb.status } else { 'ok' }
         Write-Host "  [OK] Heartbeat sidecar: $hbState" -ForegroundColor Green
+
+        try {
+            $hbStatus = Invoke-RestMethod -Uri "http://127.0.0.1:$hbPort/api/heartbeat/status" -TimeoutSec 5
+            $rw = $hbStatus.security.ransomware
+            if ($rw) {
+                $rwState = if ($rw.status) { [string]$rw.status } elseif ($rw.active) { 'ransomware_detected' } else { 'clear' }
+                $rwReason = if ($rw.reason) { [string]$rw.reason } else { 'none' }
+                if ($rw.active) {
+                    Write-Host "  [FAIL] Ransomware watch: $rwState, reason=$rwReason" -ForegroundColor Red
+                }
+                else {
+                    Write-Host "  [OK] Ransomware watch: $rwState, reason=$rwReason" -ForegroundColor Green
+                }
+            }
+        }
+        catch {
+        }
     }
     else {
         Write-Host "  [FAIL] Heartbeat sidecar: not healthy ($(Get-LogHint -LogPrefix 'heartbeat-sidecar'))" -ForegroundColor Red
@@ -497,6 +521,34 @@ if ($lastLine) {
     $ageSec = [math]::Round($ageMs / 1000)
     $hr = [math]::Round(($lastLine.hashrate_hs | ForEach-Object { $_ }), 1)
     Write-Host "  [OK] Miner: $hr H/s, phase=$($lastLine.mining_phase), telemetry ${ageSec}s old" -ForegroundColor Green
+
+    $tamperStatus = if ($lastLine.tamper_status) {
+        [string]$lastLine.tamper_status
+    }
+    elseif ($null -ne $lastLine.tamper_locked) {
+        if ([bool]$lastLine.tamper_locked) { 'locked' } else { 'sealed' }
+    }
+    else {
+        $null
+    }
+
+    if ($tamperStatus) {
+        $tamperReason = if ($lastLine.tamper_reason) { [string]$lastLine.tamper_reason } else { 'none' }
+        $sealSuffix = if ($lastLine.tamper_seal_hash) {
+            $sealHash = [string]$lastLine.tamper_seal_hash
+            " (seal $($sealHash.Substring(0, [Math]::Min(12, $sealHash.Length))))"
+        }
+        else {
+            ''
+        }
+
+        if ([bool]$lastLine.tamper_locked) {
+            Write-Host "  [FAIL] Tamper lock: $tamperStatus, reason=$tamperReason$sealSuffix" -ForegroundColor Red
+        }
+        else {
+            Write-Host "  [OK] Tamper lock: $tamperStatus, reason=$tamperReason$sealSuffix" -ForegroundColor Green
+        }
+    }
 }
 elseif (Get-Process temporal-gradient-miner -ErrorAction SilentlyContinue) {
     Write-Host "  [WARN] Miner process is running but telemetry did not refresh in time ($(Get-LogHint -LogPrefix 'miner'))" -ForegroundColor Yellow

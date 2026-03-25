@@ -2063,7 +2063,9 @@ curl -s "http://127.0.0.1:4271/api/utxo/scan?seed=$BINARY_HASH" \
             <h3 class="section-title" style="display:inline;">Personal Threat Dashboard</h3>
             <span style="font-size:13px;color:var(--muted);margin-left:8px;">▸ click to hide/show</span>
             <div style="display:flex;gap:8px;flex-wrap:wrap;float:right;" onclick="event.stopPropagation()">
+              <button class="action-btn" id="resealTamperLock">Reseal trust</button>
               <button class="action-btn" id="refreshSecurity">Refresh security</button>
+              <button class="action-btn" id="exportSecurityEvidence">Export evidence</button>
               <button class="copy-btn" id="copyRelayProfile">Copy relay profile</button>
             </div>
           </summary>
@@ -2084,6 +2086,10 @@ curl -s "http://127.0.0.1:4271/api/utxo/scan?seed=$BINARY_HASH" \
               <div class="status-item"><span>Security posture</span><span id="threatPostureBadge" class="badge">—</span></div>
               <div class="status-item"><span>Intrusion score</span><span id="threatIntrusionScore">—</span></div>
               <div class="status-item"><span>Telemetry freshness</span><span id="threatTelemetryFresh">—</span></div>
+              <div class="status-item"><span>Tamper lock</span><span id="threatTamperLock" class="badge">—</span></div>
+              <div class="status-item"><span>Tamper reason</span><span id="threatTamperReason">—</span></div>
+              <div class="status-item"><span>Ransomware watch</span><span id="threatRansomware" class="badge">—</span></div>
+              <div class="status-item"><span>Ransomware reason</span><span id="threatRansomwareReason">—</span></div>
               <div class="status-item"><span>Narrative</span><span id="threatNarrative">—</span></div>
             </div>
           </div>
@@ -2126,6 +2132,18 @@ curl -s "http://127.0.0.1:4271/api/utxo/scan?seed=$BINARY_HASH" \
             <div class="proof-box" style="margin-bottom:16px;">
               <div class="helper" style="margin-bottom:8px;">Active alerts</div>
               <div id="threatActiveAlerts" class="proof-nodes"></div>
+            </div>
+            <div class="proof-box" style="margin-bottom:16px;">
+              <div class="helper" style="margin-bottom:8px;">Ransomware evidence log</div>
+              <div id="threatRansomwareEvents" class="proof-nodes"></div>
+            </div>
+            <div class="proof-box" style="margin-bottom:16px;">
+              <div class="helper" style="margin-bottom:8px;">Protected miner assets</div>
+              <div id="threatProtectedAssets" class="proof-nodes"></div>
+            </div>
+            <div class="proof-box" style="margin-bottom:16px;">
+              <div class="helper" style="margin-bottom:8px;">Recovery flow</div>
+              <div id="threatRecoveryFlow" class="proof-node"></div>
             </div>
             <details class="proof-box" style="cursor:default;">
               <summary class="helper" style="margin-bottom:8px;cursor:pointer;user-select:none;">Relay profile preview <span style="font-size:13px;color:var(--muted);">▸ click to show/hide</span></summary>
@@ -2791,6 +2809,49 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
       }
     }
 
+    async function requestTamperReseal() {
+      try {
+        const res = await fetch('/api/security/tamper-reseal', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data.ok === false) throw new Error(data.error || data.message || 'Tamper reseal failed');
+        showToast(data.message || 'Tamper reseal requested.');
+        setTimeout(() => loadSecurity().catch(() => null), 2500);
+      } catch (err) {
+        console.warn('Failed to request tamper reseal:', err);
+        showToast(`Tamper reseal failed: ${err.message}`, true);
+      }
+    }
+
+    async function exportSecurityEvidence() {
+      try {
+        const res = await fetch('/api/security/evidence/export');
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || `Evidence export failed (${res.status})`);
+        }
+
+        const blob = await res.blob();
+        const disposition = res.headers.get('content-disposition') || '';
+        const match = disposition.match(/filename="?([^";]+)"?/i);
+        const filename = match?.[1] || `temporal-gradient-security-evidence-${Date.now()}.json`;
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        showToast('Security evidence exported.');
+      } catch (err) {
+        console.warn('Failed to export security evidence:', err);
+        showToast(`Evidence export failed: ${err.message}`, true);
+      }
+    }
+
     function syncMiningControlUI() {
       const btn = document.getElementById('pauseBtn');
       const statusEl = document.getElementById('ctrlStatus');
@@ -3330,11 +3391,23 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
       const alerts = threat.heartbeatAlerts?.active || heartbeat.security?.activeAlerts || [];
       const heartbeatError = heartbeat.error || null;
       const suspicious = heartbeat.security?.suspicious;
+      const tamper = threat.tamperStatus || {};
+      const tamperLocked = tamper.locked === true;
+      const ransomware = threat.ransomwareStatus || heartbeat.security?.ransomware || {};
+      const ransomwareActive = ransomware.active === true;
+      const ransomwareEvents = Array.isArray(ransomware.recentEvents) ? ransomware.recentEvents : [];
+      const protectedAssets = Array.isArray(ransomware.protectedAssets) ? ransomware.protectedAssets : [];
 
       // If heartbeat is in error state, show a meaningful status instead of all "—"
       if (heartbeatError) {
         els.personalThreatSummary.textContent = telemetry.continuousVerifiedLabel || 'Heartbeat sidecar is not responding. Security metrics will populate once it starts.';
         setBadge(els.threatPostureBadge, 'Unknown', 'warn');
+      } else if (ransomwareActive) {
+        els.personalThreatSummary.textContent = ransomware.reason || 'Ransomware-like activity was detected in protected miner paths. Mining is expected to fail shut until the signal clears and the trust profile is resealed.';
+        setBadge(els.threatPostureBadge, 'Ransomware lock', 'fail');
+      } else if (tamperLocked) {
+        els.personalThreatSummary.textContent = tamper.reason || 'Local tamper lock is active. Sensitive miner actions are suspended until the trust profile is resealed.';
+        setBadge(els.threatPostureBadge, 'Tamper locked', 'fail');
       } else {
         els.personalThreatSummary.textContent = telemetry.continuousVerifiedLabel || heartbeat.security?.narrative || 'Security summary unavailable.';
         setBadge(els.threatPostureBadge, suspicious ? 'Suspicious' : 'Trusted', suspicious ? 'fail' : 'ok');
@@ -3347,8 +3420,16 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
       els.threatIntrusionScore.className = suspicious ? 'danger' : 'ok';
       els.threatTelemetryFresh.textContent = heartbeat.heartbeat?.telemetryFresh ? 'Fresh' : 'Stale';
       els.threatTelemetryFresh.className = heartbeat.heartbeat?.telemetryFresh ? 'ok' : 'warn';
-      els.threatNarrative.textContent = heartbeat.security?.narrative || '—';
-      els.threatNarrative.className = suspicious ? 'danger' : '';
+      setBadge(els.threatTamperLock, tamperLocked ? 'Locked' : (tamper.status || 'Uninitialized'), tamperLocked ? 'fail' : 'ok');
+      els.threatTamperReason.textContent = tamper.reason || 'No deterministic local tamper event detected.';
+      setBadge(els.threatRansomware, ransomwareActive ? 'Detected' : (ransomware.status || 'Clear'), ransomwareActive ? 'fail' : 'ok');
+      els.threatRansomwareReason.textContent = ransomware.reason || 'No ransomware-like activity detected in protected miner paths.';
+      els.threatNarrative.textContent = ransomwareActive
+        ? (ransomware.reason || 'Ransomware-like activity detected in protected miner paths.')
+        : tamperLocked
+          ? (tamper.reason || 'Miner is in tamper-lock mode.')
+          : (heartbeat.security?.narrative || '—');
+      els.threatNarrative.className = (suspicious || tamperLocked || ransomwareActive) ? 'danger' : '';
 
       const history = telemetry.history || [];
       els.heartbeatHistory.innerHTML = history.length
@@ -3374,6 +3455,48 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
             <div class="helper" style="margin-top:8px;">${escapeHtml(alert.message || 'No details')}</div>
           </div>`).join('')
         : '<div class="helper">No active alerts. Mining heartbeat is clean.</div>';
+
+      els.threatRansomwareEvents.innerHTML = ransomwareEvents.length
+        ? ransomwareEvents.map(event => {
+            const escalated = event.escalation === 'escalated';
+            const indicators = Array.isArray(event.indicators) ? event.indicators : [];
+            const patternText = indicators.length
+              ? indicators.map(item => `${item.type}: ${item.fileName || item.relativePath || 'unknown'}`).join(' • ')
+              : (event.reason || 'Observed protected-path signal');
+            return `<div class="proof-node">
+              <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;">
+                <strong>${escapeHtml(new Date(event.timestamp || Date.now()).toLocaleString())}</strong>
+                <span class="badge ${escalated ? 'fail' : 'warn'}">${escalated ? 'Escalated' : 'Observed only'}</span>
+              </div>
+              <div class="helper" style="margin-top:8px;">${escapeHtml(patternText)}</div>
+              <div class="helper" style="margin-top:6px;">${escapeHtml(event.reason || (escalated ? 'Triggered ransomware lock.' : 'Did not meet escalation threshold.'))}</div>
+            </div>`;
+          }).join('')
+        : '<div class="helper">No ransomware evidence events recorded yet.</div>';
+
+      els.threatProtectedAssets.innerHTML = protectedAssets.length
+        ? protectedAssets.map(asset => `<div class="proof-node"><span class="mono">✓ ${escapeHtml(asset)}</span></div>`).join('')
+        : '<div class="helper">Protected asset list unavailable.</div>';
+
+      const recoverySteps = ransomwareActive
+        ? [
+            '1. Investigate the evidence log above before resealing.',
+            '2. If this is a false positive, remove the triggering test/artifact and click Reseal trust.',
+            '3. If this is a real attack, keep the miner stopped, click Export evidence, and restore from a trusted backup.',
+          ]
+        : tamperLocked
+          ? [
+              '1. Review the tamper reason and confirm the change was intentional.',
+              '2. If the environment is trusted, use Reseal trust to rebuild the local seal.',
+              '3. If the change was unexpected, keep the miner locked and investigate the host.',
+            ]
+          : [
+              'No recovery action needed. The miner is currently sealed and the ransomware watch is clear.',
+              'If you intentionally upgrade the miner or change protected files, reseal after verifying the environment.',
+            ];
+      els.threatRecoveryFlow.innerHTML = recoverySteps
+        .map(step => `<div class="helper" style="margin-bottom:8px;">${escapeHtml(step)}</div>`)
+        .join('');
 
       if (relay) {
         const relayChannel = relay.transport?.relayChannel || null;
@@ -5229,6 +5352,8 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
 
     els.refreshSystem.addEventListener('click', () => loadSystemStatus().catch(err => console.error(err)));
     els.refreshSecurity.addEventListener('click', () => loadSecurity().catch(err => showToast(err.message, true)));
+    els.resealTamperLock.addEventListener('click', () => requestTamperReseal().catch(err => showToast(err.message, true)));
+    els.exportSecurityEvidence.addEventListener('click', () => exportSecurityEvidence().catch(err => showToast(err.message, true)));
     els.refreshRandomness.addEventListener('click', () => loadNetworkLatest().catch(err => {
       state.randomnessLatest = { error: err.message };
       renderLatestRandomness();

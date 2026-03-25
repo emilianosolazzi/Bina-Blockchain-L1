@@ -125,6 +125,11 @@ lazy_static! {
     };
 }
 
+/// Public, rate-limited debugger detection for higher-level miner safety logic.
+pub fn debugger_present() -> bool {
+    DEBUGGER_CACHE.is_present()
+}
+
 // ─────────────────────────────────────────────────────────────────
 // Platform abstractions
 // ─────────────────────────────────────────────────────────────────
