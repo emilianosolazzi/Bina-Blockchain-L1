@@ -102,13 +102,8 @@ Arbitrum deployment addresses:
 
 ### Legacy / do not use
 
-- [archive/deprecated-rust/Mining.rs](archive/deprecated-rust/Mining.rs)
-  - Archived legacy standalone miner/reference implementation.
-  - Not part of the active miner.
-
-- [archive/deprecated-rust/nist_pqc.rs](archive/deprecated-rust/nist_pqc.rs)
-  - Archived standalone PQC reference module.
-  - Replaced in the active runtime by [rust/temporal_gradient_core/src/pqc.rs](rust/temporal_gradient_core/src/pqc.rs).
+- Legacy standalone Rust references were removed from the `l2-mining` working set.
+- If needed for future design work, use the L3 reference set under [../L3/reference/rust](../L3/reference/rust).
 
 ## Quick rule
 

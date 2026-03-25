@@ -1,3 +1,6 @@
+// Legacy L3 reference only.
+// Keep for simple PQC-enhancement mode design ideas; not active runtime code.
+
 use sha2::{Digest, Sha256, Sha512};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

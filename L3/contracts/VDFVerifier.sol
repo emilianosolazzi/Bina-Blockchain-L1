@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: MIT
+// Legacy L3 reference only.
+// Keep for future delay / anti-manipulation entropy design; do not deploy as-is.
 pragma solidity ^0.8.28;
 
 /**

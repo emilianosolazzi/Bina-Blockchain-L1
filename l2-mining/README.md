@@ -66,7 +66,7 @@ Excluded for now:
 3. The Rust miner and Solidity beacon are now aligned on the 8-byte temporal seed format.
 4. Difficulty checks in the beacon now use the fixed pool target directly, with no per-miner weighting hook.
 5. The packaged Rust runtime now lives in `rust/temporal_gradient_core` + `rust/package`.
-6. The old `rust/Mining.rs` and `rust/nist_pqc.rs` files are archived under `archive/deprecated-rust/`.
+6. Old standalone Rust references are no longer kept in `l2-mining/archive/deprecated-rust`; any retained design-only copies now live in the top-level `L3/reference/rust/` set.
 7. For the active production/runtime file map, see [PRODUCTION_FILES.md](PRODUCTION_FILES.md).
 8. Bloom-filter based uniqueness tracking has been removed from the active on-chain path; mining now relies on exact `usedOutputs` checks.
 

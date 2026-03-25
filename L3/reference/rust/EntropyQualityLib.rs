@@ -1,3 +1,6 @@
+// Legacy L3 reference only.
+// Keep for future entropy scoring / zk-prep refactor ideas; not an active production module.
+
 use std::time::{Instant, Duration};
 use num_bigint::BigUint;
 use num_traits::{Zero, One};

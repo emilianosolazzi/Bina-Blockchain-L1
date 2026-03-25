@@ -1,3 +1,6 @@
+// Legacy L3 reference only.
+// Keep for future post-quantum hardening ideas; not the active runtime implementation.
+
 //! NIST Post-Quantum Cryptography Integration Module
 //!
 //! This module provides integration with NIST-approved post-quantum cryptographic algorithms

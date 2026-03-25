@@ -1,3 +1,7 @@
+"""Legacy L3 reference only.
+Keep for future SDK/client refactor ideas; not production-ready.
+"""
+
 import requests
 from web3 import Web3
 from eth_account.messages import encode_defunct

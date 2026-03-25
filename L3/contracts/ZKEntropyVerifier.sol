@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: MIT
+// Legacy L3 reference only.
+// Keep for future privacy-preserving entropy lane design; do not deploy as-is.
 pragma solidity ^0.8.28;
 
 import {AccessControlUpgradeable} from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
