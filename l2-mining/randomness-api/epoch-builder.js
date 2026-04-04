@@ -156,18 +156,59 @@ function buildMerkleTree(outputHashes) {
 
 /**
  * Parse new lines from the telemetry JSONL file and extract accepted solutions.
+ *
+ * Uses byte-offset tracking (state.processedBytes) instead of reading the
+ * entire file.  This avoids V8's ~512 MB single-string limit on large
+ * telemetry files and keeps each poll O(new data) instead of O(total file).
  */
 function scanTelemetry() {
 	if (!fs.existsSync(TELEMETRY_FILE)) return [];
 
-	const content = fs.readFileSync(TELEMETRY_FILE, 'utf8');
-	const lines = content.trim().split('\n').filter(Boolean);
+	const stat = fs.statSync(TELEMETRY_FILE);
 
-	const newLines = lines.slice(state.processedLines);
+	// Migration: if processedBytes not tracked yet, initialise to current
+	// file size so we start watching for NEW lines from this point forward.
+	if (state.processedBytes == null) {
+		state.processedBytes = stat.size;
+		console.log(`[EpochBuilder] Initialised processedBytes=${stat.size} (byte-offset migration)`);
+		return [];
+	}
+
+	// File was truncated / rotated — reset
+	if (stat.size < state.processedBytes) {
+		console.log('[EpochBuilder] Telemetry file shrank — assuming rotation, resetting offset');
+		state.processedBytes = 0;
+		state.processedLines = 0;
+		state.lastAcceptedCount = null;
+	}
+
+	const startByte = state.processedBytes;
+	if (startByte >= stat.size) return []; // no new data
+
+	// Read only the new portion of the file
+	const readSize = stat.size - startByte;
+	const fd = fs.openSync(TELEMETRY_FILE, 'r');
+	const buf = Buffer.alloc(readSize);
+	fs.readSync(fd, buf, 0, readSize, startByte);
+	fs.closeSync(fd);
+
+	let newContent = buf.toString('utf8');
+
+	// If we started mid-file the first chunk might be a partial JSON line — drop it
+	if (startByte > 0 && newContent.length > 0 && newContent[0] !== '{' && newContent[0] !== '\n') {
+		const firstNewline = newContent.indexOf('\n');
+		if (firstNewline >= 0) {
+			newContent = newContent.slice(firstNewline + 1);
+		} else {
+			return []; // entire chunk is a partial line — wait for more data
+		}
+	}
+
+	const lines = newContent.split('\n').filter(l => l.trim());
 	const acceptedOutputs = [];
+	let prevAccepted = state.lastAcceptedCount ?? null;
 
-	let prevAccepted = null;
-	for (const line of newLines) {
+	for (const line of lines) {
 		try {
 			const snap = JSON.parse(line);
 			const currAccepted = snap.accepted_submissions || 0;
@@ -185,7 +226,9 @@ function scanTelemetry() {
 		} catch { /* skip malformed lines */ }
 	}
 
-	state.processedLines = lines.length;
+	state.processedBytes = stat.size;
+	state.processedLines += lines.length;
+	state.lastAcceptedCount = prevAccepted;
 	return acceptedOutputs;
 }
 
@@ -223,7 +266,7 @@ async function finalizeEpochOnChain(wallet, epochId) {
 	const contract = new ethers.Contract(BATCH_CONTRACT, BATCH_ABI, wallet);
 
 	console.log(`[EpochBuilder] Finalizing epoch ${epochId}…`);
-	const tx = await contract.finalizeEpoch(epochId);
+	const tx = await contract.finalizeEpoch(epochId, { gasLimit: 500_000 });
 	const receipt = await tx.wait();
 	console.log(`[EpochBuilder] ✓ Epoch ${epochId} finalized in tx ${receipt.transactionHash} (gas: ${receipt.gasUsed})`);
 	return receipt;
@@ -233,7 +276,7 @@ async function recordStorageAttestationOnChain(wallet, epochId, attestationHash)
 	const contract = new ethers.Contract(BATCH_CONTRACT, BATCH_ABI, wallet);
 
 	console.log(`[EpochBuilder] Recording storage attestation for epoch ${epochId}…`);
-	const tx = await contract.recordStorageAttestation(epochId, attestationHash);
+	const tx = await contract.recordStorageAttestation(epochId, attestationHash, { gasLimit: 300_000 });
 	const receipt = await tx.wait();
 	console.log(`[EpochBuilder] ✓ Storage attestation recorded for epoch ${epochId} in tx ${receipt.transactionHash}`);
 	return receipt;

@@ -2656,8 +2656,7 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
           <button class="action-btn" id="drawerVerifyStorage">Verify storage now</button>
         </div>
       </div>
-      <!-- Wallet actions hidden: epoch-builder auto-finalizes and auto-attests -->
-      <div class="drawer-card" style="display:none;">
+      <div class="drawer-card">
         <h4>Wallet actions</h4>
         <div class="wallet-row" style="margin-bottom:12px;">
           <button class="action-btn" id="connectWallet">Connect MetaMask</button>
@@ -3175,8 +3174,16 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
       const combinedTotal = rewards.total + staleReward;
       const stalePendingLabel = (staleReward > 0 && stalePendingHero > 0) ? ' ⏳' : '';
       const sourceLabel = staleReward > 0 ? ` (PoW + Stale${stalePendingLabel})` : '';
-      els.tgbtTotal.innerHTML = `${fmtTGBT(combinedTotal)} <span class="unit">TGBT${estLabel}${sourceLabel}</span>`;
-      els.rewardDetail.textContent = `${fmtTGBT(combinedTotal)} TGBT${estLabel}${sourceLabel}`;
+
+      // Fallback: if miner telemetry reward is zero but wallet already has TGBT,
+      // display wallet balance so operators can still see real rewards on UI.
+      const walletBalance = Number(state.system?.chain?.token?.balance || 0);
+      const useWalletFallback = combinedTotal <= 0 && walletBalance > 0;
+      const shownTotal = useWalletFallback ? walletBalance : combinedTotal;
+      const shownSourceLabel = useWalletFallback ? ' (wallet)' : sourceLabel;
+
+      els.tgbtTotal.innerHTML = `${fmtTGBT(shownTotal)} <span class="unit">TGBT${estLabel}${shownSourceLabel}</span>`;
+      els.rewardDetail.textContent = `${fmtTGBT(shownTotal)} TGBT${estLabel}${shownSourceLabel}`;
 
       const acc = snap.accepted_submissions || 0;
       const rej = snap.rejected_submissions || 0;
@@ -3701,7 +3708,7 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
       els.drawerStorageSummary.textContent = storage.detail;
       els.drawerVerifyStorage.disabled = false;
       els.copyDrawerAttestationHash.disabled = !attestationHash;
-      els.walletFinalizeEpoch.disabled = !ep || !finalizeReady;
+      els.walletFinalizeEpoch.disabled = false;
       els.walletRecordAttestation.disabled = !ep || !attestationHash || isFinalized === false || isStorageAttested;
 
       if (onChain?.error) {

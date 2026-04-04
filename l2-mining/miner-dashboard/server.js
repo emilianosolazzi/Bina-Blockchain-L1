@@ -31,6 +31,10 @@ const BATCH_ADDRESS = process.env.BATCH_ADDRESS || '0xAf07E37D104E9be17639FE7a51
 const WALLET_ADDRESS = process.env.WALLET_ADDRESS || '0x5cB4D906f0464b34c44d6555A770BF6aF4A2cEfe';
 const RPC_API_KEY = process.env.RPC_API_KEY || 'fp_2d93df5e6cebe485b69c363a62e237fc9d0f88b9';
 const CHALLENGE_WINDOW = Number(process.env.CHALLENGE_WINDOW || 28800);
+const TELEMETRY_TAIL_CHUNK_BYTES = Number(process.env.TELEMETRY_TAIL_CHUNK_BYTES || 64 * 1024);
+const TELEMETRY_TAIL_DEFAULT_MAX_BYTES = Number(process.env.TELEMETRY_TAIL_DEFAULT_MAX_BYTES || 4 * 1024 * 1024);
+const STALE_PROOF_SCAN_LIMIT = Number(process.env.STALE_PROOF_SCAN_LIMIT || 5000);
+const STALE_PROOF_SCAN_MAX_BYTES = Number(process.env.STALE_PROOF_SCAN_MAX_BYTES || 16 * 1024 * 1024);
 const MODULE_IDS = {
 	BATCH_MINING_MODULE: ethers.id('BATCH_MINING_MODULE'),
 	STALE_BLOCK_MODULE: ethers.id('STALE_BLOCK_MODULE'),
@@ -994,17 +998,65 @@ function tryReadJson(filePath) {
 	}
 }
 
-function readSnapshots(limit = 120) {
+function readTelemetryTail(limit = 120, options = {}) {
 	if (!fs.existsSync(TELEMETRY_FILE)) {
 		return [];
 	}
 
-	const text = fs.readFileSync(TELEMETRY_FILE, 'utf8');
-	const lines = text
-		.split(/\r?\n/)
-		.map((line) => line.trim())
-		.filter(Boolean)
-		.slice(-limit);
+	const normalizedLimit = Math.max(1, Number(limit) || 1);
+	const chunkBytes = Math.max(4096, Number(options.chunkBytes) || TELEMETRY_TAIL_CHUNK_BYTES);
+	const maxBytes = Math.max(
+		chunkBytes,
+		Number(options.maxBytes) || Math.max(TELEMETRY_TAIL_DEFAULT_MAX_BYTES, normalizedLimit * 4096),
+	);
+
+	let fd;
+	try {
+		const stat = fs.statSync(TELEMETRY_FILE);
+		if (!stat.size) return [];
+
+		fd = fs.openSync(TELEMETRY_FILE, 'r');
+		let position = stat.size;
+		let collectedBytes = 0;
+		let text = '';
+		let newlineCount = 0;
+
+		while (position > 0 && collectedBytes < maxBytes && newlineCount <= normalizedLimit) {
+			const bytesToRead = Math.min(chunkBytes, position, maxBytes - collectedBytes);
+			position -= bytesToRead;
+			const buffer = Buffer.allocUnsafe(bytesToRead);
+			const bytesRead = fs.readSync(fd, buffer, 0, bytesToRead, position);
+			if (bytesRead <= 0) break;
+
+			collectedBytes += bytesRead;
+			text = buffer.toString('utf8', 0, bytesRead) + text;
+			newlineCount = (text.match(/\n/g) || []).length;
+		}
+
+		return text
+			.split(/\r?\n/)
+			.map((line) => line.trim())
+			.filter(Boolean)
+			.slice(-normalizedLimit);
+	} catch (err) {
+		console.warn(`[readTelemetryTail] Failed to read telemetry tail: ${shortError(err)}`);
+		return [];
+	} finally {
+		if (fd != null) {
+			try {
+				fs.closeSync(fd);
+			} catch {
+			}
+		}
+	}
+}
+
+function readSnapshots(limit = 120, options = {}) {
+	if (!fs.existsSync(TELEMETRY_FILE)) {
+		return [];
+	}
+
+	const lines = readTelemetryTail(limit, options);
 
 	let parseErrors = 0;
 	const snapshots = lines
@@ -1031,7 +1083,7 @@ function latestSnapshot() {
 }
 
 function latestSnapshotWithStaleProof() {
-	const snapshots = readSnapshots(Number.MAX_SAFE_INTEGER);
+	const snapshots = readSnapshots(STALE_PROOF_SCAN_LIMIT, { maxBytes: STALE_PROOF_SCAN_MAX_BYTES });
 	for (let i = snapshots.length - 1; i >= 0; i--) {
 		const snap = snapshots[i];
 		if (snap?.stale_block_hash_hex || snap?.stale_proof_id || snap?.stale_raw_header_hex) {
