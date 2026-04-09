@@ -197,8 +197,10 @@ contract MiningModule is ModuleBase, EIP712("TemporalGradientBeacon", "1") {
             commitHashes.length != signatures.length
         ) revert ArrayLengthMismatch();
 
+        uint256 startNonce = nonces[msg.sender];
+
         for (uint256 i = 0; i < commitHashes.length; i++) {
-            submitMiningCommitment(commitHashes[i], poolIds[i], nonces[msg.sender], deadlines[i], signatures[i]);
+            submitMiningCommitment(commitHashes[i], poolIds[i], startNonce + i, deadlines[i], signatures[i]);
         }
     }
 
@@ -220,6 +222,18 @@ contract MiningModule is ModuleBase, EIP712("TemporalGradientBeacon", "1") {
     }
 
     // updateMiningPool removed — pools are immutable after creation (Bitcoin-style).
+    // Deactivation is the ONLY allowed mutation: governance can retire broken or
+    // exhausted pools so getActivePools() stays accurate and no miner accidentally
+    // commits to an unmineable target.  Once deactivated a pool cannot be re-activated.
+
+    event MiningPoolDeactivated(uint8 indexed poolId);
+
+    function deactivatePool(uint8 poolId) external onlyGovernance {
+        require(poolId < poolCount, "InvalidPoolId");
+        require(miningPools[poolId].active, "AlreadyInactive");
+        miningPools[poolId].active = false;
+        emit MiningPoolDeactivated(poolId);
+    }
 
     function getPoolInfo(uint8 poolId) external view returns (uint256 difficulty, uint256 emission, uint256 mined, bool active) {
         if (poolId >= poolCount) revert InvalidPoolId();

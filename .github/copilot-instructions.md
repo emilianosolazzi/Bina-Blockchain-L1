@@ -138,14 +138,14 @@ The epoch pipeline turns raw miner solutions into on-chain commitments:
 # Arbitrum production (chain ID 42161)
 RPC_URL=https://api.nativebtc.org/v1/arb?key=<rpc_api_key>   # ⚠️ MUST include API key
 CHAIN_ID=42161
-POOL_ID=3
+POOL_ID=1
 MINER_PRIVATE_KEY=<hex_private_key>
 
 # Contracts
 BATCH_CONTRACT=0xAf07E37D104E9be17639FE7a51B36972D4738651
 CORE_CONTRACT=0xF6556DDC7CdD3635A05428BD85BCf33A09F752e6
 TGBT_TOKEN=0x31228eE520e895DA19f728DE5459b1b317d9b8D8
-TOKENOMICS_CONTRACT=0xF6069614FE09B91e5B00DA0a13A11B2BFcCabC36
+TOKENOMICS_CONTRACT=0x7B871bdeDdED0064C34e22902181A9a983C9E2ab
 
 # Tuning
 SOLUTIONS_PER_EPOCH=10
@@ -159,6 +159,157 @@ PORT=4271
 - **Challenge window:** 28,800 **L1 Ethereum** blocks (~96 hours) must pass between `commitEpochRoot()` and `finalizeEpoch()`. Premature finalize → `CooldownNotElapsed()`. Note: Arbitrum Solidity's `block.number` returns the L1 mainnet block number, NOT the L2 number.
 - **Cooldown:** `EPOCH_COOLDOWN_BLOCKS` enforced between commits from same operator.
 - **Leaf cap:** `MAX_LEAVES_PER_EPOCH` limits solutions per epoch.
+
+## Mining Pool Status (on-chain, verified April 2026)
+
+### CRITICAL: Difficulty semantics are BACKWARDS from intuition
+
+`MiningLib._validateDifficultyAndUniqueness()` checks: `if (uint256(hmacOutput) >= baseDifficulty) revert SolutionTooEasy()`
+
+This means **hash must be LESS than targetDifficulty**. So:
+- **Higher targetDifficulty = EASIER mining** (more hashes pass)
+- **Lower targetDifficulty = HARDER mining** (fewer hashes pass)
+- `MIN_DIFFICULTY = 1,000` ← sounds easy but is **impossibly hard** (~246 leading zero bits)
+- `MAX_DIFFICULTY = 2^245` ← sounds hard but is **reasonably easy** (~11 leading zero bits)
+
+When creating a new pool, use a **LARGE** difficulty value (close to 2^245), NOT a small one.
+
+### Pool inventory (poolCount = 2)
+
+| Pool | targetDifficulty | Leading zeros needed | emissionBucket | totalMined | Active | Status |
+|------|-----------------|---------------------|---------------|------------|--------|--------|
+| 0 | 1,000 | ~246 bits (impossible) | 700,000,000 TGBT | 0 TGBT | true | **STRANDED — unmintable forever** |
+| 1 | 2^245 (~5.65e73) | ~11 bits | ~700,000,000 TGBT | 787.5 TGBT | true | **Working — canonical mining pool** |
+| 2 | — | — | — | — | — | Does not exist (InvalidPoolId revert) |
+| 3 | — | — | — | — | — | Does not exist (InvalidPoolId revert) |
+
+### Why Pool 0 is dead
+
+Pool 0 was created during `MiningModule.initialize()` with `initialDifficulty = 1000`. Due to the inverted difficulty semantics, a miner's hash output (a 256-bit number) must be **less than 1,000** — requiring ~246 leading zero bits. This is cryptographically impossible. The 700M TGBT in its `emissionBucket` can never be mined. Pools are **immutable** after creation (no `updateMiningPool`).
+
+### Emission budget
+
+| Category | Amount | Notes |
+|----------|--------|-------|
+| `MINING_ALLOCATION` (global cap) | 1,900,000,000 TGBT | Hardcoded in TokenomicsModule |
+| Pool 0 emissionBucket | 700,000,000 TGBT | **Permanently stranded** (difficulty=1000) |
+| Pool 1 emissionBucket | ~700,000,000 TGBT | Working, 787.5 mined so far |
+| Unallocated to any pool | ~500,000,000 TGBT | Needs new pool(s) via `createMiningPool()` |
+| `STALE_BLOCK_ALLOCATION` | 75,000,000 TGBT | Separate budget, 84 TGBT rewarded so far |
+
+### Can Pool 1 handle everything?
+
+Pool 1 has ~699,999,212.5 TGBT remaining in its bucket — enough for years at current rates. The global `totalMined` counter (8,812.5 TGBT across both commit-reveal and batch epoch paths) is far from the 1.9B cap.
+
+**However:** Pool 1 can ONLY mine up to its ~700M bucket. The other ~500M unallocated TGBT requires creating new pool(s) via `createMiningPool(targetDifficulty, emissionBucket)` — which needs `onlyGovernance` (Ledger wallet). Pool 0's stranded 700M is permanently lost.
+
+### TokenomicsModule reward capping (dual cap)
+
+```solidity
+// Cap 1: global mining allocation
+remaining = MINING_ALLOCATION - totalMined;
+if (reward > remaining) reward = remaining;
+
+// Cap 2: per-pool emission bucket
+remaining = poolEmissionBucket - poolTotalMined;
+if (reward > remaining) reward = remaining;
+```
+
+Both MiningModule (commit-reveal) and BatchMiningModule (epochs) go through `TokenomicsModule.onBlockMined()` using the same pool parameters. The `onlyAuthorizedMiningModule` modifier authorizes both `MODULE_MINING` and `MODULE_BATCH_MINING`.
+
+### TGBT supply breakdown (as of April 2026)
+
+| Source | Amount | Counter |
+|--------|--------|---------|
+| PoW mining (commit-reveal + batch epochs) | 8,812.5 TGBT | `TokenomicsModule.totalMined()` |
+| Stale block rewards | 84.0 TGBT | `TokenomicsModule.totalStaleRewards()` |
+| Other (treasury/governance) | 4,563.875 TGBT | `totalSupply - totalMined - totalStaleRewards` |
+| **Total minted** | **13,460.375 TGBT** | `TGBT.totalSupply()` |
+| Miner wallet balance | 13,450.375 TGBT | `TGBT.balanceOf(miner)` |
+
+### Pool 1 totalMined vs global totalMined discrepancy
+
+Pool 1 shows `totalMined = 787.5 TGBT` but the global `TokenomicsModule.totalMined()` shows 8,812.5 TGBT. The difference (8,025 TGBT) comes from **BatchMiningModule** epochs — those also pass pool 1's parameters to `onBlockMined()` but may increment the global counter differently than the pool-level counter depending on which MiningModule path handles the accounting.
+
+## Mining Emission Economics (verified April 2026)
+
+### Reward parameters (on-chain)
+
+| Parameter | Value | Source |
+|-----------|-------|--------|
+| Base reward per solution | 10.0 TGBT | `TokenomicsModule.getMiningEconomics()` |
+| Bonus multiplier | 1.25× (12.5 TGBT) | `bonusMultiplier = 125` |
+| Bonus threshold | 2× pool difficulty | `bonusThreshold = 2` |
+| Bonus frequency | ~5% of solutions (estimate) | Exceptional difficulty hits |
+| Effective avg reward | ~10.125 TGBT | Weighted average |
+| Pool 1 difficulty | 2^245 (~11 leading zero bits) | Fixed, immutable |
+| P(valid hash) | 1/2048 per hash attempt | From difficulty |
+| Difficulty adjustment | **NONE** | Pools are immutable after creation |
+
+### Commit-reveal cycle constraints
+
+Each miner can only have **1 active commitment at a time**. This is the primary rate limiter.
+
+| Constraint | Value | Effect |
+|-----------|-------|--------|
+| `minBlockInterval` | 1 L1 block (~12s) | Min gap between commits |
+| `minCommitmentAge` | 2 L1 blocks (~24s) | Must wait before reveal |
+| `maxCommitmentAge` | 500 L1 blocks (~100 min) | Commit expires if not revealed |
+| Min theoretical cycle | ~4 L1 blocks = ~48s | submit → wait → reveal → next |
+| Practical cycle | ~5-10 min per solution | Including nonce search + tx confirmation |
+
+### Halving schedule
+
+**CRITICAL BUG: Halving is ~96 years away instead of ~2 years.**
+
+The `halvingInterval = 252,288,000` blocks was designed for Arbitrum L2 blocks at 0.25s/block, which would give ~2-year halvings. But Arbitrum's Solidity `block.number` returns **L1 Ethereum mainnet** block numbers (12s each). So: `252,288,000 × 12s = 96 years`.
+
+The comment in `TokenomicsLib.sol` line 15 confirms the developer intent: `630,720,000 blocks ≈ 5 years on Arbitrum (0.25 s blocks)`.
+
+| Halving # | Reward | Cumulative cut | Approximate year |
+|-----------|--------|---------------|-----------------|
+| 0 (now) | 10.0000 TGBT | 0% | 2026 |
+| 1 | 6.5000 TGBT | 35% | ~2122 |
+| 2 | 4.2250 TGBT | 58% | ~2218 |
+| 3 | 2.7463 TGBT | 73% | ~2314 |
+
+The reduction factor is `0.65` (35% cut per halving), NOT 50% like Bitcoin. Defined in `TokenomicsLib.sol` as `REDUCTION_NUMERATOR = 65, REDUCTION_DENOMINATOR = 100`.
+
+### No difficulty adjustment — linear emission scaling
+
+Unlike Bitcoin, there is **no automatic difficulty adjustment**. More miners = linearly faster emission with zero rebalancing. If 10× miners join, Pool 1 drains 10× faster.
+
+### Pool 1 depletion timeline (at ~10 min/solution/miner baseline)
+
+| Miners | TGBT/day | TGBT/year | Pool 1 lasts |
+|--------|----------|-----------|-------------|
+| 1 | 1,458 | 532,534 | 1,314 years |
+| 10 | 14,580 | 5,325,345 | 131 years |
+| 100 | 145,800 | 53,253,450 | 13.1 years |
+| 1,000 | 1,458,000 | 532,534,500 | **1.3 years** |
+| 5,000 | 7,290,000 | 2,662,672,500 | **96 days** |
+| 10,000 | 14,580,000 | 5,325,345,000 | **48 days** |
+
+### 10-year supply projection (no halving in this window)
+
+| Miners | Year 1 mined | Year 5 mined | Year 10 mined | % of Pool 1 |
+|--------|-------------|-------------|--------------|------------|
+| 1 | 532K | 2.6M | 5.3M | 0.76% |
+| 10 | 5.3M | 26.6M | 53.2M | 7.6% |
+| 100 | 53.2M | 266.2M | 532.5M | 76% |
+| 1,000 | 532.5M | 700M (capped) | 700M (capped) | 100% |
+
+### Key risks
+
+1. **No difficulty adjustment** — viral growth drains Pool 1 with no automatic brake
+2. **Halving ~96 years away** — reward stays 10 TGBT/solution indefinitely
+3. **Pool 0 stranded** — 700M TGBT (36.8% of MINING_ALLOCATION) lost forever
+4. **500M unallocated** — needs new pool(s) via governance (Ledger wallet)
+5. **Batch mining throughput** — BatchMiningModule bypasses per-solution commit-reveal, allowing higher throughput per miner (already mined 8,025 TGBT vs 787.5 via commit-reveal)
+
+### Model script
+
+Full economics model with projections: `l2-mining/mining_economics_model.py`
 
 ## Key Config Fields (miner-config.json)
 
@@ -194,12 +345,13 @@ PORT=4271
 | BatchMiningModule | `0xAf07E37D104E9be17639FE7a51B36972D4738651` | ✅ Live |
 | StaleBlockOracle | `0xdc4eDF632187d05da50393Af87D19A08f6986517` | ✅ Live + Initialized (v2, LE zero-bit fix) |
 | TGBT Token | `0x31228eE520e895DA19f728DE5459b1b317d9b8D8` | ✅ Live |
-| TokenomicsModule (active) | `0xF6069614FE09B91e5B00DA0a13A11B2BFcCabC36` | ✅ Live |
-| TokenomicsModule (old, deauthorized) | `0xA9f684d709bB46155A252b260dDDE4cb2a37a0E3` | ❌ Deauthorized |
+| TokenomicsModuleV2 (active) | `0x7B871bdeDdED0064C34e22902181A9a983C9E2ab` | ✅ Live |
+| TokenomicsModule V1 (deauthorized) | `0xF6069614FE09B91e5B00DA0a13A11B2BFcCabC36` | ❌ Deauthorized |
+| TokenomicsModule V0 (deauthorized) | `0xA9f684d709bB46155A252b260dDDE4cb2a37a0E3` | ❌ Deauthorized |
 
 ### Wallet & Module Registry
 
-Wallet (hot): `0x5cB4D906f0464b34c44d6555A770BF6aF4A2cEfe` — Pool ID: 3
+Wallet (hot): `0x5cB4D906f0464b34c44d6555A770BF6aF4A2cEfe` — Pool ID: 1
 - Roles: `GOVERNANCE_ROLE` on Core
 - Registered modules: `FORK_RELAY` (for `recordForkEvent()` on StaleBlockOracle)
 - `core.isModule(hotWallet)` → `true` (verified on-chain)

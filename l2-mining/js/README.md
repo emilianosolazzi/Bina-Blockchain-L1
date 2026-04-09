@@ -76,7 +76,7 @@ Three strategies (fail-closed):
 |----------|---------|
 | Core (TemporalGradientBeacon) | `0xF6556DDC7CdD3635A05428BD85BCf33A09F752e6` |
 | BatchMiningModule | `0xAf07E37D104E9be17639FE7a51B36972D4738651` |
-| TokenomicsModule | `0xF6069614FE09B91e5B00DA0a13A11B2BFcCabC36` |
+| TokenomicsModuleV2 | `0x7B871bdeDdED0064C34e22902181A9a983C9E2ab` |
 | TGBT Token | `0x31228eE520e895DA19f728DE5459b1b317d9b8D8` |
 
 ## Rate Limits

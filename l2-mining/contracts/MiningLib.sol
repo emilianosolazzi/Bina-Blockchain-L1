@@ -325,7 +325,7 @@ library MiningLib {
         uint256 max,
         uint256 nonce,
         mapping(address => mapping(uint256 => bool)) storage usedNonces
-    ) internal view returns (uint256 randomValue) {
+    ) internal returns (uint256 randomValue) {
         // Validate inputs
         if (min > max) revert InvalidRange(SEVERITY_HIGH, ERROR_CATEGORY_INPUT, min, max);
         if (outputs.length == 0) revert MalformedInput(SEVERITY_HIGH, ERROR_CATEGORY_INPUT, "Empty outputs");
@@ -385,9 +385,8 @@ library MiningLib {
             unchecked { ++i; }
         }
         
-        // Only mark nonce as used AFTER all validation has passed
-        // In the actual function, this should be moved here
-        // usedNonces[msg.sender][nonce] = true;
+        // Mark nonce as consumed after successful generation so direct callers cannot replay.
+        usedNonces[msg.sender][nonce] = true;
         
         return randomValue;
     }
@@ -411,10 +410,7 @@ library MiningLib {
         values = new uint256[](count);
         
         for (uint8 i = 0; i < count; i++) {
-            // First mark the nonce as used (moved from autoPickRandom)
-            usedNonces[msg.sender][nonce + i] = true;
-            
-            // Then generate the random value
+            // autoPickRandom now consumes nonce usage itself.
             values[i] = autoPickRandom(outputs, min, max, nonce + i, usedNonces);
         }
         
