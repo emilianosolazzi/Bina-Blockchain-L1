@@ -153,6 +153,15 @@ async fn main() -> Result<()> {
         eprintln!();
     }
 
+    // Derive wallet address from key file (needed for dashboard display)
+    let wallet_address = keygen::address_from_key_file(&key_path)
+        .unwrap_or_else(|_| String::new());
+    if wallet_address.is_empty() {
+        step_warn("Wallet address unavailable");
+    } else {
+        step(&format!("Wallet ready: {wallet_address}"));
+    }
+
     let telemetry_path = config.telemetry_path()?;
     let control_path = config.control_file_path()?;
     if let Some(parent) = telemetry_path.parent() {
@@ -251,6 +260,11 @@ async fn main() -> Result<()> {
         latest: Arc::clone(&latest),
         heartbeat_status,
         shutdown: shutdown.clone(),
+        wallet_address: wallet_address.clone(),
+        rpc_url: config.rpc_url.clone(),
+        contract_address: config.contract_address.clone(),
+        pool_id: config.pool_id,
+        config_path: config_path.clone(),
     };
 
     let port = cli.port;
@@ -466,9 +480,15 @@ fn resolve_key_path(config: &MinerConfig, config_path: &PathBuf) -> PathBuf {
 fn open_browser(url: &str) -> Result<()> {
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", url])
-            .spawn()?;
+        if std::process::Command::new("explorer.exe")
+            .arg(url)
+            .spawn()
+            .is_err()
+        {
+            std::process::Command::new("rundll32.exe")
+                .args(["url.dll,FileProtocolHandler", url])
+                .spawn()?;
+        }
     }
     #[cfg(target_os = "macos")]
     {

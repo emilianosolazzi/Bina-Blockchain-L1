@@ -35,6 +35,11 @@ pub struct AppState {
     pub latest: Arc<RwLock<Option<TelemetrySnapshot>>>,
     pub heartbeat_status: Arc<RwLock<HeartbeatStatus>>,
     pub shutdown: CancellationToken,
+    pub wallet_address: String,
+    pub rpc_url: String,
+    pub contract_address: String,
+    pub pool_id: u8,
+    pub config_path: PathBuf,
 }
 
 /// Start the HTTP server on `addr`. Runs until `shutdown` is cancelled.
@@ -45,6 +50,7 @@ pub async fn run_server(state: AppState, port: u16) -> anyhow::Result<()> {
         .route("/api/history", get(api_history))
         .route("/api/miner/control", get(api_get_control).post(api_post_control))
         .route("/api/health", get(api_health))
+        .route("/api/system/status", get(api_system_status))
         .route("/api/heartbeat/status", get(api_heartbeat_status))
         .route("/api/heartbeat/alerts", get(api_heartbeat_alerts))
         .route("/api/cpu", get(api_cpu))
@@ -162,6 +168,43 @@ async fn api_health(State(state): State<AppState>) -> Json<serde_json::Value> {
         "status": "ok",
         "miner_state": running,
         "mode": "self-miner",
+    }))
+}
+
+/// GET /api/system/status — full system status including wallet address.
+async fn api_system_status(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let snap = state.latest.read().await;
+    let miner_state = snap
+        .as_ref()
+        .map(|s| format!("{:?}", s.state))
+        .unwrap_or_else(|| "unknown".into());
+    let solutions = snap.as_ref().map(|s| s.solutions).unwrap_or(0);
+    let accepted = snap.as_ref().map(|s| s.accepted_submissions).unwrap_or(0);
+    let hashrate = snap.as_ref().map(|s| s.hashrate_hs).unwrap_or(0.0);
+    let rewards = snap.as_ref().map(|s| s.total_rewards_estimate).unwrap_or(0.0);
+    drop(snap);
+
+    Json(serde_json::json!({
+        "status": "ok",
+        "mode": "self-miner",
+        "miner": {
+            "state": miner_state,
+            "solutions": solutions,
+            "accepted": accepted,
+            "hashrate": hashrate,
+            "rewards": rewards,
+        },
+        "chain": {
+            "walletAddress": state.wallet_address,
+            "rpcUrl": state.rpc_url,
+            "contractAddress": state.contract_address,
+            "chainId": 42161,
+            "poolId": state.pool_id,
+        },
+        "dashboard": {
+            "telemetryFile": state.telemetry_path.to_string_lossy(),
+            "configFile": state.config_path.to_string_lossy(),
+        },
     }))
 }
 
