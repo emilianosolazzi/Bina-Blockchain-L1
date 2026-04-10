@@ -468,6 +468,12 @@ fn sanitize_dev_values(config: &mut MinerConfig) {
     if config.contract_address == "0xF6556DDC7CdD3635A05428BD85BCf33A09F752e6" {
         config.contract_address = DEFAULT_CONTRACT.to_string();
     }
+    // Clear exit_after_solutions if it leaked from a dev/test run.
+    // CLI --exit-after-solutions re-applies it after this function, so the
+    // flag still works for testing; only the stale persisted value is wiped.
+    if config.exit_after_solutions.is_some() {
+        config.exit_after_solutions = None;
+    }
 }
 
 /// Resolve absolute path to the private key file.
