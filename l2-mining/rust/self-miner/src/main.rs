@@ -22,8 +22,10 @@ use tokio::sync::RwLock;
 
 /// Default RPC URL (Arbitrum One public endpoint).
 const DEFAULT_RPC_URL: &str = "https://arb1.arbitrum.io/rpc";
-/// Production core contract on Arbitrum One.
-const DEFAULT_CONTRACT: &str = "0xF6556DDC7CdD3635A05428BD85BCf33A09F752e6";
+/// Production MiningModule contract on Arbitrum One.
+/// Mining functions (getMiningChallenge, submitMiningCommitment, revealMiningCommitment)
+/// live here — NOT on the Core contract.
+const DEFAULT_CONTRACT: &str = "0x97A88f7ed5e7D8EEd442f6979aC66bBb599ff595";
 /// Default pool ID (community pool).
 const DEFAULT_POOL_ID: u8 = 1;
 /// Known developer API key that must NEVER ship in user configs.
@@ -460,6 +462,11 @@ fn sanitize_dev_values(config: &mut MinerConfig) {
     // Reset developer pool ID to community pool
     if config.pool_id == 3 {
         config.pool_id = DEFAULT_POOL_ID;
+    }
+    // Fix configs that still point at the Core contract instead of the MiningModule.
+    // Mining functions (getMiningChallenge, submit, reveal) live on MiningModule.
+    if config.contract_address == "0xF6556DDC7CdD3635A05428BD85BCf33A09F752e6" {
+        config.contract_address = DEFAULT_CONTRACT.to_string();
     }
 }
 

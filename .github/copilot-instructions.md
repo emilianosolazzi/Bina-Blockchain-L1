@@ -342,6 +342,7 @@ Full economics model with projections: `l2-mining/mining_economics_model.py`
 | Contract | Address | Status |
 |----------|--------|--------|
 | Core (TemporalGradientBeacon) | `0xF6556DDC7CdD3635A05428BD85BCf33A09F752e6` | ✅ Live |
+| MiningModule | `0x97A88f7ed5e7D8EEd442f6979aC66bBb599ff595` | ✅ Live (commit-reveal mining) |
 | BatchMiningModule | `0xAf07E37D104E9be17639FE7a51B36972D4738651` | ✅ Live |
 | StaleBlockOracle | `0xdc4eDF632187d05da50393Af87D19A08f6986517` | ✅ Live + Initialized (v2, LE zero-bit fix) |
 | TGBT Token | `0x31228eE520e895DA19f728DE5459b1b317d9b8D8` | ✅ Live |
