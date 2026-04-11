@@ -11,7 +11,7 @@ use axum::{
         sse::{Event, KeepAlive},
         IntoResponse, Response, Sse,
     },
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
 use crate::heartbeat::HeartbeatStatus;
@@ -55,6 +55,15 @@ pub async fn run_server(state: AppState, port: u16) -> anyhow::Result<()> {
         .route("/api/heartbeat/alerts", get(api_heartbeat_alerts))
         .route("/api/cpu", get(api_cpu))
         .route("/api/entropy-quality", get(api_entropy_quality))
+        // Network stubs — self-miner has no epoch builder / randomness API
+        .route("/api/network/randomness/latest", get(api_randomness_latest))
+        .route("/api/network/randomness/:hash/proof", get(api_stub_empty))
+        .route("/api/network/epochs", get(api_stub_epochs))
+        .route("/api/network/epochs/:epochId", get(api_stub_empty))
+        .route("/api/network/epochs/:epochId/verify-storage", post(api_stub_empty))
+        // Security stubs — self-miner has embedded heartbeat, no separate threat service
+        .route("/api/security/threat-profile", get(api_threat_profile))
+        .route("/api/security/relay-profile", get(api_stub_empty))
         .route("/events", get(api_sse))
         .with_state(state.clone());
 
@@ -171,7 +180,7 @@ async fn api_health(State(state): State<AppState>) -> Json<serde_json::Value> {
     }))
 }
 
-/// GET /api/system/status — full system status including wallet address.
+/// GET /api/system/status — full system status including wallet address, balances, hardware.
 async fn api_system_status(State(state): State<AppState>) -> Json<serde_json::Value> {
     let snap = state.latest.read().await;
     let miner_state = snap
@@ -184,9 +193,20 @@ async fn api_system_status(State(state): State<AppState>) -> Json<serde_json::Va
     let rewards = snap.as_ref().map(|s| s.total_rewards_estimate).unwrap_or(0.0);
     drop(snap);
 
+    // Fetch on-chain balances (ETH + TGBT) with a short timeout
+    let (eth_balance, tgbt_balance) =
+        fetch_balances(&state.rpc_url, &state.wallet_address).await;
+
+    // Hardware info
+    let sys_info = tokio::task::spawn_blocking(gather_hardware_info)
+        .await
+        .unwrap_or_default();
+
     Json(serde_json::json!({
         "status": "ok",
         "mode": "self-miner",
+        "randomnessApi": { "online": false },
+        "heartbeatApi": { "online": true },
         "miner": {
             "state": miner_state,
             "solutions": solutions,
@@ -200,10 +220,25 @@ async fn api_system_status(State(state): State<AppState>) -> Json<serde_json::Va
             "contractAddress": state.contract_address,
             "chainId": 42161,
             "poolId": state.pool_id,
+            "ethBalance": eth_balance,
+            "token": {
+                "balance": tgbt_balance,
+                "symbol": "TGBT",
+            },
+            "nextEpochId": serde_json::Value::Null,
+            "contracts": {
+                "batchEnabled": false,
+                "coreBatchModule": "0xAf07E37D104E9be17639FE7a51B36972D4738651",
+                "batchWiredCorrectly": true,
+                "coreTokenomicsModule": "0x7B871bdeDdED0064C34e22902181A9a983C9E2ab",
+                "tokenomicsWiredCorrectly": true,
+            },
         },
+        "hardware": sys_info,
         "dashboard": {
             "telemetryFile": state.telemetry_path.to_string_lossy(),
             "configFile": state.config_path.to_string_lossy(),
+            "solutionsBackend": "file",
         },
     }))
 }
@@ -319,4 +354,260 @@ fn clamp_power(pct: u8) -> u8 {
         63..=87 => 75,
         _ => 100,
     }
+}
+
+// ── Stub handlers for features not available in self-miner mode ──────────
+
+/// Generic empty-object stub for endpoints that don't exist in self-miner.
+async fn api_stub_empty() -> Json<serde_json::Value> {
+    Json(serde_json::json!({}))
+}
+
+/// GET /api/network/randomness/latest — return last output hash from telemetry.
+async fn api_randomness_latest(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let snap = state.latest.read().await;
+    match snap.as_ref() {
+        Some(s) => Json(serde_json::json!({
+            "outputHash": s.last_output_hash_hex,
+            "timestamp": s.timestamp_unix_ms.to_string(),
+            "source": "self-miner",
+            "signature": serde_json::Value::Null,
+        })),
+        None => Json(serde_json::json!({ "error": "no solutions yet" })),
+    }
+}
+
+/// Stub for /api/network/epochs — returns empty list.
+async fn api_stub_epochs() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "epochs": [],
+        "source": "self-miner",
+        "proofsAvailable": false,
+    }))
+}
+
+/// GET /api/security/threat-profile — build from embedded heartbeat data.
+async fn api_threat_profile(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let st = state.heartbeat_status.read().await;
+    Json(serde_json::json!({
+        "heartbeatStatus": &*st,
+        "telemetry": { "history": [] },
+        "heartbeatAlerts": { "active": st.security.active_alerts },
+        "ransomwareStatus": st.security.ransomware,
+        "tamperStatus": {},
+    }))
+}
+
+// ── On-chain balance fetching ────────────────────────────────────────────
+
+/// TGBT token contract address on Arbitrum One.
+const TGBT_TOKEN: &str = "0x31228eE520e895DA19f728DE5459b1b317d9b8D8";
+
+/// Fetch ETH and TGBT balances via raw JSON-RPC. Returns (eth_string, tgbt_string).
+/// On failure returns "0" for both — the dashboard handles display gracefully.
+async fn fetch_balances(rpc_url: &str, wallet: &str) -> (String, String) {
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(4))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return ("0".into(), "0".into()),
+    };
+
+    let eth_fut = fetch_eth_balance(&client, rpc_url, wallet);
+    let tgbt_fut = fetch_tgbt_balance(&client, rpc_url, wallet);
+    let (eth, tgbt) = tokio::join!(eth_fut, tgbt_fut);
+    (eth, tgbt)
+}
+
+/// eth_getBalance → convert wei hex to decimal ETH string.
+async fn fetch_eth_balance(client: &reqwest::Client, rpc: &str, wallet: &str) -> String {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "eth_getBalance",
+        "params": [wallet, "latest"],
+        "id": 1
+    });
+    match client.post(rpc).json(&body).send().await {
+        Ok(resp) => {
+            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                if let Some(hex) = json["result"].as_str() {
+                    return wei_hex_to_eth(hex);
+                }
+            }
+            "0".into()
+        }
+        Err(_) => "0".into(),
+    }
+}
+
+/// balanceOf(address) on TGBT token → convert wei hex to decimal TGBT string.
+async fn fetch_tgbt_balance(client: &reqwest::Client, rpc: &str, wallet: &str) -> String {
+    // balanceOf(address) selector = 0x70a08231
+    let addr_clean = wallet.strip_prefix("0x").unwrap_or(wallet);
+    let data = format!("0x70a08231000000000000000000000000{addr_clean}");
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "eth_call",
+        "params": [{"to": TGBT_TOKEN, "data": data}, "latest"],
+        "id": 2
+    });
+    match client.post(rpc).json(&body).send().await {
+        Ok(resp) => {
+            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                if let Some(hex) = json["result"].as_str() {
+                    return wei_hex_to_eth(hex);
+                }
+            }
+            "0".into()
+        }
+        Err(_) => "0".into(),
+    }
+}
+
+/// Convert a hex wei string (e.g. "0x1234") to a decimal ETH/TGBT string (up to 6 decimals).
+fn wei_hex_to_eth(hex: &str) -> String {
+    let clean = hex.strip_prefix("0x").unwrap_or(hex);
+    if clean.is_empty() || clean == "0" {
+        return "0".into();
+    }
+    // Parse as u128 (sufficient for realistic balances)
+    match u128::from_str_radix(clean, 16) {
+        Ok(wei) => {
+            let whole = wei / 1_000_000_000_000_000_000;
+            let frac = (wei % 1_000_000_000_000_000_000) / 1_000_000_000_000; // 6 decimals
+            if frac == 0 {
+                format!("{whole}")
+            } else {
+                // Trim trailing zeros: "1.234000" → "1.234"
+                let raw = format!("{whole}.{frac:06}");
+                raw.trim_end_matches('0').to_string()
+            }
+        }
+        Err(_) => "0".into(),
+    }
+}
+
+// ── Hardware info ────────────────────────────────────────────────────────
+
+/// Gather hardware info (CPU, memory, uptime) for the status endpoint.
+fn gather_hardware_info() -> serde_json::Value {
+    let cpuid = raw_cpuid::CpuId::new();
+    let brand = cpuid
+        .get_processor_brand_string()
+        .map(|b| b.as_str().trim().to_string())
+        .unwrap_or_else(|| "Unknown CPU".into());
+
+    let vendor = cpuid
+        .get_vendor_info()
+        .map(|v| v.as_str().to_string())
+        .unwrap_or_default();
+    let manufacturer = if vendor.contains("Intel") { "Intel" }
+        else if vendor.contains("AMD") { "AMD" }
+        else { &vendor };
+
+    // Try to extract base clock from brand string (e.g. "@ 1.70GHz")
+    let speed_ghz: Option<f64> = brand
+        .split('@')
+        .nth(1)
+        .and_then(|s| {
+            let cleaned = s.trim().trim_end_matches("GHz").trim();
+            cleaned.parse::<f64>().ok()
+        });
+
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(0);
+
+    #[cfg(windows)]
+    let platform = "win32";
+    #[cfg(target_os = "macos")]
+    let platform = "darwin";
+    #[cfg(target_os = "linux")]
+    let platform = "linux";
+
+    // System uptime via platform API
+    #[cfg(windows)]
+    let uptime_secs: u64 = {
+        // SAFETY: GetTickCount64 is always safe to call.
+        unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount64() / 1000 }
+    };
+    #[cfg(not(windows))]
+    let uptime_secs: u64 = std::fs::read_to_string("/proc/uptime")
+        .ok()
+        .and_then(|s| s.split_whitespace().next()?.parse::<f64>().ok())
+        .map(|f| f as u64)
+        .unwrap_or(0);
+
+    // Memory info
+    let (mem_total_gb, mem_used_gb, mem_pct) = get_memory_info();
+
+    let mut cpu_obj = serde_json::json!({
+        "model": brand,
+        "manufacturer": manufacturer,
+        "cores": cores,
+    });
+    if let Some(ghz) = speed_ghz {
+        cpu_obj["speedGhz"] = serde_json::json!(ghz);
+    }
+
+    let mut hw = serde_json::json!({
+        "cpu": cpu_obj,
+        "platform": platform,
+        "arch": std::env::consts::ARCH,
+        "uptime": uptime_secs,
+    });
+    if mem_total_gb > 0.0 {
+        hw["memory"] = serde_json::json!({
+            "totalGb": (mem_total_gb * 10.0).round() / 10.0,
+            "usedGb": (mem_used_gb * 10.0).round() / 10.0,
+            "usagePercent": mem_pct as u32,
+        });
+    }
+    hw
+}
+
+/// Get system memory info: (totalGb, usedGb, usagePercent).
+#[cfg(windows)]
+fn get_memory_info() -> (f64, f64, f64) {
+    use std::mem::MaybeUninit;
+    let mut info = MaybeUninit::<windows_sys::Win32::System::SystemInformation::MEMORYSTATUSEX>::uninit();
+    // SAFETY: standard Win32 GlobalMemoryStatusEx pattern.
+    unsafe {
+        let p = info.as_mut_ptr();
+        (*p).dwLength = std::mem::size_of::<windows_sys::Win32::System::SystemInformation::MEMORYSTATUSEX>() as u32;
+        if windows_sys::Win32::System::SystemInformation::GlobalMemoryStatusEx(p) != 0 {
+            let info = info.assume_init();
+            let total = info.ullTotalPhys as f64 / (1024.0 * 1024.0 * 1024.0);
+            let avail = info.ullAvailPhys as f64 / (1024.0 * 1024.0 * 1024.0);
+            let used = total - avail;
+            let pct = if total > 0.0 { (used / total) * 100.0 } else { 0.0 };
+            return (total, used, pct);
+        }
+    }
+    (0.0, 0.0, 0.0)
+}
+
+#[cfg(not(windows))]
+fn get_memory_info() -> (f64, f64, f64) {
+    // Parse /proc/meminfo on Linux
+    if let Ok(contents) = std::fs::read_to_string("/proc/meminfo") {
+        let mut total_kb = 0u64;
+        let mut avail_kb = 0u64;
+        for line in contents.lines() {
+            if line.starts_with("MemTotal:") {
+                total_kb = line.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            } else if line.starts_with("MemAvailable:") {
+                avail_kb = line.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            }
+        }
+        if total_kb > 0 {
+            let total = total_kb as f64 / (1024.0 * 1024.0);
+            let avail = avail_kb as f64 / (1024.0 * 1024.0);
+            let used = total - avail;
+            let pct = (used / total) * 100.0;
+            return (total, used, pct);
+        }
+    }
+    (0.0, 0.0, 0.0)
 }

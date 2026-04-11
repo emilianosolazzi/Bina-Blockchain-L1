@@ -3341,12 +3341,13 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
       // ── Overall health: single green/red banner + dot ──
       const rndOk = sys.randomnessApi?.online;
       const hbOk = sys.heartbeatApi?.online;
-      const allOk = rndOk && hbOk && !sys._error;
+      const allOk = SELF_MINER_MODE ? (hbOk && !sys._error) : (rndOk && hbOk && !sys._error);
       const dot = els.systemHealthDot;
       const banner = els.systemHealthBanner;
       if (dot) dot.style.background = allOk ? 'var(--accent-2)' : 'var(--danger)';
       if (banner) {
-        banner.textContent = allOk ? 'All systems online' : sys._error ? `RPC error — ${sys._error}` : 'Service offline — check start-all.ps1';
+        const offlineMsg = SELF_MINER_MODE ? 'Miner running — self-contained mode' : 'Service offline — check start-all.ps1';
+        banner.textContent = allOk ? (SELF_MINER_MODE ? 'Miner online — self-contained mode' : 'All systems online') : sys._error ? `RPC error — ${sys._error}` : offlineMsg;
         banner.style.background = allOk ? 'rgba(34,197,94,.08)' : 'rgba(239,68,68,.08)';
         banner.style.borderColor = allOk ? 'rgba(34,197,94,.18)' : 'rgba(239,68,68,.18)';
         banner.style.color = allOk ? 'var(--accent-2)' : 'var(--danger)';
@@ -5534,11 +5535,11 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
       openEpoch: (epochId) => openEpochDrawer(epochId).catch(err => showToast(err.message, true)),
     };
 
-    if (!SELF_MINER_MODE) {
     els.refreshSystem.addEventListener('click', () => loadSystemStatus().catch(err => console.error(err)));
     els.refreshSecurity.addEventListener('click', () => loadSecurity().catch(err => showToast(err.message, true)));
     els.resealTamperLock.addEventListener('click', () => requestTamperReseal().catch(err => showToast(err.message, true)));
     els.exportSecurityEvidence.addEventListener('click', () => exportSecurityEvidence().catch(err => showToast(err.message, true)));
+    if (!SELF_MINER_MODE) {
     els.refreshRandomness.addEventListener('click', () => loadNetworkLatest().catch(err => {
       state.randomnessLatest = { error: err.message };
       renderLatestRandomness();
@@ -5803,21 +5804,21 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
       setInterval(loadStaleDeveloperProof, 10000);
     }
 
-    if (!SELF_MINER_MODE) {
     Promise.allSettled([
       loadSecurity(),
       loadSystemStatus(),
       loadNetworkLatest(),
-      loadEpochs(),
+      ...(SELF_MINER_MODE ? [] : [loadEpochs()]),
     ]).catch(() => {});
 
     setInterval(() => {
       loadSecurity().catch(err => console.error('[security]', err.message));
       loadSystemStatus().catch(err => console.error('[system]', err.message));
       loadNetworkLatest().catch(err => console.error('[randomness]', err.message));
-      loadEpochs().catch(err => console.error('[epochs]', err.message));
+      if (!SELF_MINER_MODE) {
+        loadEpochs().catch(err => console.error('[epochs]', err.message));
+      }
     }, 15000);
-    } // end if (!SELF_MINER_MODE)
   </script>
 </body>
 </html>

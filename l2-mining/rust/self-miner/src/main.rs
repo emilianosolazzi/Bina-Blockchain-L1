@@ -20,8 +20,13 @@ use temporal_gradient_core::{
 use tokio::signal;
 use tokio::sync::RwLock;
 
-/// Default RPC URL (Arbitrum One public endpoint).
-const DEFAULT_RPC_URL: &str = "https://arb1.arbitrum.io/rpc";
+/// Arbitrum One public RPC endpoints — primary + fallbacks.
+/// Tried in order at startup; first healthy one wins.
+const RPC_ENDPOINTS: &[&str] = &[
+    "https://arbitrum-one-rpc.publicnode.com",
+    "https://arb1.arbitrum.io/rpc",
+    "https://1rpc.io/arb",
+];
 /// Production MiningModule contract on Arbitrum One.
 /// Mining functions (getMiningChallenge, submitMiningCommitment, revealMiningCommitment)
 /// live here — NOT on the Core contract.
@@ -170,13 +175,28 @@ async fn main() -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
 
-    // Warn if still on the default public RPC (rate-limited, not ideal for mining)
-    let using_default_rpc = config.rpc_url == DEFAULT_RPC_URL
+    // ── 4b. RPC health check with fallback ─────────────────────────
+    let is_public_rpc = RPC_ENDPOINTS.iter().any(|ep| config.rpc_url == *ep)
         || config.rpc_url == "http://localhost:8545";
-    if !is_first_run && using_default_rpc {
-        step_warn("Using default public RPC \u{2014} this is rate-limited");
-        eprintln!("        Set a private Arbitrum One (chain 42161) RPC in:");
-        eprintln!("        {}", mask_user_path(&config_path));
+    if is_public_rpc {
+        match probe_rpc_with_fallback(&config.rpc_url).await {
+            Ok(url) => {
+                if url != config.rpc_url {
+                    step_warn(&format!("Primary RPC down — fell back to {url}"));
+                    config.rpc_url = url;
+                    config.save_to_path(&config_path)?;
+                } else {
+                    step("RPC connected");
+                }
+            }
+            Err(_) => {
+                step_warn("All public RPCs unreachable \u{2014} mining will retry");
+                eprintln!("        Set a private Arbitrum One (chain 42161) RPC in:");
+                eprintln!("        {}", mask_user_path(&config_path));
+            }
+        }
+    } else {
+        step("RPC connected (custom endpoint)");
     }
 
     // ── 5. Spawn miner ────────────────────────────────────────────────
@@ -425,7 +445,7 @@ fn apply_self_miner_defaults(config: &mut MinerConfig, paths: &SelfMinerPaths) {
     }
     // Set RPC URL if default localhost
     if config.rpc_url == "http://localhost:8545" {
-        config.rpc_url = DEFAULT_RPC_URL.to_string();
+        config.rpc_url = RPC_ENDPOINTS[0].to_string();
     }
     // API key: users must provide their own via config
     // (no default key — each miner needs its own NativeBTC API key)
@@ -457,7 +477,11 @@ fn sanitize_dev_values(config: &mut MinerConfig) {
     }
     // Reset developer RPC URL to public default
     if config.rpc_url.contains("nativebtc.org") {
-        config.rpc_url = DEFAULT_RPC_URL.to_string();
+        config.rpc_url = RPC_ENDPOINTS[0].to_string();
+    }
+    // Migrate away from arb1.arbitrum.io which frequently 502s under load
+    if config.rpc_url == "https://arb1.arbitrum.io/rpc" {
+        config.rpc_url = RPC_ENDPOINTS[0].to_string();
     }
     // Reset developer pool ID to community pool
     if config.pool_id == 3 {
@@ -550,5 +574,43 @@ fn dirs_home() -> Option<PathBuf> {
     #[cfg(not(windows))]
     {
         std::env::var("HOME").ok().map(PathBuf::from)
+    }
+}
+
+/// Probe `primary` with an `eth_blockNumber` call; if it fails, try each
+/// endpoint in `RPC_ENDPOINTS` in order. Returns the first healthy URL.
+async fn probe_rpc_with_fallback(primary: &str) -> Result<String> {
+    if probe_rpc(primary).await {
+        return Ok(primary.to_string());
+    }
+    for ep in RPC_ENDPOINTS {
+        if *ep == primary {
+            continue; // already tried
+        }
+        if probe_rpc(ep).await {
+            return Ok(ep.to_string());
+        }
+    }
+    anyhow::bail!("all RPC endpoints unreachable")
+}
+
+/// Send a single `eth_blockNumber` JSON-RPC call with a short timeout.
+async fn probe_rpc(url: &str) -> bool {
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "eth_blockNumber",
+        "params": [],
+        "id": 1
+    });
+    match client.post(url).json(&body).send().await {
+        Ok(resp) => resp.status().is_success(),
+        Err(_) => false,
     }
 }
