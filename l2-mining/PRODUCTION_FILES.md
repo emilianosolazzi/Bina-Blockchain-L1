@@ -53,16 +53,33 @@ Status:
 
 Arbitrum deployment addresses:
 
-| Module | Address |
-|---|---|
-| TemporalGradientCore | `0xF6556DDC7CdD3635A05428BD85BCf33A09F752e6` |
-| TGBT Token | `0x31228eE520e895DA19f728DE5459b1b317d9b8D8` |
-| MINING_MODULE | `0x97A88f7ed5e7D8EEd442f6979aC66bBb599ff595` |
-| BATCH_MINING_MODULE | `0xAf07E37D104E9be17639FE7a51B36972D4738651` |
-| RANDOMNESS_MODULE | `0x583863CFC5EFc0106886BA485e1b67F0966584f9` |
-| TOKENOMICS_MODULE (V2) | `0x7B871bdeDdED0064C34e22902181A9a983C9E2ab` |
-| RATE_LIMIT_MODULE | `0x61dEEEf2B2956db3AD291c639939669cD5399c1B` |
-| STALE_BLOCK_MODULE | `0xdc4eDF632187d05da50393Af87D19A08f6986517` |
+| Module | Address | Live status | Explorer source verification | Deploy tx |
+|---|---|---|---|---|
+| TemporalGradientCore | `0xF6556DDC7CdD3635A05428BD85BCf33A09F752e6` | Live | Verified | not recorded here |
+| TGBT Token | `0x31228eE520e895DA19f728DE5459b1b317d9b8D8` | Live | Verified | not recorded here |
+| MINING_MODULE | `0xb2b3d9bC63993b725Aea36aC90601c22292F3171` | Live | **Verified 2026-04-21** | deploy tx `0x0f54cba023b83a586ba78c9c1b62761c4a9c6ba609009ece19f83c0345d1f107` |
+| BATCH_MINING_MODULE | `0xAf07E37D104E9be17639FE7a51B36972D4738651` | Live | Not verified on explorer as of 2026-04-20 | `0x18bdeffae0a3b02016f54a5ef02074425be8e3418004659f53cb5af965d1b44d` |
+| RANDOMNESS_MODULE | `0x583863CFC5EFc0106886BA485e1b67F0966584f9` | Live | Not verified on explorer as of 2026-04-20 | `0x546404da42b698c90bb5551312f7fef1bd9a710a59e3b1802d75478cbddd36d2` |
+| TOKENOMICS_MODULE (V2) | `0x7B871bdeDdED0064C34e22902181A9a983C9E2ab` | Live | Verified on 2026-04-20 | `0x0d0c857b7d01600b5e40f98c4ebd6b199dd3cd6b39f6ccbea88d174def0c20c8` |
+| RATE_LIMIT_MODULE | `0x61dEEEf2B2956db3AD291c639939669cD5399c1B` | Live | Verified | not recorded here |
+| STALE_BLOCK_MODULE | `0xdc4eDF632187d05da50393Af87D19A08f6986517` | Live | Verified | not recorded here |
+
+Additional known deployed addresses tied to the live system:
+
+| Contract | Address | Status |
+|---|---|---|
+| TokenomicsModule V1 | `0xF6069614FE09B91e5B00DA0a13A11B2BFcCabC36` | Deauthorized, not live |
+| TokenomicsModule V0 | `0xA9f684d709bB46155A252b260dDDE4cb2a37a0E3` | Deauthorized, not live |
+| MiningModule hot wallet / operator | `0x5cB4D906f0464b34c44d6555A770BF6aF4A2cEfe` | Live operator wallet |
+| Ledger governance / owner wallet | `0xd28E6a7AD806E85BD0544ed443D25E48f52c06c3` | Live governance wallet |
+
+Verification notes:
+
+- `TemporalGradientCore`, `TGBT`, `RateLimitModule`, `StaleBlockOracle`, and `TokenomicsModuleV2` are verified on Arbiscan/Etherscan as of 2026-04-20.
+- `TokenomicsModuleV2` was successfully verified on 2026-04-20 using `solc 0.8.28`, optimizer enabled, `optimizer_runs = 1`, and `via_ir = true`.
+- `MiningModule` was redeployed on 2026-04-21 to `0xb2b3d9bC63993b725Aea36aC90601c22292F3171` and is now **verified on Arbiscan**. The old address `0x97A88f7ed5e7D8EEd442f6979aC66bBb599ff595` is deregistered (read-only, not in Core registry).
+- `BatchMiningModule` and `RandomnessModule` are verified as of 2026-04-21.
+- The repo now keeps the Etherscan API key in `l2-mining/.env` (gitignored) and Foundry verifier configuration in `l2-mining/foundry.toml`.
 
 ### Not production
 
@@ -82,6 +99,11 @@ Arbitrum deployment addresses:
 - [rust/temporal_gradient_core](rust/temporal_gradient_core)
   - Active production Rust core crate.
   - Contains the real miner runtime, live-chain client, hashing, config, telemetry, and seed handling.
+
+- [rust/self-miner/src/main.rs](rust/self-miner/src/main.rs)
+  - Self-miner standalone runtime entry.
+  - Uses live `MiningModule` `0xb2b3d9bC63993b725Aea36aC90601c22292F3171` as `DEFAULT_CONTRACT` (redeployed + verified 2026-04-21).
+  - `sanitize_dev_values()` auto-migrates old configs that still point at Core `0xF6556DDC7CdD3635A05428BD85BCf33A09F752e6` so mining calls land on `MiningModule`.
 
 - [rust/package/src/bin/temporal-gradient-miner.rs](rust/package/src/bin/temporal-gradient-miner.rs)
   - Active miner executable entrypoint.

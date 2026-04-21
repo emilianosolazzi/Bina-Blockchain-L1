@@ -7,8 +7,18 @@ solc_version = "0.8.28"
 optimizer = true
 optimizer_runs = 1
 via_ir = true
+skip = ["contracts/UTXOAnchorVerifier.sol", "contracts/UTXOCertificateRegistry.sol"]
 remappings = [
   "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
   "@openzeppelin/contracts-upgradeable/=lib/openzeppelin-contracts-upgradeable/contracts/",
   "forge-std/=lib/forge-std/src/"
 ]
+
+[rpc_endpoints]
+arbitrum = "https://arb1.arbitrum.io/rpc"
+
+# Etherscan V2 multichain API — works for Arbitrum via chainid=42161.
+# Key is loaded from l2-mining/.env (gitignored). Key name: Fastpath.
+[etherscan]
+arbitrum = { key = "${ETHERSCAN_API_KEY}", chain = 42161, url = "https://api.etherscan.io/v2/api?chainid=42161" }
+

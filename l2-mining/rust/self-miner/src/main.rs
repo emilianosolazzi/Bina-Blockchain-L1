@@ -27,10 +27,10 @@ const RPC_ENDPOINTS: &[&str] = &[
     "https://arb1.arbitrum.io/rpc",
     "https://1rpc.io/arb",
 ];
-/// Production MiningModule contract on Arbitrum One.
+/// Production MiningModule contract on Arbitrum One (redeployed + verified 2026-04-21).
 /// Mining functions (getMiningChallenge, submitMiningCommitment, revealMiningCommitment)
 /// live here — NOT on the Core contract.
-const DEFAULT_CONTRACT: &str = "0x97A88f7ed5e7D8EEd442f6979aC66bBb599ff595";
+const DEFAULT_CONTRACT: &str = "0xb2b3d9bC63993b725Aea36aC90601c22292F3171";
 /// Default pool ID (community pool).
 const DEFAULT_POOL_ID: u8 = 1;
 /// Known developer API key that must NEVER ship in user configs.
@@ -490,6 +490,10 @@ fn sanitize_dev_values(config: &mut MinerConfig) {
     // Fix configs that still point at the Core contract instead of the MiningModule.
     // Mining functions (getMiningChallenge, submit, reveal) live on MiningModule.
     if config.contract_address == "0xF6556DDC7CdD3635A05428BD85BCf33A09F752e6" {
+        config.contract_address = DEFAULT_CONTRACT.to_string();
+    }
+    // Migrate old MiningModule (deregistered 2026-04-21) to new verified deployment.
+    if config.contract_address == "0x97A88f7ed5e7D8EEd442f6979aC66bBb599ff595" {
         config.contract_address = DEFAULT_CONTRACT.to_string();
     }
     // Clear exit_after_solutions if it leaked from a dev/test run.
