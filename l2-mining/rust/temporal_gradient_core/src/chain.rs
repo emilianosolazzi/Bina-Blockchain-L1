@@ -119,7 +119,7 @@ pub struct LiveChallenge {
     pub prevrandao: [u8; 32],
 }
 
-#[derive(Debug, Clone, Zeroize, ZeroizeOnDrop)]
+#[derive(Debug, Clone, Zeroize, ZeroizeOnDrop, serde::Serialize, serde::Deserialize)]
 pub struct LiveSubmission {
     pub commitment: DynamicMiningCommitment,
     pub previous_output: [u8; 32],

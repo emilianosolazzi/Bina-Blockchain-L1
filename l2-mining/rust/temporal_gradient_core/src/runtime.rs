@@ -451,9 +451,26 @@ async fn run_live_runtime(
                 }
             }
         });
+        
+        let bg_shutdown = shutdown.clone();
+        let bg_client = live_client.clone();
+        let bg_config = config.clone();
+        let bg_phase = phase_tracker.clone();
+        let bg_stats = Arc::clone(&stats);
+        let bg_filter = Arc::clone(&output_filter);
+        tokio::spawn(async move {
+            let _ = submitter_loop(
+                bg_client,
+                bg_config,
+                bg_phase,
+                bg_stats,
+                bg_filter,
+                bg_shutdown,
+            ).await;
+        });
     }
 
-    let mut retry_count = 0usize;
+    // ── Pre-flight: recover pending reveal if the miner crashed after commit ──
     let mut nonce_cursor = 0u64;
 
     // ── Control file for pause / power throttle ──────────────
@@ -601,6 +618,7 @@ async fn run_live_runtime(
 
         phase_tracker.set(MiningPhase::Searching, None);
 
+        let mut retry_count = 0usize;
         let challenge = match live_client.current_challenge().await {
             Ok(challenge) => {
                 retry_count = 0;
@@ -631,82 +649,28 @@ async fn run_live_runtime(
             started_at,
             last_control.effective_workers(config.threads.max(1)),
         ).await? {
-            phase_tracker.set(MiningPhase::SolutionFound, None);
+            let is_auto = config.queue.submission_mode == crate::config::SubmissionMode::Auto;
+            let approved = is_auto;
 
-            match live_client.submit_solution(&submission, &phase_tracker, &config.private_key_path).await {
-                Ok(receipt) => {
-                    let reward = reward_from_receipt_or_estimate(&receipt, config.difficulty_zero_bits);
-                    let output_hash = LiveMiningClient::extract_output_hash_from_receipt(&receipt);
-                    if let Some(output_hash_hex) = output_hash.as_deref() {
-                        if let Some(output_hash_bytes) = parse_hex_bytes32(output_hash_hex) {
-                            let wallet_addr = hex_string(live_client.miner_address().as_bytes());
-                            if let Err(err) = record_output_solution(
-                                &output_filter,
-                                output_hash_bytes,
-                                submission.nonce,
-                                &wallet_addr,
-                            ) {
-                                warn!("Failed to record live output in filter: {err:#}");
-                            }
-                        } else {
-                            warn!("Could not parse live output hash {output_hash_hex} for filter recording");
-                        }
-                    }
-                    phase_tracker.set(MiningPhase::RewardReceived, None);
-                    {
-                        let mut guard = stats.lock().await;
-                        guard.solutions = guard.solutions.saturating_add(1);
-                        guard.accepted_submissions = guard.accepted_submissions.saturating_add(1);
-                        guard.total_rewards_estimate += reward;
-                        guard.last_solution_nonce = Some(submission.nonce);
-                        guard.last_solution_hash_hex = Some(hex_string(&submission.commitment.commit_hash));
-                        guard.last_commit_hash_hex = Some(hex_string(&submission.commitment.commit_hash));
-                        guard.last_output_hash_hex = output_hash;
-                    }
+            if let Err(e) = crate::queue::push_solution(&config.private_key_path, submission.clone(), approved) {
+                tracing::error!("Failed to push solution to queue: {e}");
+            } else {
+                tracing::info!("Solution pushed to local queue (approved={})", approved);
+            }
+            
+            {
+                let mut guard = stats.lock().await;
+                guard.solutions = guard.solutions.saturating_add(1);
+            }
 
-                    info!("Submitted live mining solution nonce={} reward={reward}", submission.nonce);
-
-                    if let Some(limit) = config.exit_after_solutions {
-                        let solutions = stats.lock().await.solutions;
-                        if solutions >= limit {
-                            shutdown.cancel();
-                        }
-                    }
-                }
-                Err(err) => {
-                    let err_msg = format!("{err:#}");
-                    // Only count as "rejected" if the TX actually reached the chain
-                    // AND was provably reverted.  Pre-chain failures (gas
-                    // estimation, race detection) and receipt-loss scenarios
-                    // are transient and should not inflate the rejection counter.
-                    let is_prechain = err_msg.contains("estimate commitment gas")
-                        || err_msg.contains("Failed to send commitment")
-                        || err_msg.contains("race detected")
-                        || err_msg.contains("No commitment receipt")
-                        || err_msg.contains("No reveal receipt")
-                        || err_msg.contains("Reveal landed on-chain but receipt unavailable")
-                        || err_msg.contains("not yet visible on-chain");
-                    if !is_prechain {
-                        let mut guard = stats.lock().await;
-                        guard.rejected_submissions = guard.rejected_submissions.saturating_add(1);
-                    }
-                    warn!("Live submission failed{}: {err:#}", if is_prechain { " (pre-chain, not counted as rejection)" } else { "" });
-
-                    if let Err(recovery_err) = try_resume_pending_commitment(
-                        &live_client,
-                        &config,
-                        &stats,
-                        &output_filter,
-                        &phase_tracker,
-                        &shutdown,
-                    )
-                    .await
-                    {
-                        warn!("Pending reveal recovery failed after live submission error: {recovery_err:#}");
-                    }
+            if let Some(limit) = config.exit_after_solutions {
+                let solutions = stats.lock().await.solutions;
+                if solutions >= limit {
+                    shutdown.cancel();
                 }
             }
         }
+        // End of attempt_live_solution check
 
         // ── Throttle: sleep between mining cycles to stay under RPC rate limits ──
         let delay = config.cycle_delay_secs;
@@ -1201,6 +1165,9 @@ fn snapshot_from_guard(
         filter_memory_kb: filter_metrics.filter_memory_kb,
         epoch_stats: filter_metrics.epoch_stats.clone(),
         temperature_c: guard.temperature_c,
+        pending_solutions: 0,
+        approved_solutions: 0,
+        rejected_solutions: 0,
         mining_phase: None,
         phase_blocks_remaining: None,
         phase_eta_seconds: None,
@@ -1253,6 +1220,12 @@ async fn snapshot_with_phase(
     snapshot.mining_phase = ps.phase;
     snapshot.phase_blocks_remaining = ps.blocks_remaining;
     snapshot.phase_eta_seconds = ps.eta_seconds;
+
+    // Merge queue stats
+    let (pending, approved, rejected) = crate::queue::get_queue_counts(&config.private_key_path);
+    snapshot.pending_solutions = pending;
+    snapshot.approved_solutions = approved;
+    snapshot.rejected_solutions = rejected;
 
     // Merge mining control state (pause / power)
     if let Ok(ctrl_path) = config.control_file_path() {
@@ -2501,6 +2474,141 @@ async fn harvest_mempool_stale_proofs(
 
     Ok(harvested)
 }
+
+async fn submitter_loop(
+    live_client: LiveMiningClient,
+    config: MinerConfig,
+    phase_tracker: PhaseTracker,
+    stats: Arc<Mutex<RuntimeStats>>,
+    output_filter: SharedOutputFilter,
+    shutdown: CancellationToken,
+) -> Result<()> {
+    struct FailedAttempt {
+        failed_at: std::time::Instant,
+        attempts: u32,
+    }
+    
+    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(5));
+    
+    let mut recent_failures = std::collections::HashMap::<String, FailedAttempt>::new();
+    let mut ignore_hashes = std::collections::HashSet::new();
+
+    loop {
+        tokio::select! {
+            _ = shutdown.cancelled() => break,
+            _ = ticker.tick() => {
+                if let Ok(control_path) = config.control_file_path() {
+                    if let Some(hash_to_approve) = crate::telemetry::MiningControl::take_approve_solution_hash(&control_path) {
+                        match crate::queue::approve_solution(&config.private_key_path, &hash_to_approve) {
+                            Ok(true) => tracing::info!("Manually approved solution {}", hash_to_approve),
+                            Ok(false) => tracing::warn!("Requested approval for {}, but it was not in pending queue", hash_to_approve),
+                            Err(e) => tracing::error!("Failed to approve solution {}: {}", hash_to_approve, e),
+                        }
+                    }
+                }
+
+                // Clean up expired ignores (older than 10 mins)
+                let now = std::time::Instant::now();
+                recent_failures.retain(|_, v| now.duration_since(v.failed_at).as_secs() < 600);
+                ignore_hashes.clear();
+                for k in recent_failures.keys() {
+                    ignore_hashes.insert(k.clone());
+                }
+
+                match crate::queue::pop_approved(&config.private_key_path, 0, &ignore_hashes) {
+                    Ok(Some((queued, file_path))) => {
+                        let hash_hex = hex::encode(queued.submission.commitment.commit_hash);
+
+                        tracing::info!("Submitter picked up approved solution {} from queue", hash_hex);
+                        phase_tracker.set(MiningPhase::Committing, None);
+
+                        match live_client.submit_solution(&queued.submission, &phase_tracker, &config.private_key_path).await {
+                            Ok(receipt) => {
+                                let _ = std::fs::remove_file(&file_path);
+                                recent_failures.remove(&hash_hex);
+
+                                let reward = reward_from_receipt_or_estimate(&receipt, config.difficulty_zero_bits);
+                                let output_hash = LiveMiningClient::extract_output_hash_from_receipt(&receipt);
+                                
+                                if let Some(output_hash_hex) = output_hash.as_deref() {
+                                    if let Some(output_hash_bytes) = parse_hex_bytes32(output_hash_hex) {
+                                        let wallet_addr = hex_string(live_client.miner_address().as_bytes());
+                                        let _ = record_output_solution(
+                                            &output_filter,
+                                            output_hash_bytes,
+                                            queued.submission.nonce,
+                                            &wallet_addr,
+                                        );
+                                    }
+                                }
+                                
+                                phase_tracker.set(MiningPhase::RewardReceived, None);
+                                {
+                                    let mut guard = stats.lock().await;
+                                    guard.accepted_submissions = guard.accepted_submissions.saturating_add(1);
+                                    guard.total_rewards_estimate += reward;
+                                    guard.last_commit_hash_hex = Some(hash_hex.clone());
+                                    guard.last_output_hash_hex = output_hash;
+                                }
+
+                                tracing::info!("Successfully submitted queued solution nonce={} reward={reward}", queued.submission.nonce);
+                            }
+                            Err(err) => {
+                                let err_msg = format!("{err:#}");
+                                let is_prechain = err_msg.contains("estimate commitment gas")
+                                    || err_msg.contains("Failed to send commitment")
+                                    || err_msg.contains("race detected")
+                                    || err_msg.contains("No commitment receipt")
+                                    || err_msg.contains("No reveal receipt")
+                                    || err_msg.contains("Reveal landed on-chain but receipt unavailable")
+                                    || err_msg.contains("not yet visible on-chain");
+                                
+                                if !is_prechain {
+                                    let mut guard = stats.lock().await;
+                                    guard.rejected_submissions = guard.rejected_submissions.saturating_add(1);
+                                }
+                                
+                                tracing::warn!("Queued submission failed{}: {err:#}", if is_prechain { " (pre-chain)" } else { "" });
+                                
+                                let attempt = recent_failures.entry(hash_hex.clone()).or_insert(FailedAttempt {
+                                    failed_at: std::time::Instant::now(),
+                                    attempts: 0,
+                                });
+                                attempt.attempts += 1;
+                                attempt.failed_at = std::time::Instant::now();
+                                
+                                const MAX_ATTEMPTS: u32 = 3;
+                                if attempt.attempts >= MAX_ATTEMPTS {
+                                    tracing::error!("❌ Max attempts reached — rejecting {}", hash_hex);
+                                    let _ = crate::queue::reject_solution(&config.private_key_path, &file_path);
+                                    recent_failures.remove(&hash_hex);
+                                } else {
+                                    tracing::warn!("⚠️ Attempt {}/{} failed — will retry in 600s or on restart", attempt.attempts, MAX_ATTEMPTS);
+                                }
+
+                                let _ = try_resume_pending_commitment(
+                                    &live_client,
+                                    &config,
+                                    &stats,
+                                    &output_filter,
+                                    &phase_tracker,
+                                    &shutdown,
+                                ).await;
+                            }
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        tracing::error!("Error reading approved queue: {}", e);
+                    }
+                }
+            }
+        }
+    }
+    
+    Ok(())
+}
+
 
 #[cfg(test)]
 mod tests {

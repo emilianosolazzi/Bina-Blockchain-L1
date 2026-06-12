@@ -9,6 +9,7 @@ pub mod logging;
 pub mod memory;
 pub mod paths;
 pub mod pending;
+pub mod queue;
 pub mod runtime;
 pub mod seed;
 #[cfg(feature = "stale-mining")]
@@ -42,6 +43,8 @@ pub use stale_block_miner::{
 };
 pub use memory::{SecureBuffer, SecureBufferError};
 pub use paths::{app_paths, ensure_app_layout, AppPaths};
+pub use pending::{PendingCommitment, load as load_pending, save as save_pending, clear as clear_pending};
+pub use queue::{QueuedSolution, push_solution, pop_approved, approve_solution, get_queue_counts};
 pub use runtime::{spawn_miner, MinerHandle};
 pub use seed::{decode_temporal_seed_timestamp, encode_temporal_seed, generate_temporal_seed};
 pub use storage_verification::{

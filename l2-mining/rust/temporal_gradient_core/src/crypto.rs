@@ -8,7 +8,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 pub const QR_HASH_ITERATIONS: u8 = 3;
 pub const QR_HASH_ROTATION: u8 = 7;
 
-#[derive(Debug, Clone, Zeroize, ZeroizeOnDrop)]
+#[derive(Debug, Clone, Zeroize, ZeroizeOnDrop, serde::Serialize, serde::Deserialize)]
 pub struct DynamicMiningCommitment {
     pub commit_hash: [u8; 32],
     pub pool_id: u8,

@@ -74,6 +74,14 @@ pub struct TelemetrySnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phase_eta_seconds: Option<u64>,
 
+    // ── Queue telemetry ──
+    #[serde(default)]
+    pub pending_solutions: u64,
+    #[serde(default)]
+    pub approved_solutions: u64,
+    #[serde(default)]
+    pub rejected_solutions: u64,
+
     // ── Mining control state ──
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mining_paused: Option<bool>,
@@ -267,13 +275,16 @@ pub struct MiningControl {
     /// One-shot trigger: reseal and clear the local tamper-lock state.
     #[serde(default)]
     pub tamper_reseal_now: bool,
+    /// One-shot trigger: approve a queued solution hash for submission.
+    #[serde(default)]
+    pub approve_solution_hash: Option<String>,
 }
 
 fn default_power_pct() -> u8 { 100 }
 
 impl Default for MiningControl {
     fn default() -> Self {
-        Self { paused: false, power_pct: 100, submit_stale_now: false, tamper_reseal_now: false }
+        Self { paused: false, power_pct: 100, submit_stale_now: false, tamper_reseal_now: false, approve_solution_hash: None }
     }
 }
 
@@ -337,5 +348,16 @@ impl MiningControl {
         control.tamper_reseal_now = false;
         let _ = control.write_to_file(path);
         true
+    }
+
+    /// Consume the one-shot solution approval trigger, returning the hash if set.
+    pub fn take_approve_solution_hash(path: &Path) -> Option<String> {
+        let mut control = Self::read_from_file(path);
+        if let Some(hash) = control.approve_solution_hash.take() {
+            let _ = control.write_to_file(path);
+            Some(hash)
+        } else {
+            None
+        }
     }
 }

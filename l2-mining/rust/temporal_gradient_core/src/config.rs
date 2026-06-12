@@ -5,6 +5,39 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum SubmissionMode {
+    Auto,
+    Manual,
+}
+
+impl Default for SubmissionMode {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueueConfig {
+    #[serde(default)]
+    pub submission_mode: SubmissionMode,
+    #[serde(default)]
+    pub max_submissions_per_hour: Option<u32>,
+    #[serde(default)]
+    pub min_difficulty_to_submit: Option<u32>,
+}
+
+impl Default for QueueConfig {
+    fn default() -> Self {
+        Self {
+            submission_mode: SubmissionMode::Auto,
+            max_submissions_per_hour: None,
+            min_difficulty_to_submit: None,
+        }
+    }
+}
+
 /// Optional configuration for stale-block (Bitcoin orphan) entropy mining.
 ///
 /// Node operators who have access to a Bitcoin full node or mempool API
@@ -115,6 +148,9 @@ pub struct MinerConfig {
     #[cfg(feature = "stale-mining")]
     #[serde(default)]
     pub stale_block: Option<StaleBlockConfig>,
+    /// Queue and submission decoupling configuration
+    #[serde(default)]
+    pub queue: QueueConfig,
 }
 
 fn default_cycle_delay() -> u64 {
@@ -147,6 +183,7 @@ impl Default for MinerConfig {
             cycle_delay_secs: 10,
             #[cfg(feature = "stale-mining")]
             stale_block: None,
+            queue: QueueConfig::default(),
         }
     }
 }
