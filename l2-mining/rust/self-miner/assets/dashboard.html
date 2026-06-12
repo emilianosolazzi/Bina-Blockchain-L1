@@ -2269,13 +2269,16 @@ curl -s "http://127.0.0.1:4271/api/utxo/scan?seed=$BINARY_HASH" \
 
       <div class="panel left">
         <div class="solutions-header">
-          <h3 class="section-title">Latest Randomness</h3>
+          <h3 class="section-title">Latest Randomness <span id="randomnessModeBadge" style="display:none;font-size:10px;font-weight:600;padding:3px 8px;border-radius:999px;background:rgba(251,191,36,.12);color:var(--gold);border:1px solid rgba(251,191,36,.3);margin-left:8px;vertical-align:middle;">Standalone mode</span></h3>
           <div style="display:flex;gap:8px;flex-wrap:wrap;">
             <button class="action-btn" id="refreshRandomness">Refresh randomness</button>
             <button class="action-btn" id="loadLatestProof">Load latest proof</button>
           </div>
         </div>
         <p class="helper" style="margin:0 0 12px;"><strong>This is what consumers use.</strong> The output hash below is the latest verifiable random number produced by the mining network. Any dApp (lottery, NFT mint, game) can use this instead of Chainlink VRF — it’s cheaper, decentralized, and backed by physical entropy.</p>
+        <div id="standaloneModeNotice" style="display:none;margin:0 0 12px;background:rgba(251,191,36,.06);border:1px solid rgba(251,191,36,.2);border-radius:8px;padding:10px 12px;font-size:11px;line-height:1.5;color:var(--text);">
+          <strong style="color:var(--gold);">Running in solo / self-miner mode.</strong> Each PoW solution is published as its own 1-leaf epoch (leaf index always <code>0</code>). The output hash below <em>is</em> a real random number and the signature is the on-chain commit hash from this miner — consumers can use it directly. To get the full 10-leaves-per-epoch network layout, run the Epoch Builder service against this miner.
+        </div>
         <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
           <div style="flex:1;min-width:180px;background:rgba(56,189,248,.06);border:1px solid rgba(56,189,248,.15);border-radius:8px;padding:10px 12px;font-size:11px;line-height:1.5;">
             <strong style="color:var(--accent);">Refresh randomness</strong> — pulls the newest random number from the network. The miner produces new outputs every few minutes as PoW solutions are found.
@@ -2287,12 +2290,12 @@ curl -s "http://127.0.0.1:4271/api/utxo/scan?seed=$BINARY_HASH" \
         <div class="stack">
           <div class="kv" style="grid-template-columns: 160px 1fr;">
             <div class="label" title="The random number — a 256-bit hash derived from the miner's PoW solution. Use this as your random seed.">Latest output <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></div><div id="latestRandomnessHash" class="hash">—</div>
-            <div class="label" title="Which epoch batch this randomness belongs to. Each epoch groups multiple solutions into a Merkle tree.">Epoch <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></div><div id="latestRandomnessEpoch">—</div>
-            <div class="label" title="Position of this output within the epoch’s Merkle tree. Each leaf is a different random number — leaf 0 is the first, leaf 9 is the tenth.">Leaf index <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></div><div id="latestRandomnessLeaf">—</div>
+            <div class="label" id="latestRandomnessEpochLabel" title="Which epoch batch this randomness belongs to. Each epoch groups multiple solutions into a Merkle tree.">Epoch <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></div><div id="latestRandomnessEpoch">—</div>
+            <div class="label" id="latestRandomnessLeafLabel" title="Position of this output within the epoch’s Merkle tree. Each leaf is a different random number — leaf 0 is the first, leaf 9 is the tenth.">Leaf index <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></div><div id="latestRandomnessLeaf">—</div>
             <div class="label" title="When this random number was produced by the miner.">Timestamp <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></div><div id="latestRandomnessTime">—</div>
             <div class="label" title="Cryptographic signature proving this output was produced by an authorized miner. 'No signature available' means the output is verified via Merkle proof instead.">Signature <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></div><div id="latestRandomnessSignature" class="hash">—</div>
           </div>
-          <div style="margin:14px 0 6px;background:rgba(251,191,36,.06);border:1px solid rgba(251,191,36,.18);border-radius:10px;padding:12px 14px;font-size:12px;line-height:1.6;">
+          <div id="multipleRandomnessNotice" style="margin:14px 0 6px;background:rgba(251,191,36,.06);border:1px solid rgba(251,191,36,.18);border-radius:10px;padding:12px 14px;font-size:12px;line-height:1.6;">
             <div style="font-weight:700;color:var(--gold);margin-bottom:4px;">📦 Need more than one random number?</div>
             <p style="margin:0;color:var(--text);">This section only shows the <em>latest</em> output. Every epoch contains <strong>10 random numbers</strong> (leaves 0–9). To browse all of them:</p>
             <ul style="margin:6px 0 0;padding-left:20px;color:var(--text);">
@@ -2542,11 +2545,11 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
           <div id="proofStatus" class="helper">Enter an output hash or click “Load latest proof”.</div>
           <div class="proof-box">
             <div class="status-list">
-              <div class="status-item"><span title="Which batch of solutions this randomness belongs to. Like a page number in a book of random numbers.">Epoch <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span id="proofEpochId">—</span></div>
-              <div class="status-item"><span title="The position of this specific random number within the epoch. Like which line on the page.">Leaf index <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span id="proofLeafIndex">—</span></div>
+              <div class="status-item" id="proofEpochRow"><span id="proofEpochLabel" title="Which batch of solutions this randomness belongs to. Like a page number in a book of random numbers.">Epoch <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span id="proofEpochId">—</span></div>
+              <div class="status-item" id="proofLeafRow"><span title="The position of this specific random number within the epoch. Like which line on the page.">Leaf index <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span id="proofLeafIndex">—</span></div>
               <div class="status-item"><span title="Whether this epoch has been permanently locked on the blockchain. 'Yes' means the randomness is fully verified and immutable.">Finalized <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span id="proofFinalized">—</span></div>
               <div class="status-item"><span title="The single hash that represents ALL random numbers in this epoch. Your proof connects your specific random number back to this root.">Merkle root <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span id="proofMerkleRoot" class="mono">—</span></div>
-              <div class="status-item"><span title="The 'steps' in the proof chain. Each node is a hash that links your random number to the Merkle root, like links in a chain.">Proof nodes <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span id="proofNodeCount">—</span></div>
+              <div class="status-item" id="proofNodeRow"><span title="The 'steps' in the proof chain. Each node is a hash that links your random number to the Merkle root, like links in a chain.">Proof nodes <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span id="proofNodeCount">—</span></div>
             </div>
             <div class="helper" style="margin:10px 0 4px;font-size:11px;line-height:1.5;">Each proof node below is a link in the chain from your random number up to the Merkle root. Together they form a mathematical proof that this randomness is part of the committed epoch — no trust needed.</div>
             <div class="proof-nodes" id="proofNodes"></div>
@@ -3620,6 +3623,23 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
 
     function renderLatestRandomness() {
       const latest = state.randomnessLatest;
+      const standalone = latest && !latest.error && latest.mode === 'standalone';
+
+      // Toggle standalone UI chrome
+      if (els.randomnessModeBadge) els.randomnessModeBadge.style.display = standalone ? 'inline-block' : 'none';
+      if (els.standaloneModeNotice) els.standaloneModeNotice.style.display = standalone ? 'block' : 'none';
+      if (els.multipleRandomnessNotice) els.multipleRandomnessNotice.style.display = standalone ? 'none' : 'block';
+      if (els.latestRandomnessEpochLabel) {
+        els.latestRandomnessEpochLabel.firstChild.nodeValue = standalone ? 'Solution # ' : 'Epoch ';
+        els.latestRandomnessEpochLabel.title = standalone
+          ? 'Sequence number of this PoW solution from the local miner. In solo mode, each solution is its own 1-leaf epoch.'
+          : 'Which epoch batch this randomness belongs to. Each epoch groups multiple solutions into a Merkle tree.';
+      }
+      if (els.latestRandomnessLeafLabel) {
+        els.latestRandomnessLeafLabel.parentElement && (els.latestRandomnessLeafLabel.style.display = standalone ? 'none' : '');
+        if (els.latestRandomnessLeaf) els.latestRandomnessLeaf.style.display = standalone ? 'none' : '';
+      }
+
       if (!latest || latest.error) {
         els.latestRandomnessHash.textContent = latest?.error || 'No randomness available yet';
         els.latestRandomnessEpoch.textContent = '—';
@@ -3655,13 +3675,25 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
       }
 
       els.proofStatus.textContent = 'Proof loaded successfully.';
+      const standalone = proof.mode === 'standalone';
+      if (els.proofEpochLabel) {
+        els.proofEpochLabel.firstChild.nodeValue = standalone ? 'Solution # ' : 'Epoch ';
+        els.proofEpochLabel.title = standalone
+          ? 'Sequence number of this PoW solution from the local miner. In solo mode, each solution is its own 1-leaf epoch.'
+          : 'Which batch of solutions this randomness belongs to. Like a page number in a book of random numbers.';
+      }
+      if (els.proofLeafRow) els.proofLeafRow.style.display = standalone ? 'none' : '';
+      if (els.proofNodeRow) els.proofNodeRow.style.display = standalone ? 'none' : '';
       els.proofEpochId.textContent = proof.epochId;
       els.proofLeafIndex.textContent = proof.leafIndex;
       els.proofFinalized.textContent = proof.finalized ? 'Yes' : 'No';
       els.proofFinalized.className = proof.finalized ? 'ok' : 'warn';
       els.proofMerkleRoot.textContent = proof.merkleRoot || '—';
       els.proofNodeCount.textContent = Array.isArray(proof.proof) ? proof.proof.length : 0;
-      els.proofNodes.innerHTML = (proof.proof || []).map(node => `<div class="proof-node">${escapeHtml(node)}</div>`).join('') || '<div class="helper">No proof nodes returned.</div>';
+      const emptyProofMsg = standalone
+        ? '<div class="helper">Standalone mode: each solution is its own 1-leaf tree, so no sibling hashes are needed — the Merkle root <em>is</em> the output hash.</div>'
+        : '<div class="helper">No proof nodes returned.</div>';
+      els.proofNodes.innerHTML = (proof.proof || []).map(node => `<div class="proof-node">${escapeHtml(node)}</div>`).join('') || emptyProofMsg;
       els.verifyMethod.textContent = proof.verifyOnChain?.method || '—';
       const argLabels = [
         { name: 'epochId', desc: 'Which batch of solutions (epoch) this belongs to' },

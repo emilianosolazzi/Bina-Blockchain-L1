@@ -564,15 +564,15 @@ async function processEpoch() {
 // We must compare against L1 blocks when checking the challenge window.
 
 async function getL1BlockNumber(provider) {
-	try {
-		const raw = await provider.send('eth_getBlockByNumber', ['latest', false]);
-		if (raw && raw.l1BlockNumber) {
-			return parseInt(raw.l1BlockNumber, 16);
-		}
-	} catch { /* fall through */ }
-	// Fallback: use provider block number (will be wrong on Arbitrum, but safe)
-	console.warn('[EpochBuilder] Warning: could not fetch L1 block number, using L2 as fallback');
-	return await provider.getBlockNumber();
+	const raw = await provider.send('eth_getBlockByNumber', ['latest', false]);
+	if (raw && raw.l1BlockNumber) {
+		return parseInt(raw.l1BlockNumber, 16);
+	}
+	// Never fall back to L2 block number — on Arbitrum L2 blocks are ~454M while
+	// L1 blocks are ~24M. Using L2 as a fallback would make every epoch appear
+	// past its 28,800-block challenge window and trigger premature finalizeEpoch()
+	// calls that revert on-chain with CooldownNotElapsed().
+	throw new Error('Could not fetch L1 block number from Arbitrum RPC (l1BlockNumber field missing)');
 }
 
 // ── Finalisation sweep ──────────────────────────────────
@@ -583,7 +583,13 @@ async function finalizePendingEpochs() {
 	const provider = new ethers.providers.JsonRpcProvider(RPC_URL);
 	const wallet = new ethers.Wallet(MINER_PRIVATE_KEY, provider);
 	const contract = new ethers.Contract(BATCH_CONTRACT, BATCH_ABI, provider);
-	const l1Block = await getL1BlockNumber(provider);
+	let l1Block;
+	try {
+		l1Block = await getL1BlockNumber(provider);
+	} catch (err) {
+		console.error('[EpochBuilder] Skipping finalization sweep — could not determine L1 block:', err.message);
+		return;
+	}
 
 	// Must match contract: CHALLENGE_WINDOW = 28_800 L1 blocks (~96 hours on Ethereum mainnet)
 	const CHALLENGE_WINDOW = 28_800;

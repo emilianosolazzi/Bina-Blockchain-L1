@@ -2,9 +2,13 @@ const fs = require('fs');
 const path = require('path');
 const { execFile } = require('child_process');
 
-const RUST_MANIFEST = path.resolve(__dirname, '..', 'rust', 'Cargo.toml');
+// Use the pre-built release binary — never use `cargo run` which serialises
+// all calls through the package-cache lock and spawns hundreds of processes
+// when finalizePendingEpochs() iterates many epochs in one sweep.
+const RUST_RELEASE_DIR = path.resolve(__dirname, '..', 'rust', 'target', 'release');
+const ATTESTATION_BIN = path.join(RUST_RELEASE_DIR, 'tg-storage-attestation.exe');
 const STORAGE_PROVIDER = process.env.STORAGE_VERIFIER_PROVIDER || 'epoch-store-local';
-const STORAGE_VERIFY_TIMEOUT_MS = Number(process.env.STORAGE_VERIFY_TIMEOUT_MS || 180000);
+const STORAGE_VERIFY_TIMEOUT_MS = Number(process.env.STORAGE_VERIFY_TIMEOUT_MS || 30000);
 
 function getEpochFilePath(epochId) {
   return path.resolve(process.env.EPOCH_STORE || path.resolve(__dirname, 'epoch-store'), `epoch-${epochId}.json`);
@@ -15,25 +19,17 @@ function verifyEpochStorage(epochId) {
   if (!fs.existsSync(epochFile)) {
     return Promise.reject(new Error(`Epoch file not found: ${epochFile}`));
   }
+  if (!fs.existsSync(ATTESTATION_BIN)) {
+    return Promise.reject(new Error(`tg-storage-attestation binary not found at ${ATTESTATION_BIN} — run: cargo build --release -p temporal-gradient-miner-installer`));
+  }
 
   const args = [
-    'run',
-    '--quiet',
-    '--manifest-path',
-    RUST_MANIFEST,
-    '-p',
-    'temporal-gradient-miner-installer',
-    '--bin',
-    'tg-storage-attestation',
-    '--',
-    '--epoch-file',
-    epochFile,
-    '--provider',
-    STORAGE_PROVIDER,
+    '--epoch-file', epochFile,
+    '--provider', STORAGE_PROVIDER,
   ];
 
   return new Promise((resolve, reject) => {
-    execFile('cargo', args, {
+    execFile(ATTESTATION_BIN, args, {
       timeout: STORAGE_VERIFY_TIMEOUT_MS,
       maxBuffer: 10 * 1024 * 1024,
     }, (error, stdout, stderr) => {

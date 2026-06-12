@@ -48,6 +48,9 @@ pub async fn run_server(state: AppState, port: u16) -> anyhow::Result<()> {
         .route("/", get(serve_dashboard))
         .route("/api/latest", get(api_latest))
         .route("/api/history", get(api_history))
+        .route("/api/solutions", get(api_solutions))
+        .route("/api/solutions/stats", get(api_solutions_stats))
+        .route("/api/solutions/latest", get(api_solutions_latest))
         .route("/api/miner/control", get(api_get_control).post(api_post_control))
         .route("/api/health", get(api_health))
         .route("/api/system/status", get(api_system_status))
@@ -57,7 +60,7 @@ pub async fn run_server(state: AppState, port: u16) -> anyhow::Result<()> {
         .route("/api/entropy-quality", get(api_entropy_quality))
         // Network stubs — self-miner has no epoch builder / randomness API
         .route("/api/network/randomness/latest", get(api_randomness_latest))
-        .route("/api/network/randomness/:hash/proof", get(api_stub_empty))
+        .route("/api/network/randomness/:hash/proof", get(api_local_proof))
         .route("/api/network/epochs", get(api_stub_epochs))
         .route("/api/network/epochs/:epochId", get(api_stub_empty))
         .route("/api/network/epochs/:epochId/verify-storage", post(api_stub_empty))
@@ -314,6 +317,221 @@ async fn api_sse(
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
+// ── Solutions API (derived from telemetry.jsonl) ─────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct SolutionsQuery {
+    limit: Option<usize>,
+    skip: Option<usize>,
+    filter: Option<String>,
+    #[serde(rename = "sinceMs")]
+    since_ms: Option<u64>,
+}
+
+/// Derive a solutions list by scanning telemetry snapshots and detecting
+/// increments in the `solutions`, `accepted_submissions`, `rejected_submissions`,
+/// and `stale_block_count` counters. This gives the dashboard a full solution
+/// history without needing a separate SQLite store.
+fn derive_solutions(snapshots: &[TelemetrySnapshot]) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    let mut prev: Option<&TelemetrySnapshot> = None;
+    let mut sol_num: u64 = 0;
+
+    for snap in snapshots {
+        let (prev_sol, prev_acc, prev_rej, prev_stale, prev_rewards) = match prev {
+            Some(p) => (
+                p.solutions,
+                p.accepted_submissions,
+                p.rejected_submissions,
+                p.stale_block_count.unwrap_or(0),
+                p.total_rewards_estimate,
+            ),
+            None => (0, 0, 0, 0, 0.0),
+        };
+
+        // New solution found (may or may not have been submitted yet)
+        if snap.solutions > prev_sol {
+            let delta = snap.solutions - prev_sol;
+            for _ in 0..delta {
+                sol_num += 1;
+                out.push(serde_json::json!({
+                    "id": sol_num,
+                    "solutionNumber": sol_num,
+                    "type": "solution",
+                    "timestamp": snap.timestamp_unix_ms as u64,
+                    "timestampMs": snap.timestamp_unix_ms as u64,
+                    "createdAt": snap.timestamp_unix_ms as u64,
+                    "accepted": false,
+                    "nonce": snap.last_solution_nonce,
+                    "hash": snap.last_solution_hash_hex,
+                    "commitHash": snap.last_commit_hash_hex,
+                    "outputHash": snap.last_output_hash_hex,
+                    "hashrate": snap.hashrate_hs,
+                    "totalHashes": snap.hashes,
+                    "uptime": snap.uptime_seconds,
+                    "phase": snap.mining_phase.as_ref().map(|p| format!("{:?}", p).to_lowercase()),
+                    "reward": 0.0,
+                    "estimated": false,
+                }));
+            }
+        }
+
+        // Accepted on-chain — mark the latest pending solution accepted and set reward
+        if snap.accepted_submissions > prev_acc {
+            let delta = snap.accepted_submissions - prev_acc;
+            let reward_delta = (snap.total_rewards_estimate - prev_rewards).max(0.0);
+            let per = if delta > 0 { reward_delta / delta as f64 } else { 0.0 };
+            // Mark the most-recent unaccepted solution(s) as accepted
+            let mut marked = 0u64;
+            for row in out.iter_mut().rev() {
+                if marked >= delta { break; }
+                if row["type"] == "solution" && row["accepted"] == false {
+                    row["accepted"] = serde_json::Value::Bool(true);
+                    row["reward"] = serde_json::json!(per);
+                    row["outputHash"] = serde_json::json!(snap.last_output_hash_hex);
+                    marked += 1;
+                }
+            }
+        }
+
+        // Rejected submissions
+        if snap.rejected_submissions > prev_rej {
+            let delta = snap.rejected_submissions - prev_rej;
+            for _ in 0..delta {
+                sol_num += 1;
+                out.push(serde_json::json!({
+                    "id": sol_num,
+                    "solutionNumber": sol_num,
+                    "type": "solution",
+                    "timestamp": snap.timestamp_unix_ms as u64,
+                    "timestampMs": snap.timestamp_unix_ms as u64,
+                    "createdAt": snap.timestamp_unix_ms as u64,
+                    "accepted": false,
+                    "nonce": snap.last_solution_nonce,
+                    "hash": snap.last_solution_hash_hex,
+                    "commitHash": snap.last_commit_hash_hex,
+                    "hashrate": snap.hashrate_hs,
+                    "totalHashes": snap.hashes,
+                    "uptime": snap.uptime_seconds,
+                    "phase": snap.mining_phase.as_ref().map(|p| format!("{:?}", p).to_lowercase()),
+                    "reward": 0.0,
+                    "estimated": false,
+                }));
+            }
+        }
+
+        // Stale block rows
+        let cur_stale = snap.stale_block_count.unwrap_or(0);
+        if cur_stale > prev_stale {
+            let delta = cur_stale - prev_stale;
+            for _ in 0..delta {
+                out.push(serde_json::json!({
+                    "id": format!("stale-{}-{}", snap.timestamp_unix_ms, cur_stale),
+                    "type": "stale",
+                    "timestamp": snap.timestamp_unix_ms as u64,
+                    "timestampMs": snap.timestamp_unix_ms as u64,
+                    "createdAt": snap.timestamp_unix_ms as u64,
+                    "accepted": true,
+                    "hash": snap.stale_xor_hex,
+                    "staleForkDepth": snap.stale_fork_depth,
+                    "staleZeroBits": snap.stale_zero_bits,
+                    "staleQuality": snap.stale_quality,
+                    "bitcoinTipHeight": snap.bitcoin_tip_height,
+                    "reward": 0.0,
+                    "estimated": true,
+                }));
+            }
+        }
+
+        prev = Some(snap);
+    }
+
+    // Newest first
+    out.reverse();
+    out
+}
+
+async fn api_solutions(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<SolutionsQuery>,
+) -> Json<serde_json::Value> {
+    let limit = q.limit.unwrap_or(50).clamp(1, 500);
+    let skip = q.skip.unwrap_or(0);
+    let filter = q.filter.as_deref();
+    let since = q.since_ms.unwrap_or(0);
+
+    let path = state.telemetry_path.clone();
+    // Read a large window so we can reconstruct full history
+    let snapshots = tokio::task::spawn_blocking(move || read_tail_snapshots(&path, 5000))
+        .await
+        .unwrap_or_default();
+
+    let mut solutions = derive_solutions(&snapshots);
+
+    // Apply filter
+    solutions.retain(|s| {
+        if since > 0 {
+            if let Some(ts) = s.get("timestampMs").and_then(|v| v.as_u64()) {
+                if ts < since { return false; }
+            }
+        }
+        match filter {
+            Some("accepted") => s["type"] == "solution" && s["accepted"] == true,
+            Some("rejected") => s["type"] == "solution" && s["accepted"] == false,
+            Some("stale") => s["type"] == "stale",
+            _ => true,
+        }
+    });
+
+    let total = solutions.len();
+    let accepted = solutions.iter().filter(|s| s["type"] == "solution" && s["accepted"] == true).count();
+    let rejected = solutions.iter().filter(|s| s["type"] == "solution" && s["accepted"] == false).count();
+    let stale = solutions.iter().filter(|s| s["type"] == "stale").count();
+    let total_rewards: f64 = solutions
+        .iter()
+        .filter_map(|s| s.get("reward").and_then(|v| v.as_f64()))
+        .sum();
+
+    let page: Vec<_> = solutions.into_iter().skip(skip).take(limit).collect();
+
+    Json(serde_json::json!({
+        "solutions": page,
+        "stats": {
+            "total": total,
+            "accepted": accepted,
+            "rejected": rejected,
+            "stale": stale,
+            "totalRewards": total_rewards,
+        },
+    }))
+}
+
+async fn api_solutions_stats(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let path = state.telemetry_path.clone();
+    let snapshots = tokio::task::spawn_blocking(move || read_tail_snapshots(&path, 5000))
+        .await
+        .unwrap_or_default();
+    let solutions = derive_solutions(&snapshots);
+    let accepted = solutions.iter().filter(|s| s["type"] == "solution" && s["accepted"] == true).count();
+    let rejected = solutions.iter().filter(|s| s["type"] == "solution" && s["accepted"] == false).count();
+    let stale = solutions.iter().filter(|s| s["type"] == "stale").count();
+    Json(serde_json::json!({
+        "total": solutions.len(),
+        "accepted": accepted,
+        "rejected": rejected,
+        "stale": stale,
+    }))
+}
+
+async fn api_solutions_latest(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let path = state.telemetry_path.clone();
+    let snapshots = tokio::task::spawn_blocking(move || read_tail_snapshots(&path, 5000))
+        .await
+        .unwrap_or_default();
+    let solutions = derive_solutions(&snapshots);
+    Json(serde_json::json!({ "solution": solutions.first() }))
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────
 
 /// Read the last `limit` JSON lines from the telemetry file.
@@ -365,14 +583,69 @@ async fn api_stub_empty() -> Json<serde_json::Value> {
 
 /// GET /api/network/randomness/latest — return last output hash from telemetry.
 async fn api_randomness_latest(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let snap = state.latest.read().await;
-    match snap.as_ref() {
+    // Scan recent snapshots for the most recent one that actually produced an output.
+    let path = state.telemetry_path.clone();
+    let snapshots = tokio::task::spawn_blocking(move || read_tail_snapshots(&path, 500))
+        .await
+        .unwrap_or_default();
+
+    let solved = snapshots
+        .iter()
+        .rev()
+        .find(|s| s.last_output_hash_hex.is_some());
+
+    match solved {
         Some(s) => Json(serde_json::json!({
             "outputHash": s.last_output_hash_hex,
-            "timestamp": s.timestamp_unix_ms.to_string(),
+            "timestamp": s.timestamp_unix_ms as u64,
+            "epochId": s.solutions,
+            "leafIndex": 0u64,
+            "signature": s.last_commit_hash_hex,
             "source": "self-miner",
-            "signature": serde_json::Value::Null,
+            "mode": "standalone",
         })),
+        None => Json(serde_json::json!({ "error": "no solutions yet" })),
+    }
+}
+
+/// GET /api/network/randomness/:hash/proof — return a local self-miner proof.
+///
+/// The self-miner is a single-operator setup with no Merkle tree / epoch
+/// builder, so the proof is a degenerate 1-leaf tree: the Merkle root equals
+/// the output hash itself, and the sibling path is empty. The commit hash
+/// serves as the miner's self-attestation signature.
+async fn api_local_proof(
+    State(state): State<AppState>,
+    axum::extract::Path(hash): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    let path = state.telemetry_path.clone();
+    let snapshots = tokio::task::spawn_blocking(move || read_tail_snapshots(&path, 500))
+        .await
+        .unwrap_or_default();
+
+    let solved = snapshots
+        .iter()
+        .rev()
+        .find(|s| s.last_output_hash_hex.is_some());
+
+    match solved {
+        Some(s) => {
+            let latest_hash = s.last_output_hash_hex.clone().unwrap_or_default();
+            let finalized = s.accepted_submissions > 0
+                && latest_hash.eq_ignore_ascii_case(&hash);
+            Json(serde_json::json!({
+                "outputHash": hash,
+                "epochId": s.solutions,
+                "leafIndex": 0u64,
+                "merkleRoot": latest_hash,
+                "proof": Vec::<String>::new(),
+                "finalized": finalized,
+                "signature": s.last_commit_hash_hex,
+                "source": "self-miner",
+                "mode": "standalone",
+                "verifyOnChain": serde_json::Value::Null,
+            }))
+        }
         None => Json(serde_json::json!({ "error": "no solutions yet" })),
     }
 }
