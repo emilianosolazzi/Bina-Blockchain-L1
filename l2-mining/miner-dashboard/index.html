@@ -1278,6 +1278,39 @@
         </div>
       </div>
 
+      <!-- ── Queue Management ── -->
+      <div class="panel" style="grid-column: span 12; margin-bottom: 4px; background: linear-gradient(135deg, rgba(15,23,42,.9), rgba(2,6,23,.9)); border: 1px solid rgba(56,189,248,.3);">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:12px;">
+          <h3 style="margin:0;font-size:18px;color:var(--text);">Queue Management</h3>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <span class="badge" id="queuePendingBadge" style="background:rgba(56,189,248,.1);color:var(--accent);border-color:rgba(56,189,248,.3);">0 Pending</span>
+            <span class="badge ok" id="queueApprovedBadge">0 Approved</span>
+            <span class="badge fail" id="queueRejectedBadge">0 Rejected</span>
+            <button class="action-btn" onclick="fetchQueueList()">↻ Refresh</button>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;margin-bottom:12px;">
+          <button class="action-btn" onclick="queueApproveAll()" style="color:var(--accent-2);border-color:rgba(34,197,94,.3);">Approve All Pending</button>
+          <button class="action-btn" onclick="queueFlush()" style="color:var(--warn);border-color:rgba(245,158,11,.3);">Reject All (Flush)</button>
+        </div>
+        <div style="max-height: 250px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; background: rgba(0,0,0,.2);">
+          <table class="sol-table" id="queueTable" style="margin:0;">
+            <thead>
+              <tr>
+                <th>Hash</th>
+                <th>Nonce</th>
+                <th>Age</th>
+                <th>Reward (est)</th>
+                <th style="text-align:right;">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="queueTbody">
+              <tr><td colspan="5" class="sol-empty">Loading queue...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
       <!-- ── Mining controls (pause / power) ── -->
       <div class="mining-ctrl" id="miningCtrl">
         <span class="ctrl-label">Mining:</span>
@@ -1998,6 +2031,45 @@ curl -s "http://127.0.0.1:4271/api/utxo/scan?seed=$BINARY_HASH" \
           <div class="helper" style="margin-bottom:8px;">Choose any stored stale proof from the list above. The JSON below shows the factual telemetry and on-chain state for that specific proof.</div>
           <pre id="staleDevProofJson" style="margin:0;padding:12px;border-radius:12px;background:rgba(5,10,18,.92);border:1px solid var(--border);color:var(--text);font-size:11px;line-height:1.45;overflow:auto;max-height:280px;">Loading stale developer JSON…</pre>
         </div>
+        </details>
+      </div>
+    </section>
+
+    <!-- ── Manual Submission Queue ── -->
+    <section class="grid" style="margin-top:16px;">
+      <div class="panel solutions-panel">
+        <details open id="queueStorageDetails">
+          <summary class="solutions-header" style="cursor:pointer;list-style:none;">
+            <div style="display:flex;align-items:center;gap:14px;">
+              <h3 style="display:inline;" title="Manage manual submissions before they are sent to the blockchain.">Mining Submission Queue</h3>
+              <span style="font-size:13px;color:var(--muted);">▸ click to hide/show</span>
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;" onclick="event.stopPropagation()">
+              <div class="solutions-filters">
+                <div class="sol-filter active" id="queuePendingBadge">0 Pending</div>
+                <div class="sol-filter" id="queueApprovedBadge">0 Approved</div>
+                <div class="sol-filter" id="queueRejectedBadge">0 Rejected</div>
+              </div>
+              <button class="action-btn" style="padding:4px 8px;font-size:11px;" onclick="queueApproveAll()">Approve All</button>
+              <button class="action-btn" style="padding:4px 8px;font-size:11px;border-color:rgba(239,68,68,.3);color:var(--danger);" onclick="queueFlush()">Flush All</button>
+            </div>
+          </summary>
+          <div style="overflow-x:auto;">
+            <table class="sol-table">
+              <thead>
+                <tr>
+                  <th>Hash</th>
+                  <th>Nonce</th>
+                  <th>Age</th>
+                  <th>Est. Reward</th>
+                  <th style="text-align:right;">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="queueTbody">
+                <tr><td class="sol-empty" colspan="5">Loading queue…</td></tr>
+              </tbody>
+            </table>
+          </div>
         </details>
       </div>
     </section>
@@ -5612,6 +5684,91 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
       }
     }
 
+    // ── Queue Management API Integration ──
+    async function fetchQueueList() {
+      try {
+        const [listRes, statsRes] = await Promise.all([
+          fetch('/api/queue/list'),
+          fetch('/api/queue/stats')
+        ]);
+        const listData = await listRes.json();
+        const statsData = await statsRes.json();
+
+        if (statsData.pending !== undefined) {
+          document.getElementById('queuePendingBadge').textContent = `${statsData.pending} Pending`;
+          document.getElementById('queueApprovedBadge').textContent = `${statsData.approved} Approved`;
+          document.getElementById('queueRejectedBadge').textContent = `${statsData.rejected} Rejected`;
+        }
+
+        const tbody = document.getElementById('queueTbody');
+        if (listData.error) {
+          tbody.innerHTML = `<tr><td colspan="5" class="sol-empty" style="color:var(--danger)">Error: ${listData.error}</td></tr>`;
+          return;
+        }
+
+        const pending = listData.pending || [];
+        if (pending.length === 0) {
+          tbody.innerHTML = `<tr><td colspan="5" class="sol-empty">No pending solutions in queue.</td></tr>`;
+          return;
+        }
+
+        const now = Math.floor(Date.now() / 1000);
+        tbody.innerHTML = pending.map(s => {
+          const ageSecs = now - s.createdAt;
+          const ageStr = ageSecs < 60 ? `${ageSecs}s` : `${Math.floor(ageSecs/60)}m ${ageSecs%60}s`;
+          return `<tr>
+            <td class="sol-hash-cell" title="${s.hash}">${s.hash.slice(0, 16)}...</td>
+            <td class="sol-nonce">${s.nonce}</td>
+            <td>${ageStr}</td>
+            <td style="color:var(--gold);">${fmtTGBT(s.reward)} TGBT (est)</td>
+            <td style="text-align:right;">
+              <button class="action-btn" style="padding:4px 8px;font-size:11px;color:var(--accent-2);border-color:rgba(34,197,94,.3);" onclick="queueApprove('${s.hash}')">Approve</button>
+              <button class="action-btn" style="padding:4px 8px;font-size:11px;color:var(--warn);border-color:rgba(245,158,11,.3);" onclick="queueReject('${s.hash}')">Reject</button>
+            </td>
+          </tr>`;
+        }).join('');
+      } catch (err) {
+        document.getElementById('queueTbody').innerHTML = `<tr><td colspan="5" class="sol-empty" style="color:var(--danger)">Network error: ${err.message}</td></tr>`;
+      }
+    }
+
+    async function queueApprove(hash) {
+      try {
+        const res = await fetch(`/api/queue/approve/${hash}`, { method: 'POST' });
+        const data = await res.json();
+        if (data.success) { showToast('Solution approved'); fetchQueueList(); }
+        else { showToast('Error: ' + data.error, true); }
+      } catch(e) { showToast('Network error', true); }
+    }
+
+    async function queueReject(hash) {
+      try {
+        const res = await fetch(`/api/queue/reject/${hash}`, { method: 'POST' });
+        const data = await res.json();
+        if (data.success) { showToast('Solution rejected'); fetchQueueList(); }
+        else { showToast('Error: ' + data.error, true); }
+      } catch(e) { showToast('Network error', true); }
+    }
+
+    async function queueApproveAll() {
+      try {
+        const res = await fetch('/api/queue/approve-all', { method: 'POST' });
+        const data = await res.json();
+        if (data.success) { showToast(`Approved ${data.approved_count} solutions`); fetchQueueList(); }
+        else { showToast('Error: ' + data.error, true); }
+      } catch(e) { showToast('Network error', true); }
+    }
+
+    async function queueFlush() {
+      if(!confirm("Are you sure you want to reject ALL pending solutions?")) return;
+      try {
+        const res = await fetch('/api/queue/flush', { method: 'POST' });
+        const data = await res.json();
+        if (data.success) { showToast(`Flushed ${data.flushed_count} solutions`); fetchQueueList(); }
+        else { showToast('Error: ' + data.error, true); }
+      } catch(e) { showToast('Network error', true); }
+    }
+
     // Poll solutions every 10s (live updates)
     loadSolutions();
     loadStaleProofOptions();
@@ -5619,6 +5776,8 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
     setInterval(loadSolutions, 10000);
     setInterval(loadStaleProofOptions, 10000);
     setInterval(loadStaleDeveloperProof, 10000);
+    setInterval(fetchQueueList, 10000);
+    fetchQueueList();
 
     Promise.allSettled([
       loadSecurity(),

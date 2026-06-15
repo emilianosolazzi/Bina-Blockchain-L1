@@ -6,7 +6,7 @@ mod cpu_info;
 mod entropy_scorer;
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use paths::SelfMinerPaths;
 use server::AppState;
 use std::fs::OpenOptions;
@@ -55,6 +55,34 @@ struct Cli {
     /// Stop after N solutions (for testing).
     #[arg(long)]
     exit_after_solutions: Option<u64>,
+
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Debug, Subcommand)]
+enum Commands {
+    /// Manage the mining solution queue
+    Queue {
+        #[command(subcommand)]
+        queue_command: QueueCommands,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum QueueCommands {
+    /// List pending solutions
+    List,
+    /// Approve a specific solution hash
+    Approve { hash: String },
+    /// Approve all pending solutions
+    ApproveAll,
+    /// Reject a specific solution hash
+    Reject { hash: String },
+    /// Flush (reject) all pending solutions
+    Flush,
+    /// View queue statistics
+    Stats,
 }
 
 #[tokio::main]
@@ -128,6 +156,69 @@ async fn main() -> Result<()> {
     }
 
     config.save_to_path(&config_path)?;
+    
+    // Handle CLI commands before starting the node
+    if let Some(command) = cli.command {
+        match command {
+            Commands::Queue { queue_command } => {
+                let key_path = &config.private_key_path;
+                match queue_command {
+                    QueueCommands::List => {
+                        let pending = temporal_gradient_core::queue::list_pending(key_path)?;
+                        if pending.is_empty() {
+                            println!("No pending solutions.");
+                        } else {
+                            println!("Pending solutions:");
+                            for s in pending {
+                                println!("  - {} (nonce: {})", hex::encode(s.submission.commitment.commit_hash), s.submission.nonce);
+                            }
+                        }
+                    }
+                    QueueCommands::Approve { hash } => {
+                        if temporal_gradient_core::queue::approve_solution(key_path, &hash)? {
+                            println!("Solution {} approved.", hash);
+                        } else {
+                            println!("Solution {} not found in pending queue.", hash);
+                        }
+                    }
+                    QueueCommands::ApproveAll => {
+                        let count = temporal_gradient_core::queue::approve_all(key_path)?;
+                        println!("Approved {} pending solutions.", count);
+                    }
+                    QueueCommands::Reject { hash } => {
+                        let mut found = false;
+                        let pending = temporal_gradient_core::queue::list_pending(key_path)?;
+                        for s in pending {
+                            let h = hex::encode(s.submission.commitment.commit_hash);
+                            if h.contains(&hash) {
+                                let file_path = temporal_gradient_core::queue::pending_dir(key_path).join(format!("{}.json", h));
+                                temporal_gradient_core::queue::reject_solution(key_path, &file_path)?;
+                                println!("Rejected solution {}.", h);
+                                found = true;
+                                break;
+                            }
+                        }
+                        if !found {
+                            println!("Solution {} not found in pending queue.", hash);
+                        }
+                    }
+                    QueueCommands::Flush => {
+                        let count = temporal_gradient_core::queue::flush_pending(key_path)?;
+                        println!("Flushed {} pending solutions to rejected.", count);
+                    }
+                    QueueCommands::Stats => {
+                        let (pending, approved, rejected) = temporal_gradient_core::queue::get_queue_counts(key_path);
+                        println!("Queue Stats:");
+                        println!("  Pending:  {}", pending);
+                        println!("  Approved: {}", approved);
+                        println!("  Rejected: {}", rejected);
+                    }
+                }
+                return Ok(());
+            }
+        }
+    }
+    
     step("Config loaded");
 
     // Remove stale trust-seal (binary fingerprint changes on rebuild)
@@ -287,6 +378,7 @@ async fn main() -> Result<()> {
         contract_address: config.contract_address.clone(),
         pool_id: config.pool_id,
         config_path: config_path.clone(),
+        key_path: key_path.clone(),
     };
 
     let port = cli.port;

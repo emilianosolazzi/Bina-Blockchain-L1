@@ -40,6 +40,7 @@ pub struct AppState {
     pub contract_address: String,
     pub pool_id: u8,
     pub config_path: PathBuf,
+    pub key_path: PathBuf,
 }
 
 /// Start the HTTP server on `addr`. Runs until `shutdown` is cancelled.
@@ -51,6 +52,12 @@ pub async fn run_server(state: AppState, port: u16) -> anyhow::Result<()> {
         .route("/api/solutions", get(api_solutions))
         .route("/api/solutions/stats", get(api_solutions_stats))
         .route("/api/solutions/latest", get(api_solutions_latest))
+        .route("/api/queue/list", get(api_queue_list))
+        .route("/api/queue/stats", get(api_queue_stats))
+        .route("/api/queue/approve/:hash", post(api_queue_approve))
+        .route("/api/queue/approve-all", post(api_queue_approve_all))
+        .route("/api/queue/reject/:hash", post(api_queue_reject))
+        .route("/api/queue/flush", post(api_queue_flush))
         .route("/api/miner/control", get(api_get_control).post(api_post_control))
         .route("/api/health", get(api_health))
         .route("/api/system/status", get(api_system_status))
@@ -530,6 +537,109 @@ async fn api_solutions_latest(State(state): State<AppState>) -> Json<serde_json:
         .unwrap_or_default();
     let solutions = derive_solutions(&snapshots);
     Json(serde_json::json!({ "solution": solutions.first() }))
+}
+
+// ── Queue API ─────────────────────────────────────────────────────────────
+
+async fn api_queue_list(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let key_path = state.key_path.to_string_lossy().to_string();
+    let reward_est = {
+        let snap = state.latest.read().await;
+        if let Some(s) = &*snap {
+            if s.solutions > 0 {
+                s.total_rewards_estimate / s.solutions as f64
+            } else {
+                12.5
+            }
+        } else {
+            12.5 // Fallback if no telemetry yet
+        }
+    };
+    match temporal_gradient_core::queue::list_pending(&key_path) {
+        Ok(pending) => {
+            let list: Vec<_> = pending.into_iter().map(|s| {
+                serde_json::json!({
+                    "hash": hex::encode(s.submission.commitment.commit_hash),
+                    "nonce": s.submission.nonce,
+                    "createdAt": s.created_at,
+                    "reward": reward_est,
+                })
+            }).collect();
+            Json(serde_json::json!({ "pending": list }))
+        }
+        Err(e) => Json(serde_json::json!({ "error": e.to_string() }))
+    }
+}
+
+async fn api_queue_stats(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let key_path = state.key_path.to_string_lossy().to_string();
+    let (pending, approved, rejected) = temporal_gradient_core::queue::get_queue_counts(&key_path);
+    Json(serde_json::json!({
+        "pending": pending,
+        "approved": approved,
+        "rejected": rejected,
+    }))
+}
+
+async fn api_queue_approve(
+    State(state): State<AppState>,
+    axum::extract::Path(hash): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    let key_path = state.key_path.to_string_lossy().to_string();
+    match temporal_gradient_core::queue::approve_solution(&key_path, &hash) {
+        Ok(found) => {
+            if found {
+                Json(serde_json::json!({ "success": true, "message": "Approved" }))
+            } else {
+                Json(serde_json::json!({ "success": false, "error": "Not found in pending" }))
+            }
+        }
+        Err(e) => Json(serde_json::json!({ "success": false, "error": e.to_string() }))
+    }
+}
+
+async fn api_queue_approve_all(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let key_path = state.key_path.to_string_lossy().to_string();
+    match temporal_gradient_core::queue::approve_all(&key_path) {
+        Ok(count) => Json(serde_json::json!({ "success": true, "approved_count": count })),
+        Err(e) => Json(serde_json::json!({ "success": false, "error": e.to_string() }))
+    }
+}
+
+async fn api_queue_reject(
+    State(state): State<AppState>,
+    axum::extract::Path(hash): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    let key_path = state.key_path.to_string_lossy().to_string();
+    let mut found = false;
+    match temporal_gradient_core::queue::list_pending(&key_path) {
+        Ok(pending) => {
+            for s in pending {
+                let h = hex::encode(s.submission.commitment.commit_hash);
+                if h.contains(&hash) {
+                    let file_path = temporal_gradient_core::queue::pending_dir(&key_path).join(format!("{}.json", h));
+                    if let Ok(_) = temporal_gradient_core::queue::reject_solution(&key_path, &file_path) {
+                        found = true;
+                    }
+                    break;
+                }
+            }
+            if found {
+                Json(serde_json::json!({ "success": true, "message": "Rejected" }))
+            } else {
+                Json(serde_json::json!({ "success": false, "error": "Not found in pending" }))
+            }
+        }
+        Err(e) => Json(serde_json::json!({ "success": false, "error": e.to_string() }))
+    }
+}
+
+async fn api_queue_flush(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let key_path = state.key_path.to_string_lossy().to_string();
+    match temporal_gradient_core::queue::flush_pending(&key_path) {
+        Ok(count) => Json(serde_json::json!({ "success": true, "flushed_count": count })),
+        Err(e) => Json(serde_json::json!({ "success": false, "error": e.to_string() }))
+    }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────

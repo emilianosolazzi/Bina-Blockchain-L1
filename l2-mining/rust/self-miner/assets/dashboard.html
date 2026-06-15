@@ -1203,26 +1203,9 @@
     /* ── Info tooltip style ── */
     .label [style*="cursor:help"] { opacity: 0.6; transition: opacity .15s; }
     .label:hover [style*="cursor:help"] { opacity: 1; }
-
-    /* ── Self-miner mode: hide non-PoW sections via CSS ── */
-    body.self-miner .entropy-source-card.utxo-source,
-    body.self-miner .entropy-source-card.stale-source,
-    body.self-miner .settings-control,
-    body.self-miner .entropy-mixer,
-    body.self-miner .stale-section-collapsible,
-    body.self-miner #staleSourceCard,
-    body.self-miner #utxoScanPanel,
-    body.self-miner #epochExplorerDetails,
-    body.self-miner #staleMiningToggle { display: none !important; }
-
-    /* Hide the 3-source combined beacon + TGBT breakdown grid (2nd .system-grid inside pipeline) */
-    body.self-miner .entropy-mixer + .system-grid { display: none !important; }
-
-    /* Make PoW card full-width when it's the only card shown */
-    body.self-miner .entropy-source-card.pow-source { grid-column: span 12 !important; }
   </style>
 </head>
-<body class="self-miner">
+<body>
   <div class="wrap">
     <section class="hero">
       <div class="hero-top">
@@ -1292,6 +1275,39 @@
         <div class="reward-stat">
           <div class="label">TGBT / hour</div>
           <div class="val gold" id="tgbtPerHour">—</div>
+        </div>
+      </div>
+
+      <!-- ── Queue Management ── -->
+      <div class="panel" style="grid-column: span 12; margin-bottom: 4px; background: linear-gradient(135deg, rgba(15,23,42,.9), rgba(2,6,23,.9)); border: 1px solid rgba(56,189,248,.3);">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:12px;">
+          <h3 style="margin:0;font-size:18px;color:var(--text);">Queue Management</h3>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <span class="badge" id="queuePendingBadge" style="background:rgba(56,189,248,.1);color:var(--accent);border-color:rgba(56,189,248,.3);">0 Pending</span>
+            <span class="badge ok" id="queueApprovedBadge">0 Approved</span>
+            <span class="badge fail" id="queueRejectedBadge">0 Rejected</span>
+            <button class="action-btn" onclick="fetchQueueList()">↻ Refresh</button>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;margin-bottom:12px;">
+          <button class="action-btn" onclick="queueApproveAll()" style="color:var(--accent-2);border-color:rgba(34,197,94,.3);">Approve All Pending</button>
+          <button class="action-btn" onclick="queueFlush()" style="color:var(--warn);border-color:rgba(245,158,11,.3);">Reject All (Flush)</button>
+        </div>
+        <div style="max-height: 250px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; background: rgba(0,0,0,.2);">
+          <table class="sol-table" id="queueTable" style="margin:0;">
+            <thead>
+              <tr>
+                <th>Hash</th>
+                <th>Nonce</th>
+                <th>Age</th>
+                <th>Reward (est)</th>
+                <th style="text-align:right;">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="queueTbody">
+              <tr><td colspan="5" class="sol-empty">Loading queue...</td></tr>
+            </tbody>
+          </table>
         </div>
       </div>
 
@@ -2077,100 +2093,97 @@ curl -s "http://127.0.0.1:4271/api/utxo/scan?seed=$BINARY_HASH" \
       <div class="panel" style="grid-column: span 12;">
         <details open id="threatDashboardDetails">
           <summary class="solutions-header" style="cursor:pointer;list-style:none;">
-            <h3 class="section-title" style="display:inline;">Security Status</h3>
-            <span id="securityOverallDot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--accent-2);margin-left:8px;vertical-align:middle;"></span>
+            <h3 class="section-title" style="display:inline;">Personal Threat Dashboard</h3>
             <span style="font-size:13px;color:var(--muted);margin-left:8px;">▸ click to hide/show</span>
-            <!-- Hidden dummy elements referenced by old JS — keep to avoid null errors -->
-            <button id="resealTamperLock" style="display:none;"></button>
-            <button id="refreshSecurity" style="display:none;"></button>
-            <button id="exportSecurityEvidence" style="display:none;"></button>
-            <button id="copyRelayProfile" style="display:none;"></button>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;float:right;" onclick="event.stopPropagation()">
+              <button class="action-btn" id="resealTamperLock">Reseal trust</button>
+              <button class="action-btn" id="refreshSecurity">Refresh security</button>
+              <button class="action-btn" id="exportSecurityEvidence">Export evidence</button>
+              <button class="copy-btn" id="copyRelayProfile">Copy relay profile</button>
+            </div>
           </summary>
-        <p class="helper" style="margin:0 0 14px;">Embedded heartbeat monitor — watches telemetry freshness, hashrate stability, temperature, and filesystem integrity in real time.</p>
-
-        <!-- ── Top-level posture banner ── -->
-        <div id="secBanner" style="padding:10px 14px;border-radius:10px;background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.18);font-size:13px;font-weight:600;color:var(--accent-2);margin-bottom:14px;">
-          Secure — intrusion score 0/100
-        </div>
-
-        <!-- ── 3-column status grid ── -->
-        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;">
-
-          <!-- Col 1: Heartbeat -->
+        <p class="helper" style="margin:0 0 14px;">Monitors your miner's integrity. Gaps in solution output, unusual hashrate patterns, or tampered telemetry trigger alerts. A clean record here proves your node is honest — required for maximum TGBT rewards.</p>
+        <div class="system-grid">
           <div class="status-card">
-            <h3>Heartbeat</h3>
+            <h3>Continuity</h3>
             <div class="status-list">
-              <div class="status-item"><span>Status</span><span id="hbOverallBadge" class="badge ok">ok</span></div>
-              <div class="status-item"><span>Telemetry</span><span id="hbTelemetryFresh" class="badge ok">fresh</span></div>
-              <div class="status-item"><span>Hashrate ratio</span><span id="hbHashrateRatio">1.00×</span></div>
-              <div class="status-item"><span>Workers</span><span id="hbWorkers">—</span></div>
-              <div class="status-item"><span>Phase</span><span id="hbPhase">—</span></div>
-              <div class="status-item"><span>Uptime</span><span id="hbUptime">—</span></div>
+              <div class="status-item"><span>Trusted runtime</span><span id="threatContinuity">—</span></div>
+              <div class="status-item"><span>Current gap</span><span id="threatCurrentGap">—</span></div>
+              <div class="status-item"><span>Longest gap</span><span id="threatLongestGap">—</span></div>
+              <div class="status-item"><span>Gap count</span><span id="threatGapCount">—</span></div>
             </div>
           </div>
-
-          <!-- Col 2: Ransomware Watch -->
           <div class="status-card">
-            <h3>Ransomware Watch</h3>
+            <h3>Threat posture</h3>
             <div class="status-list">
-              <div class="status-item"><span>Status</span><span id="hbRansomwareBadge" class="badge ok">clean</span></div>
-              <div class="status-item"><span>Indicators</span><span id="hbRansomwareCount">0</span></div>
-              <div class="status-item"><span>Temperature</span><span id="hbTemperature">—</span></div>
-              <div class="status-item"><span>Paused</span><span id="hbPaused">no</span></div>
+              <div class="status-item"><span>Security posture</span><span id="threatPostureBadge" class="badge">—</span></div>
+              <div class="status-item"><span>Intrusion score</span><span id="threatIntrusionScore">—</span></div>
+              <div class="status-item"><span>Telemetry freshness</span><span id="threatTelemetryFresh">—</span></div>
+              <div class="status-item"><span>Tamper lock</span><span id="threatTamperLock" class="badge">—</span></div>
+              <div class="status-item"><span>Tamper reason</span><span id="threatTamperReason">—</span></div>
+              <div class="status-item"><span>Ransomware watch</span><span id="threatRansomware" class="badge">—</span></div>
+              <div class="status-item"><span>Ransomware reason</span><span id="threatRansomwareReason">—</span></div>
+              <div class="status-item"><span>Narrative</span><span id="threatNarrative">—</span></div>
             </div>
           </div>
-
-          <!-- Col 3: Active Alerts -->
           <div class="status-card">
-            <h3>Active Alerts</h3>
-            <div class="status-list" id="hbAlertsList">
-              <div class="status-item" style="color:var(--muted);font-style:italic;">No active alerts</div>
+            <h3>Relay readiness</h3>
+            <div class="status-list">
+              <div class="status-item"><span>Relay ready</span><span id="relayReadyBadge" class="badge">—</span></div>
+              <div class="status-item"><span>Secure relay</span><span id="relayChannelState" class="badge">—</span></div>
+              <div class="status-item"><span>Relay endpoint</span><span id="relayEndpoint" class="mono">—</span></div>
+              <div class="status-item"><span>Operator</span><span id="relayOperator" class="mono">—</span></div>
+              <div class="status-item"><span>Region</span><span id="relayRegion">—</span></div>
+              <div class="status-item"><span>Latest proof signer</span><span id="relaySigner" class="mono">—</span></div>
             </div>
           </div>
-
-        </div>
-
-        <!-- ── Ransomware indicators (hidden unless indicators found) ── -->
-        <div id="hbIndicatorsPanel" style="display:none;margin-top:14px;">
-          <div class="proof-box">
-            <div class="helper" style="margin-bottom:8px;">Ransomware indicators</div>
-            <div id="hbIndicatorsList" class="proof-nodes" style="font-size:11px;color:var(--danger);"></div>
+          <div class="status-card">
+            <h3>Latest proof-of-presence</h3>
+            <div class="status-list">
+              <div class="status-item"><span>Output hash</span><span id="relayOutputHash" class="mono">—</span></div>
+              <div class="status-item"><span>Epoch / leaf</span><span id="relayEpochLeaf">—</span></div>
+              <div class="status-item"><span>Heartbeat API</span><span id="relayHeartbeatOnline">—</span></div>
+              <div class="status-item"><span>Randomness API</span><span id="relayRandomnessOnline">—</span></div>
+              <div class="status-item"><span>Mirrored msgs</span><span id="relayMessagesMirrored">—</span></div>
+              <div class="status-item"><span>Sent / cover</span><span id="relayTrafficSummary">—</span></div>
+              <div class="status-item"><span>Reconnect / ratchet</span><span id="relayReconnectRatchet">—</span></div>
+            </div>
           </div>
         </div>
-
-        <!-- Hidden dummy elements referenced by old JS -->
-        <span id="threatContinuity" style="display:none;"></span>
-        <span id="threatCurrentGap" style="display:none;"></span>
-        <span id="threatLongestGap" style="display:none;"></span>
-        <span id="threatGapCount" style="display:none;"></span>
-        <span id="threatPostureBadge" style="display:none;"></span>
-        <span id="threatIntrusionScore" style="display:none;"></span>
-        <span id="threatTelemetryFresh" style="display:none;"></span>
-        <span id="threatTamperLock" style="display:none;"></span>
-        <span id="threatTamperReason" style="display:none;"></span>
-        <span id="threatRansomware" style="display:none;"></span>
-        <span id="threatRansomwareReason" style="display:none;"></span>
-        <span id="threatNarrative" style="display:none;"></span>
-        <span id="relayReadyBadge" style="display:none;"></span>
-        <span id="relayChannelState" style="display:none;"></span>
-        <span id="relayEndpoint" style="display:none;"></span>
-        <span id="relayOperator" style="display:none;"></span>
-        <span id="relayRegion" style="display:none;"></span>
-        <span id="relaySigner" style="display:none;"></span>
-        <span id="relayOutputHash" style="display:none;"></span>
-        <span id="relayEpochLeaf" style="display:none;"></span>
-        <span id="relayHeartbeatOnline" style="display:none;"></span>
-        <span id="relayRandomnessOnline" style="display:none;"></span>
-        <span id="relayMessagesMirrored" style="display:none;"></span>
-        <span id="relayTrafficSummary" style="display:none;"></span>
-        <span id="relayReconnectRatchet" style="display:none;"></span>
-        <span id="personalThreatSummary" style="display:none;"></span>
-        <span id="heartbeatHistory" style="display:none;"></span>
-        <span id="threatActiveAlerts" style="display:none;"></span>
-        <span id="threatRansomwareEvents" style="display:none;"></span>
-        <span id="threatProtectedAssets" style="display:none;"></span>
-        <span id="threatRecoveryFlow" style="display:none;"></span>
-        <span id="relayProfilePreview" style="display:none;"></span>
+        <div class="proof-box" style="margin-top:16px;">
+          <div class="helper" style="margin-bottom:8px;">Personal threat summary</div>
+          <div id="personalThreatSummary">—</div>
+        </div>
+        <div class="system-grid" style="margin-top:16px;">
+          <div class="panel" style="grid-column: span 7; padding: 0; background: transparent; border: 0; box-shadow: none;">
+            <div class="proof-box">
+              <div class="helper" style="margin-bottom:8px;">Heartbeat history</div>
+              <div id="heartbeatHistory" class="proof-nodes"></div>
+            </div>
+          </div>
+          <div class="panel" style="grid-column: span 5; padding: 0; background: transparent; border: 0; box-shadow: none;">
+            <div class="proof-box" style="margin-bottom:16px;">
+              <div class="helper" style="margin-bottom:8px;">Active alerts</div>
+              <div id="threatActiveAlerts" class="proof-nodes"></div>
+            </div>
+            <div class="proof-box" style="margin-bottom:16px;">
+              <div class="helper" style="margin-bottom:8px;">Ransomware evidence log</div>
+              <div id="threatRansomwareEvents" class="proof-nodes"></div>
+            </div>
+            <div class="proof-box" style="margin-bottom:16px;">
+              <div class="helper" style="margin-bottom:8px;">Protected miner assets</div>
+              <div id="threatProtectedAssets" class="proof-nodes"></div>
+            </div>
+            <div class="proof-box" style="margin-bottom:16px;">
+              <div class="helper" style="margin-bottom:8px;">Recovery flow</div>
+              <div id="threatRecoveryFlow" class="proof-node"></div>
+            </div>
+            <details class="proof-box" style="cursor:default;">
+              <summary class="helper" style="margin-bottom:8px;cursor:pointer;user-select:none;">Relay profile preview <span style="font-size:13px;color:var(--muted);">▸ click to show/hide</span></summary>
+              <div id="relayProfilePreview" class="proof-node mono" style="white-space: pre-wrap;">—</div>
+            </details>
+          </div>
+        </div>
         </details>
       </div>
 
@@ -2269,16 +2282,13 @@ curl -s "http://127.0.0.1:4271/api/utxo/scan?seed=$BINARY_HASH" \
 
       <div class="panel left">
         <div class="solutions-header">
-          <h3 class="section-title">Latest Randomness <span id="randomnessModeBadge" style="display:none;font-size:10px;font-weight:600;padding:3px 8px;border-radius:999px;background:rgba(251,191,36,.12);color:var(--gold);border:1px solid rgba(251,191,36,.3);margin-left:8px;vertical-align:middle;">Standalone mode</span></h3>
+          <h3 class="section-title">Latest Randomness</h3>
           <div style="display:flex;gap:8px;flex-wrap:wrap;">
             <button class="action-btn" id="refreshRandomness">Refresh randomness</button>
             <button class="action-btn" id="loadLatestProof">Load latest proof</button>
           </div>
         </div>
         <p class="helper" style="margin:0 0 12px;"><strong>This is what consumers use.</strong> The output hash below is the latest verifiable random number produced by the mining network. Any dApp (lottery, NFT mint, game) can use this instead of Chainlink VRF — it’s cheaper, decentralized, and backed by physical entropy.</p>
-        <div id="standaloneModeNotice" style="display:none;margin:0 0 12px;background:rgba(251,191,36,.06);border:1px solid rgba(251,191,36,.2);border-radius:8px;padding:10px 12px;font-size:11px;line-height:1.5;color:var(--text);">
-          <strong style="color:var(--gold);">Running in solo / self-miner mode.</strong> Each PoW solution is published as its own 1-leaf epoch (leaf index always <code>0</code>). The output hash below <em>is</em> a real random number and the signature is the on-chain commit hash from this miner — consumers can use it directly. To get the full 10-leaves-per-epoch network layout, run the Epoch Builder service against this miner.
-        </div>
         <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
           <div style="flex:1;min-width:180px;background:rgba(56,189,248,.06);border:1px solid rgba(56,189,248,.15);border-radius:8px;padding:10px 12px;font-size:11px;line-height:1.5;">
             <strong style="color:var(--accent);">Refresh randomness</strong> — pulls the newest random number from the network. The miner produces new outputs every few minutes as PoW solutions are found.
@@ -2290,12 +2300,12 @@ curl -s "http://127.0.0.1:4271/api/utxo/scan?seed=$BINARY_HASH" \
         <div class="stack">
           <div class="kv" style="grid-template-columns: 160px 1fr;">
             <div class="label" title="The random number — a 256-bit hash derived from the miner's PoW solution. Use this as your random seed.">Latest output <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></div><div id="latestRandomnessHash" class="hash">—</div>
-            <div class="label" id="latestRandomnessEpochLabel" title="Which epoch batch this randomness belongs to. Each epoch groups multiple solutions into a Merkle tree.">Epoch <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></div><div id="latestRandomnessEpoch">—</div>
-            <div class="label" id="latestRandomnessLeafLabel" title="Position of this output within the epoch’s Merkle tree. Each leaf is a different random number — leaf 0 is the first, leaf 9 is the tenth.">Leaf index <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></div><div id="latestRandomnessLeaf">—</div>
+            <div class="label" title="Which epoch batch this randomness belongs to. Each epoch groups multiple solutions into a Merkle tree.">Epoch <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></div><div id="latestRandomnessEpoch">—</div>
+            <div class="label" title="Position of this output within the epoch’s Merkle tree. Each leaf is a different random number — leaf 0 is the first, leaf 9 is the tenth.">Leaf index <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></div><div id="latestRandomnessLeaf">—</div>
             <div class="label" title="When this random number was produced by the miner.">Timestamp <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></div><div id="latestRandomnessTime">—</div>
             <div class="label" title="Cryptographic signature proving this output was produced by an authorized miner. 'No signature available' means the output is verified via Merkle proof instead.">Signature <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></div><div id="latestRandomnessSignature" class="hash">—</div>
           </div>
-          <div id="multipleRandomnessNotice" style="margin:14px 0 6px;background:rgba(251,191,36,.06);border:1px solid rgba(251,191,36,.18);border-radius:10px;padding:12px 14px;font-size:12px;line-height:1.6;">
+          <div style="margin:14px 0 6px;background:rgba(251,191,36,.06);border:1px solid rgba(251,191,36,.18);border-radius:10px;padding:12px 14px;font-size:12px;line-height:1.6;">
             <div style="font-weight:700;color:var(--gold);margin-bottom:4px;">📦 Need more than one random number?</div>
             <p style="margin:0;color:var(--text);">This section only shows the <em>latest</em> output. Every epoch contains <strong>10 random numbers</strong> (leaves 0–9). To browse all of them:</p>
             <ul style="margin:6px 0 0;padding-left:20px;color:var(--text);">
@@ -2545,11 +2555,11 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
           <div id="proofStatus" class="helper">Enter an output hash or click “Load latest proof”.</div>
           <div class="proof-box">
             <div class="status-list">
-              <div class="status-item" id="proofEpochRow"><span id="proofEpochLabel" title="Which batch of solutions this randomness belongs to. Like a page number in a book of random numbers.">Epoch <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span id="proofEpochId">—</span></div>
-              <div class="status-item" id="proofLeafRow"><span title="The position of this specific random number within the epoch. Like which line on the page.">Leaf index <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span id="proofLeafIndex">—</span></div>
+              <div class="status-item"><span title="Which batch of solutions this randomness belongs to. Like a page number in a book of random numbers.">Epoch <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span id="proofEpochId">—</span></div>
+              <div class="status-item"><span title="The position of this specific random number within the epoch. Like which line on the page.">Leaf index <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span id="proofLeafIndex">—</span></div>
               <div class="status-item"><span title="Whether this epoch has been permanently locked on the blockchain. 'Yes' means the randomness is fully verified and immutable.">Finalized <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span id="proofFinalized">—</span></div>
               <div class="status-item"><span title="The single hash that represents ALL random numbers in this epoch. Your proof connects your specific random number back to this root.">Merkle root <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span id="proofMerkleRoot" class="mono">—</span></div>
-              <div class="status-item" id="proofNodeRow"><span title="The 'steps' in the proof chain. Each node is a hash that links your random number to the Merkle root, like links in a chain.">Proof nodes <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span id="proofNodeCount">—</span></div>
+              <div class="status-item"><span title="The 'steps' in the proof chain. Each node is a hash that links your random number to the Merkle root, like links in a chain.">Proof nodes <span style="cursor:help;color:var(--muted);font-size:10px;">ⓘ</span></span><span id="proofNodeCount">—</span></div>
             </div>
             <div class="helper" style="margin:10px 0 4px;font-size:11px;line-height:1.5;">Each proof node below is a link in the chain from your random number up to the Merkle root. Together they form a mathematical proof that this randomness is part of the committed epoch — no trust needed.</div>
             <div class="proof-nodes" id="proofNodes"></div>
@@ -2705,12 +2715,6 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
   <script src="https://cdn.jsdelivr.net/npm/ethers@6.16.0/dist/ethers.umd.min.js"></script>
 
   <script>
-    // ── SELF-MINER MODE ────────────────────────────────────────────────
-    // When true, hides non-PoW sections and skips external service polling.
-    // This is the ONLY difference from the main index.html dashboard.
-    const SELF_MINER_MODE = true;
-    // ────────────────────────────────────────────────────────────────────
-
     // Difficulty-based reward estimate: max(difficulty_zero_bits / 8, 1) TGBT per solution
     const DIFFICULTY_BITS = 11;
     const EST_TGBT_PER_SOLUTION = Math.max(DIFFICULTY_BITS / 8, 1); // 1.375 TGBT
@@ -2762,54 +2766,6 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
     ];
 
     const els = Object.fromEntries([...document.querySelectorAll('[id]')].map(el => [el.id, el]));
-
-    // ── Self-miner mode: hide non-PoW sections ──────────────────────
-    if (SELF_MINER_MODE) {
-      // CSS handles most hiding via body.self-miner class.
-      // JS handles elements that need text-matching or don't have unique selectors.
-
-      // Rewrite the pipeline title + description for PoW-only mode
-      const pipelineTitle = document.querySelector('#entropyPipelineDetails .section-title');
-      if (pipelineTitle) pipelineTitle.textContent = 'PoW Mining';
-
-      // Hide the "Three independent entropy streams..." paragraph
-      const pipelineDesc = document.querySelector('#entropyPipelineDetails > p.helper');
-      if (pipelineDesc) pipelineDesc.style.display = 'none';
-
-      // Hide "Why three entropy sources?" collapsible
-      const whyDetails = document.querySelector('#entropyPipelineDetails > details:not([id])');
-      if (whyDetails) whyDetails.style.display = 'none';
-
-      // Hide the Combined Beacon Entropy + TGBT Breakdown grid
-      // (the .system-grid that follows the .entropy-mixer)
-      document.querySelectorAll('#entropyPipelineDetails > .system-grid').forEach((grid, i) => {
-        if (i > 0) grid.style.display = 'none'; // first grid has the PoW card, hide the rest
-      });
-
-      // Rewrite hero description for self-miner
-      const heroDesc = document.querySelector('.hero .helper');
-      if (heroDesc) heroDesc.innerHTML = 'This self-contained miner generates <strong>verifiable on-chain randomness</strong> on Arbitrum L2. Your CPU solves PoW puzzles and earns <strong>TGBT tokens</strong> for every accepted solution.';
-
-      // Hide system section rows that reference external services
-      document.querySelectorAll('.sys-row').forEach(row => {
-        const label = row.querySelector('.sys-label');
-        if (label) {
-          const text = label.textContent.toLowerCase();
-          if (text.includes('beacon') || text.includes('randomness') ||
-              text.includes('epoch') ||
-              text.includes('redis') || text.includes('postgres')) {
-            row.style.display = 'none';
-          }
-        }
-      });
-
-      // Hide network/randomness/security refresh buttons
-      ['refreshRandomness', 'refreshEpochs', 'refreshSecurity',
-       'resealTamperLock', 'exportSecurityEvidence', 'utxoScanBtn',
-       'refreshStaleDevProof', 'copyStaleDevProof', 'staleProofSelect'
-      ].forEach(id => { if (els[id]) els[id].style.display = 'none'; });
-    }
-    // ────────────────────────────────────────────────────────────────────
 
     /* ── Chart tab switching ── */
     document.querySelectorAll('.chart-tab').forEach(tab => {
@@ -3344,13 +3300,12 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
       // ── Overall health: single green/red banner + dot ──
       const rndOk = sys.randomnessApi?.online;
       const hbOk = sys.heartbeatApi?.online;
-      const allOk = SELF_MINER_MODE ? (hbOk && !sys._error) : (rndOk && hbOk && !sys._error);
+      const allOk = rndOk && hbOk && !sys._error;
       const dot = els.systemHealthDot;
       const banner = els.systemHealthBanner;
       if (dot) dot.style.background = allOk ? 'var(--accent-2)' : 'var(--danger)';
       if (banner) {
-        const offlineMsg = SELF_MINER_MODE ? 'Miner running — self-contained mode' : 'Service offline — check start-all.ps1';
-        banner.textContent = allOk ? (SELF_MINER_MODE ? 'Miner online — self-contained mode' : 'All systems online') : sys._error ? `RPC error — ${sys._error}` : offlineMsg;
+        banner.textContent = allOk ? 'All systems online' : sys._error ? `RPC error — ${sys._error}` : 'Service offline — check start-all.ps1';
         banner.style.background = allOk ? 'rgba(34,197,94,.08)' : 'rgba(239,68,68,.08)';
         banner.style.borderColor = allOk ? 'rgba(34,197,94,.18)' : 'rgba(239,68,68,.18)';
         banner.style.color = allOk ? 'var(--accent-2)' : 'var(--danger)';
@@ -3623,23 +3578,6 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
 
     function renderLatestRandomness() {
       const latest = state.randomnessLatest;
-      const standalone = latest && !latest.error && latest.mode === 'standalone';
-
-      // Toggle standalone UI chrome
-      if (els.randomnessModeBadge) els.randomnessModeBadge.style.display = standalone ? 'inline-block' : 'none';
-      if (els.standaloneModeNotice) els.standaloneModeNotice.style.display = standalone ? 'block' : 'none';
-      if (els.multipleRandomnessNotice) els.multipleRandomnessNotice.style.display = standalone ? 'none' : 'block';
-      if (els.latestRandomnessEpochLabel) {
-        els.latestRandomnessEpochLabel.firstChild.nodeValue = standalone ? 'Solution # ' : 'Epoch ';
-        els.latestRandomnessEpochLabel.title = standalone
-          ? 'Sequence number of this PoW solution from the local miner. In solo mode, each solution is its own 1-leaf epoch.'
-          : 'Which epoch batch this randomness belongs to. Each epoch groups multiple solutions into a Merkle tree.';
-      }
-      if (els.latestRandomnessLeafLabel) {
-        els.latestRandomnessLeafLabel.parentElement && (els.latestRandomnessLeafLabel.style.display = standalone ? 'none' : '');
-        if (els.latestRandomnessLeaf) els.latestRandomnessLeaf.style.display = standalone ? 'none' : '';
-      }
-
       if (!latest || latest.error) {
         els.latestRandomnessHash.textContent = latest?.error || 'No randomness available yet';
         els.latestRandomnessEpoch.textContent = '—';
@@ -3675,25 +3613,13 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
       }
 
       els.proofStatus.textContent = 'Proof loaded successfully.';
-      const standalone = proof.mode === 'standalone';
-      if (els.proofEpochLabel) {
-        els.proofEpochLabel.firstChild.nodeValue = standalone ? 'Solution # ' : 'Epoch ';
-        els.proofEpochLabel.title = standalone
-          ? 'Sequence number of this PoW solution from the local miner. In solo mode, each solution is its own 1-leaf epoch.'
-          : 'Which batch of solutions this randomness belongs to. Like a page number in a book of random numbers.';
-      }
-      if (els.proofLeafRow) els.proofLeafRow.style.display = standalone ? 'none' : '';
-      if (els.proofNodeRow) els.proofNodeRow.style.display = standalone ? 'none' : '';
       els.proofEpochId.textContent = proof.epochId;
       els.proofLeafIndex.textContent = proof.leafIndex;
       els.proofFinalized.textContent = proof.finalized ? 'Yes' : 'No';
       els.proofFinalized.className = proof.finalized ? 'ok' : 'warn';
       els.proofMerkleRoot.textContent = proof.merkleRoot || '—';
       els.proofNodeCount.textContent = Array.isArray(proof.proof) ? proof.proof.length : 0;
-      const emptyProofMsg = standalone
-        ? '<div class="helper">Standalone mode: each solution is its own 1-leaf tree, so no sibling hashes are needed — the Merkle root <em>is</em> the output hash.</div>'
-        : '<div class="helper">No proof nodes returned.</div>';
-      els.proofNodes.innerHTML = (proof.proof || []).map(node => `<div class="proof-node">${escapeHtml(node)}</div>`).join('') || emptyProofMsg;
+      els.proofNodes.innerHTML = (proof.proof || []).map(node => `<div class="proof-node">${escapeHtml(node)}</div>`).join('') || '<div class="helper">No proof nodes returned.</div>';
       els.verifyMethod.textContent = proof.verifyOnChain?.method || '—';
       const argLabels = [
         { name: 'epochId', desc: 'Which batch of solutions (epoch) this belongs to' },
@@ -5371,7 +5297,6 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
 
     // ── Auto-Load + Auto-Scan + Periodic Re-scan ──
 
-    if (!SELF_MINER_MODE) {
     // 1. Restore last scan from server (if available)
     fetch(`${RANDOMNESS_API}/api/utxo/latest`).then(r => r.ok ? r.json() : null).then(scan => {
       if (scan && scan.summary) {
@@ -5396,7 +5321,6 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
         runUtxoScan({ auto: true });
       }
     }, UTXO_RESCAN_INTERVAL);
-    } // end if (!SELF_MINER_MODE)
 
     els.refreshEntropy.addEventListener('click', () => {
       if (entropyState.initialized) tickEntropyPipeline();
@@ -5439,107 +5363,6 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
         }
       });
       source.addEventListener('meta', () => {});
-      source.addEventListener('heartbeat', (event) => {
-        try {
-          const hb = JSON.parse(event.data);
-          renderSecurityCard(hb);
-        } catch (err) {
-          console.warn('[SSE] Failed to parse heartbeat event:', err.message);
-        }
-      });
-    }
-
-    // ── Security card rendering (embedded heartbeat) ────────────────────
-    function renderSecurityCard(hb) {
-      if (!hb) return;
-      const ok = hb.status === 'ok';
-      const degraded = hb.status === 'degraded';
-      const score = hb.security?.intrusion_score ?? 0;
-      const rw = hb.security?.ransomware || {};
-      const alerts = hb.security?.active_alerts || [];
-      const beat = hb.heartbeat || {};
-
-      // Banner
-      const dot = els.securityOverallDot;
-      if (dot) {
-        dot.style.background = ok ? 'var(--accent-2)' : score >= 70 ? 'var(--danger)' : 'var(--gold)';
-      }
-      const banner = els.secBanner;
-      if (banner) {
-        if (ok) {
-          banner.textContent = `Secure — intrusion score ${score}/100`;
-          banner.style.background = 'rgba(34,197,94,.08)';
-          banner.style.borderColor = 'rgba(34,197,94,.18)';
-          banner.style.color = 'var(--accent-2)';
-        } else if (rw.active) {
-          banner.textContent = `RANSOMWARE DETECTED — intrusion score ${score}/100`;
-          banner.style.background = 'rgba(239,68,68,.12)';
-          banner.style.borderColor = 'rgba(239,68,68,.3)';
-          banner.style.color = 'var(--danger)';
-        } else {
-          const label = degraded ? 'Degraded' : 'Alert';
-          banner.textContent = `${label} — intrusion score ${score}/100`;
-          banner.style.background = 'rgba(251,191,36,.08)';
-          banner.style.borderColor = 'rgba(251,191,36,.18)';
-          banner.style.color = 'var(--gold)';
-        }
-      }
-
-      // Heartbeat column
-      setBadge(els.hbOverallBadge, hb.status, ok ? 'ok' : score >= 70 ? 'fail' : 'warn');
-      setBadge(els.hbTelemetryFresh, beat.telemetry_fresh ? 'fresh' : 'stale', beat.telemetry_fresh ? 'ok' : 'fail');
-      if (els.hbHashrateRatio) els.hbHashrateRatio.textContent = beat.hashrate_ratio != null ? beat.hashrate_ratio.toFixed(2) + '×' : '—';
-      if (els.hbWorkers) els.hbWorkers.textContent = beat.worker_count ?? '—';
-      if (els.hbPhase) els.hbPhase.textContent = beat.phase || '—';
-      if (els.hbUptime) {
-        const s = hb.uptime_seconds || 0;
-        const h = Math.floor(s / 3600); const m = Math.floor((s % 3600) / 60);
-        els.hbUptime.textContent = h > 0 ? `${h}h ${m}m` : `${m}m`;
-      }
-
-      // Ransomware column
-      const rwClean = !rw.active && rw.status === 'clean';
-      setBadge(els.hbRansomwareBadge, rw.active ? 'DETECTED' : 'clean', rwClean ? 'ok' : 'fail');
-      if (els.hbRansomwareCount) els.hbRansomwareCount.textContent = (rw.indicators || []).length;
-      if (els.hbTemperature) {
-        const t = beat.temperature_c;
-        els.hbTemperature.textContent = t != null ? `${t.toFixed(1)}°C` : '—';
-        els.hbTemperature.style.color = t >= 90 ? 'var(--danger)' : t >= 82 ? 'var(--gold)' : '';
-      }
-      if (els.hbPaused) els.hbPaused.textContent = beat.paused ? 'yes' : 'no';
-
-      // Indicators detail panel
-      const indPanel = els.hbIndicatorsPanel;
-      const indList = els.hbIndicatorsList;
-      if (indPanel && indList) {
-        const inds = rw.indicators || [];
-        if (inds.length > 0) {
-          indPanel.style.display = '';
-          indList.innerHTML = inds.map(i => `<div style="margin-bottom:4px;">${i}</div>`).join('');
-        } else {
-          indPanel.style.display = 'none';
-          indList.innerHTML = '';
-        }
-      }
-
-      // Alerts column
-      const alertsEl = els.hbAlertsList;
-      if (alertsEl) {
-        if (alerts.length === 0) {
-          alertsEl.innerHTML = '<div class="status-item" style="color:var(--muted);font-style:italic;">No active alerts</div>';
-        } else {
-          alertsEl.innerHTML = alerts.map(a => {
-            const sev = a.severity || 'LOW';
-            const color = sev === 'CRITICAL' ? 'var(--danger)' : sev === 'HIGH' ? 'var(--gold)' : 'var(--muted)';
-            return `<div class="status-item"><span style="color:${color};font-weight:600;">${sev}</span><span>${a.message || a.type}</span></div>`;
-          }).join('');
-        }
-      }
-    }
-
-    // Initial heartbeat fetch (before SSE connects)
-    if (SELF_MINER_MODE) {
-      fetch('/api/heartbeat/status').then(r => r.json()).then(renderSecurityCard).catch(() => {});
     }
 
     loadHistory().then(connect).catch(err => {
@@ -5571,7 +5394,6 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
     els.refreshSecurity.addEventListener('click', () => loadSecurity().catch(err => showToast(err.message, true)));
     els.resealTamperLock.addEventListener('click', () => requestTamperReseal().catch(err => showToast(err.message, true)));
     els.exportSecurityEvidence.addEventListener('click', () => exportSecurityEvidence().catch(err => showToast(err.message, true)));
-    if (!SELF_MINER_MODE) {
     els.refreshRandomness.addEventListener('click', () => loadNetworkLatest().catch(err => {
       state.randomnessLatest = { error: err.message };
       renderLatestRandomness();
@@ -5579,7 +5401,6 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
     els.refreshEpochs.addEventListener('click', () => loadEpochs().catch(err => {
       els.epochStatus.textContent = `Failed to load epochs: ${err.message}`;
     }));
-    } // end if (!SELF_MINER_MODE)
     els.refreshProof.addEventListener('click', () => loadProof().catch(err => {
       state.proof = { error: err.message };
       renderProof();
@@ -5824,32 +5645,113 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
       }
     }
 
+    // ── Queue Management API Integration ──
+    async function fetchQueueList() {
+      try {
+        const [listRes, statsRes] = await Promise.all([
+          fetch('/api/queue/list'),
+          fetch('/api/queue/stats')
+        ]);
+        const listData = await listRes.json();
+        const statsData = await statsRes.json();
+
+        if (statsData.pending !== undefined) {
+          document.getElementById('queuePendingBadge').textContent = `${statsData.pending} Pending`;
+          document.getElementById('queueApprovedBadge').textContent = `${statsData.approved} Approved`;
+          document.getElementById('queueRejectedBadge').textContent = `${statsData.rejected} Rejected`;
+        }
+
+        const tbody = document.getElementById('queueTbody');
+        if (listData.error) {
+          tbody.innerHTML = `<tr><td colspan="5" class="sol-empty" style="color:var(--danger)">Error: ${listData.error}</td></tr>`;
+          return;
+        }
+
+        const pending = listData.pending || [];
+        if (pending.length === 0) {
+          tbody.innerHTML = `<tr><td colspan="5" class="sol-empty">No pending solutions in queue.</td></tr>`;
+          return;
+        }
+
+        const now = Math.floor(Date.now() / 1000);
+        tbody.innerHTML = pending.map(s => {
+          const ageSecs = now - s.createdAt;
+          const ageStr = ageSecs < 60 ? `${ageSecs}s` : `${Math.floor(ageSecs/60)}m ${ageSecs%60}s`;
+          return `<tr>
+            <td class="sol-hash-cell" title="${s.hash}">${s.hash.slice(0, 16)}...</td>
+            <td class="sol-nonce">${s.nonce}</td>
+            <td>${ageStr}</td>
+            <td style="color:var(--gold);">${fmtTGBT(s.reward)} TGBT (est)</td>
+            <td style="text-align:right;">
+              <button class="action-btn" style="padding:4px 8px;font-size:11px;color:var(--accent-2);border-color:rgba(34,197,94,.3);" onclick="queueApprove('${s.hash}')">Approve</button>
+              <button class="action-btn" style="padding:4px 8px;font-size:11px;color:var(--warn);border-color:rgba(245,158,11,.3);" onclick="queueReject('${s.hash}')">Reject</button>
+            </td>
+          </tr>`;
+        }).join('');
+      } catch (err) {
+        document.getElementById('queueTbody').innerHTML = `<tr><td colspan="5" class="sol-empty" style="color:var(--danger)">Network error: ${err.message}</td></tr>`;
+      }
+    }
+
+    async function queueApprove(hash) {
+      try {
+        const res = await fetch(`/api/queue/approve/${hash}`, { method: 'POST' });
+        const data = await res.json();
+        if (data.success) { showToast('Solution approved'); fetchQueueList(); }
+        else { showToast('Error: ' + data.error, true); }
+      } catch(e) { showToast('Network error', true); }
+    }
+
+    async function queueReject(hash) {
+      try {
+        const res = await fetch(`/api/queue/reject/${hash}`, { method: 'POST' });
+        const data = await res.json();
+        if (data.success) { showToast('Solution rejected'); fetchQueueList(); }
+        else { showToast('Error: ' + data.error, true); }
+      } catch(e) { showToast('Network error', true); }
+    }
+
+    async function queueApproveAll() {
+      try {
+        const res = await fetch('/api/queue/approve-all', { method: 'POST' });
+        const data = await res.json();
+        if (data.success) { showToast(`Approved ${data.approved_count} solutions`); fetchQueueList(); }
+        else { showToast('Error: ' + data.error, true); }
+      } catch(e) { showToast('Network error', true); }
+    }
+
+    async function queueFlush() {
+      if(!confirm("Are you sure you want to reject ALL pending solutions?")) return;
+      try {
+        const res = await fetch('/api/queue/flush', { method: 'POST' });
+        const data = await res.json();
+        if (data.success) { showToast(`Flushed ${data.flushed_count} solutions`); fetchQueueList(); }
+        else { showToast('Error: ' + data.error, true); }
+      } catch(e) { showToast('Network error', true); }
+    }
+
     // Poll solutions every 10s (live updates)
     loadSolutions();
-    if (!SELF_MINER_MODE) {
-      loadStaleProofOptions();
-      loadStaleDeveloperProof();
-    }
+    loadStaleProofOptions();
+    loadStaleDeveloperProof();
     setInterval(loadSolutions, 10000);
-    if (!SELF_MINER_MODE) {
-      setInterval(loadStaleProofOptions, 10000);
-      setInterval(loadStaleDeveloperProof, 10000);
-    }
+    setInterval(loadStaleProofOptions, 10000);
+    setInterval(loadStaleDeveloperProof, 10000);
+    setInterval(fetchQueueList, 10000);
+    fetchQueueList();
 
     Promise.allSettled([
       loadSecurity(),
       loadSystemStatus(),
       loadNetworkLatest(),
-      ...(SELF_MINER_MODE ? [] : [loadEpochs()]),
+      loadEpochs(),
     ]).catch(() => {});
 
     setInterval(() => {
       loadSecurity().catch(err => console.error('[security]', err.message));
       loadSystemStatus().catch(err => console.error('[system]', err.message));
       loadNetworkLatest().catch(err => console.error('[randomness]', err.message));
-      if (!SELF_MINER_MODE) {
-        loadEpochs().catch(err => console.error('[epochs]', err.message));
-      }
+      loadEpochs().catch(err => console.error('[epochs]', err.message));
     }, 15000);
   </script>
 </body>

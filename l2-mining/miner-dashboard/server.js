@@ -16,6 +16,7 @@ const TELEMETRY_FILE = process.env.TELEMETRY_FILE || (process.env.LOCALAPPDATA
 	: path.resolve(ROOT, '..', 'rust', 'miner-telemetry.jsonl'));
 const RELAY_STATUS_FILE = process.env.RELAY_STATUS_FILE || path.join(path.dirname(TELEMETRY_FILE), `${path.parse(TELEMETRY_FILE).name}.relay-status.json`);
 const CONTROL_FILE = process.env.CONTROL_FILE || path.join(path.dirname(TELEMETRY_FILE), 'miner-control.json');
+const QUEUE_DIR = process.env.QUEUE_DIR || path.resolve(ROOT, '..', 'rust', 'package', 'keys', 'queue');
 const RANDOMNESS_API_URL = process.env.RANDOMNESS_API_URL || 'http://127.0.0.1:4271';
 const RANDOMNESS_API_FALLBACK_URL = process.env.RANDOMNESS_API_FALLBACK_URL || 'http://127.0.0.1:3100';
 const HEARTBEAT_API_URL = process.env.HEARTBEAT_API_URL || 'http://127.0.0.1:4380';
@@ -1702,6 +1703,63 @@ const server = http.createServer(async (req, res) => {
 		try {
 			const latest = await store.getLatest();
 			sendJson(res, 200, { solution: latest });
+		} catch (err) {
+			sendJson(res, 500, { error: err.message });
+		}
+		return;
+	}
+
+	if (url.pathname === '/api/queue' && req.method === 'GET') {
+		try {
+			const readDirJson = (subDir) => {
+				const dirPath = path.join(QUEUE_DIR, subDir);
+				if (!fs.existsSync(dirPath)) return [];
+				const files = fs.readdirSync(dirPath).filter(f => f.endsWith('.json'));
+				const items = [];
+				for (const file of files) {
+					try {
+						const content = fs.readFileSync(path.join(dirPath, file), 'utf8');
+						items.push(JSON.parse(content));
+					} catch (e) {
+						// ignore unparseable
+					}
+				}
+				// Sort by created_at ascending (oldest first)
+				return items.sort((a, b) => (a.created_at || 0) - (b.created_at || 0));
+			};
+
+			sendJson(res, 200, {
+				pending: readDirJson('pending'),
+				approved: readDirJson('approved'),
+				rejected: readDirJson('rejected')
+			});
+		} catch (err) {
+			sendJson(res, 500, { error: err.message });
+		}
+		return;
+	}
+
+	const queueActionMatch = url.pathname.match(/^\/api\/queue\/(approve|reject)\/([0-9a-fA-F]+)$/);
+	if (queueActionMatch && req.method === 'POST') {
+		try {
+			const action = queueActionMatch[1];
+			const hash = queueActionMatch[2].replace(/^0x/i, '').toLowerCase();
+			const fileName = `${hash}.json`;
+			const pendingPath = path.join(QUEUE_DIR, 'pending', fileName);
+			const targetPath = path.join(QUEUE_DIR, action === 'approve' ? 'approved' : 'rejected', fileName);
+
+			if (!fs.existsSync(pendingPath)) {
+				sendJson(res, 404, { error: `Solution ${hash} not found in pending queue` });
+				return;
+			}
+
+			// Ensure target dir exists
+			if (!fs.existsSync(path.dirname(targetPath))) {
+				fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+			}
+
+			fs.renameSync(pendingPath, targetPath);
+			sendJson(res, 200, { success: true, action, hash });
 		} catch (err) {
 			sendJson(res, 500, { error: err.message });
 		}
