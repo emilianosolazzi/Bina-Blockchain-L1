@@ -24,7 +24,7 @@ import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
  * @dev Interface-compatible with ITokenomicsModule — MiningModule, BatchMiningModule,
  * and StaleBlockOracle require zero changes.
  */
-contract TokenomicsModuleV2 is ModuleBase, ITokenomicsModule {
+contract TokenomicsModuleV3 is ModuleBase, ITokenomicsModule {
     using TokenomicsLib for TokenomicsLib.EpochState;
     using Math for uint256;
 
