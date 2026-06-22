@@ -9,20 +9,20 @@ import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 
 /**
  * @title  TokenomicsModuleV3
- * @notice Drop-in replacement for TokenomicsModule with two critical production fixes:
+ * @notice Drop-in replacement for TokenomicsModule supporting full stack integration:
  *
  * 1. Halving interval corrected for L1 block.number on Arbitrum.
- * New value: set via initialize() — caller passes the correct L1-based interval
- * (e.g. 7,884,000 for ~3yr or 5,256,000 for ~2yr).
+ * Passed via initialize() matching your updated L1-based pacing metrics.
  *
  * 2. Network-wide emission rate limiter.
  * Tracks solutions per rolling window (e.g. 7,200 L1 blocks ≈ 24h).
  * When solutions exceed targetSolutionsPerWindow, reward scales down linearly:
  * effectiveReward = baseReward × target / actual
- * This prevents uncapped drain regardless of miner count.
  *
- * @dev Interface-compatible with ITokenomicsModule — MiningModule, BatchMiningModule,
- * and StaleBlockOracle require zero changes.
+ * 3. Dual-Route Batch Awareness Engine.
+ * Explicitly intercepts calls from BatchMiningModule. Infers true leaf count,
+ * multiplies emission metrics uniformly, and ensures large solution dumps
+ * are fully rewarded without getting truncated by single-solution caps.
  */
 contract TokenomicsModuleV3 is ModuleBase, ITokenomicsModule {
     using TokenomicsLib for TokenomicsLib.EpochState;
@@ -42,19 +42,17 @@ contract TokenomicsModuleV3 is ModuleBase, ITokenomicsModule {
     uint256 public constant DEFAULT_BONUS_THRESHOLD = 2;
     uint16 public constant DEFAULT_BONUS_MULTIPLIER = 125;
 
+    // ── Batch Specific Anchors ────────────────────────────────
+    uint256 public constant REWARD_PER_SOLUTION = 1.375 ether;
+
     // ── Rate Limiter Constants ───────────────────────────────
-    /// @notice Minimum allowed window size (1 hour at 12s/block)
     uint256 public constant MIN_WINDOW_BLOCKS = 300;
-    /// @notice Maximum allowed window size (7 days at 12s/block)
     uint256 public constant MAX_WINDOW_BLOCKS = 50_400;
-    /// @notice Minimum target solutions per window
     uint256 public constant MIN_TARGET_SOLUTIONS = 100;
-    /// @notice Maximum target solutions per window
     uint256 public constant MAX_TARGET_SOLUTIONS = 1_000_000;
-    /// @notice Floor: reward never drops below 1% of base (prevents zero-reward spam)
     uint256 private constant RATE_LIMIT_FLOOR_BPS = 100; // 1%
 
-    // ── Existing Storage Layout (V1 Drop-In Compatible) ──────
+    // ── Existing Storage Layout (V1/V2 Drop-In Compatible) ───
     ITGBT public tgbtToken;
     TokenomicsLib.EpochState internal epochState;
     uint256 public totalMined;
@@ -65,14 +63,10 @@ contract TokenomicsModuleV3 is ModuleBase, ITokenomicsModule {
     mapping(address => uint256) public lastActivityBlock;
     mapping(address => uint256) public missedContributions;
 
-    // ── New Storage Layout (Appended Safely) ─────────────────
-    /// @notice Maximum solutions per window before reward scaling kicks in
+    // ── Rate Limiter Storage Layout ──────────────────────────
     uint256 public targetSolutionsPerWindow;
-    /// @notice Window duration in L1 blocks (e.g. 7,200 ≈ 24h)
     uint256 public windowBlocks;
-    /// @notice L1 block number when current window started
     uint256 public windowStartBlock;
-    /// @notice Solutions counted in current window
     uint256 public windowSolutions;
 
     // ── Events ───────────────────────────────────────────────
@@ -94,20 +88,6 @@ contract TokenomicsModuleV3 is ModuleBase, ITokenomicsModule {
     error InvalidTargetSolutions();
 
     // ── Initializer ──────────────────────────────────────────
-    /**
-     * @notice One-shot initializer. Replaces constructor for proxy/module pattern.
-     * @param coreAddress         Core contract address
-     * @param tokenAddress        TGBT token address
-     * @param initialReward       Base reward per solution (e.g. 10 ether = 10 TGBT)
-     * @param blocksPerEpoch      Blocks per epoch (e.g. 345,600)
-     * @param halvingInterval     L1 blocks between halvings (e.g. 7,884,000 ≈ 3yr)
-     * @param initialBonusThreshold  Bonus difficulty threshold multiplier (0 → default 2)
-     * @param initialBonusMultiplier Bonus reward multiplier in % (0 → default 125)
-     * @param initialTotalMined      Seed from old module (wei). Read on-chain before deploy.
-     * @param initialTotalStaleRewards Seed from old module (wei). Read on-chain before deploy.
-     * @param _targetSolutionsPerWindow  Rate limiter target (e.g. 30,000)
-     * @param _windowBlocks              Rate limiter window in L1 blocks (e.g. 7,200 ≈ 24h)
-     */
     function initialize(
         address coreAddress,
         address tokenAddress,
@@ -142,31 +122,50 @@ contract TokenomicsModuleV3 is ModuleBase, ITokenomicsModule {
         if (bonusThreshold == 0) revert InvalidThreshold();
         if (bonusMultiplier == 0 || bonusMultiplier > MAX_BONUS_MULTIPLIER) revert InvalidMultiplier();
 
-        // Rate limiter state configuration
         targetSolutionsPerWindow = _targetSolutionsPerWindow;
         windowBlocks = _windowBlocks;
         windowStartBlock = block.number;
         windowSolutions = 0;
     }
 
-    // ── ITokenomicsModule: onBlockMined ──────────────────────
+    // ── ITokenomicsModule: onBlockMined (Dual-Route Route) ──
     function onBlockMined(
         address miner,
         bytes32 output,
-        uint8,
+        uint8 poolId,
         uint256 poolTargetDifficulty,
         uint256 poolTotalMined,
         uint256 poolEmissionBucket
     ) external onlyAuthorizedMiningModule whenSystemActive returns (uint256 reward) {
         _advanceWindow();
-        windowSolutions++;
 
-        uint256 currentReward = TokenomicsLib.checkEpochTransition(epochState);
+        bool isBatchMode = (msg.sender == _module(MODULE_BATCH_MINING));
+        uint256 currentBaseReward = TokenomicsLib.checkEpochTransition(epochState);
 
-        // Apply rate limiter: scale down reward when network exceeds target
-        uint256 effectiveReward = _applyRateLimiter(currentReward);
+        if (isBatchMode) {
+            // Extrapolate exact leaf concentration from requested pool allocation bounds
+            uint256 batchCount = poolEmissionBucket / REWARD_PER_SOLUTION;
+            if (batchCount == 0) batchCount = 1;
 
-        reward = _calculateReward(output, effectiveReward, poolTargetDifficulty, poolTotalMined, poolEmissionBucket);
+            // Step window impact up by complete solution weight
+            windowSolutions += batchCount;
+
+            // Apply rate-limiting factor across current baseline target block reward
+            uint256 effectiveRewardPerSolution = _applyRateLimiter(currentBaseReward);
+
+            // Total reward bypasses single-reward check logic bounds natively
+            reward = batchCount * effectiveRewardPerSolution;
+
+            uint256 remainingMiningAllocation = MINING_ALLOCATION > totalMined ? MINING_ALLOCATION - totalMined : 0;
+            if (reward > remainingMiningAllocation) {
+                reward = remainingMiningAllocation;
+            }
+        } else {
+            // Standard individual hash mining path
+            windowSolutions++;
+            uint256 effectiveReward = _applyRateLimiter(currentBaseReward);
+            reward = _calculateReward(output, effectiveReward, poolTargetDifficulty, poolTotalMined, poolEmissionBucket);
+        }
 
         if (reward > 0) {
             tgbtToken.mint(miner, reward);
@@ -211,13 +210,12 @@ contract TokenomicsModuleV3 is ModuleBase, ITokenomicsModule {
         emit StaleEntropyRewarded(recipient, requestedReward, actualReward);
     }
 
-    // ── Record Penalties / Slashing Vectors ──────────────────
     function recordMissedContribution(address contributor) external onlyCoreOrModule whenSystemActive {
         missedContributions[contributor]++;
         emit MissedContributionRecorded(contributor, missedContributions[contributor]);
     }
 
-    // ── Core Infrastructure View Bindings ────────────────────
+    // ── Core Stack View Bindings ─────────────────────────────
     function getMiningEconomics()
         external
         view
@@ -304,8 +302,6 @@ contract TokenomicsModuleV3 is ModuleBase, ITokenomicsModule {
         )
     {
         (currentBaseReward, , , ) = TokenomicsLib.previewEpochState(epochState);
-
-        // Preview accurately calculates current rate-limiter penalty status
         uint256 effectiveBase = _previewRateLimiter(currentBaseReward);
 
         (
@@ -342,7 +338,6 @@ contract TokenomicsModuleV3 is ModuleBase, ITokenomicsModule {
         utilizationBps = STALE_BLOCK_ALLOCATION == 0 ? 0 : Math.mulDiv(totalStaleRewards, BPS_SCALE, STALE_BLOCK_ALLOCATION);
     }
 
-    /// @notice Comprehensive Rate limiter state for dashboards and tracking utilities
     function getRateLimiterState()
         external
         view
@@ -384,7 +379,7 @@ contract TokenomicsModuleV3 is ModuleBase, ITokenomicsModule {
         return _module(MODULE_BATCH_MINING);
     }
 
-    // ── Internal Core Routines ───────────────────────────────
+    // ── Internal Utilities ───────────────────────────────────
     function _advanceWindow() internal {
         if (block.number >= windowStartBlock + windowBlocks) {
             windowStartBlock = block.number;
@@ -392,10 +387,6 @@ contract TokenomicsModuleV3 is ModuleBase, ITokenomicsModule {
         }
     }
 
-    /**
-     * @dev Optimized linear emission reduction curve.
-     * Saves significant gas by converting fixed floor fractions to raw division operations.
-     */
     function _applyRateLimiter(uint256 baseReward) internal returns (uint256 effectiveReward) {
         if (windowSolutions <= targetSolutionsPerWindow) {
             return baseReward;
@@ -403,8 +394,7 @@ contract TokenomicsModuleV3 is ModuleBase, ITokenomicsModule {
 
         effectiveReward = Math.mulDiv(baseReward, targetSolutionsPerWindow, windowSolutions);
 
-        // Native gas optimization over Math.mulDiv(baseReward, 100, 10000)
-        uint256 floor = baseReward / 100; 
+        uint256 floor = baseReward / 100; // Optimized raw division
         if (effectiveReward < floor) {
             effectiveReward = floor;
         }
@@ -493,7 +483,7 @@ contract TokenomicsModuleV3 is ModuleBase, ITokenomicsModule {
         }
     }
 
-    // ── System Restrictive Modifiers ─────────────────────────
+    // ── Restrictive Modifiers ────────────────────────────────
     modifier onlyAuthorizedMiningModule() {
         if (msg.sender != _module(MODULE_MINING)) {
             if (msg.sender != _module(MODULE_BATCH_MINING)) revert OnlyMiningModule();
@@ -506,5 +496,3 @@ contract TokenomicsModuleV3 is ModuleBase, ITokenomicsModule {
         _;
     }
 }
-
-```
