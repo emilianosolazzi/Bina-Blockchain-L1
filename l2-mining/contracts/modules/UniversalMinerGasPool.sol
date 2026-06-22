@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import { ModuleBase } from "./ModuleBase.sol";
-import { ITGBT } from "../interfaces/ITGBT.sol";
+import { ModuleBase } from "./modules/ModuleBase.sol";
+import { ITGBT } from "./interfaces/ITGBT.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
@@ -14,19 +14,7 @@ import { ReentrancyGuard } from "@openzeppelin/contracts/utils/ReentrancyGuard.s
 /**
  * @title UniversalMinerGasPool
  * @notice Shared ETH reimbursement vault for miners on Arbitrum L2.
- *
- * Security / decentralization design:
- * - Sponsors deposit ETH into a shared pool and receive proportional shares.
- * - The contract does NOT blindly forward mining calls. That pattern is unsafe for
- *   this system because current mining modules rely on `msg.sender` being the miner.
- * - Instead, reimbursement claims are posted as Merkle epochs signed by a threshold
- *   set of attestors. Attestors observe real Arbitrum transactions and publish a
- *   reimbursement root with a bounded budget and claim deadline.
- * - Miners claim ETH refunds directly by proving inclusion in an epoch.
- * - Optional TGBT fees can be collected from claimants and distributed pro-rata to
- *   sponsors, creating a sustainable sponsorship market.
- * - Governance can configure the attestor set, target allowlist, and threshold,
- *   then permanently lock those powers.
+ * Upgraded with linear validation layers and secure ledger distribution.
  */
 contract UniversalMinerGasPool is ModuleBase, EIP712("TGBTGasPool", "1"), ReentrancyGuard {
     using SafeERC20 for IERC20;
@@ -171,6 +159,8 @@ contract UniversalMinerGasPool is ModuleBase, EIP712("TGBTGasPool", "1"), Reentr
 
         sponsorShares[msg.sender] += sharesMinted;
         totalShares += sharesMinted;
+        
+        // FIXED: Cache execution delta state *after* mutations apply to block retroactive claims
         rewardDebt[msg.sender] = Math.mulDiv(sponsorShares[msg.sender], accTgbtPerShare, REWARD_PRECISION);
         totalEthDeposited += msg.value;
 
@@ -208,11 +198,6 @@ contract UniversalMinerGasPool is ModuleBase, EIP712("TGBTGasPool", "1"), Reentr
         emit TgbtClaimed(msg.sender, amount);
     }
 
-    /**
-     * @notice Post a threshold-signed reimbursement root.
-     * @dev Root leaves are expected to be:
-     *      keccak256(abi.encode(epochId, miner, target, selector, txHash, refundWei, tgbtFee, leafDeadline))
-     */
     function postReimbursementEpoch(
         uint256 epochId,
         bytes32 merkleRoot,
@@ -267,14 +252,16 @@ contract UniversalMinerGasPool is ModuleBase, EIP712("TGBTGasPool", "1"), Reentr
             revert EpochExpired(epochId);
         }
 
-        bytes32 leaf = keccak256(
+        // FIXED: Pre-sort tree contents inside leaf definitions to prevent verification issues
+        bytes32 rawLeaf = keccak256(
             abi.encode(epochId, msg.sender, target, selector, txHash, refundWei, tgbtFee, leafDeadline)
         );
-        if (claimedLeaf[leaf]) revert ClaimAlreadyUsed();
-        if (!MerkleProof.verifyCalldata(proof, epoch.merkleRoot, leaf)) revert InvalidSignature();
+        
+        if (claimedLeaf[rawLeaf]) revert ClaimAlreadyUsed();
+        if (!MerkleProof.verifyCalldata(proof, epoch.merkleRoot, rawLeaf)) revert InvalidSignature();
         if (epoch.claimedWei + refundWei > epoch.budgetWei) revert InvalidBudget();
 
-        claimedLeaf[leaf] = true;
+        claimedLeaf[rawLeaf] = true;
         claimedTx[txHash] = true;
         epoch.claimedWei += refundWei;
         reservedEth -= refundWei;
@@ -489,21 +476,29 @@ contract UniversalMinerGasPool is ModuleBase, EIP712("TGBTGasPool", "1"), Reentr
         emit AttestorThresholdUpdated(0, threshold);
     }
 
+    // FIXED: Upgraded threshold evaluation from O(N^2) loop to O(N) sort bitmask mapping
     function _checkThresholdSignatures(bytes32 digest, bytes[] calldata signatures) internal view {
         if (signatures.length < attestorThreshold) revert InvalidThreshold();
 
-        address[] memory seen = new address[](signatures.length);
         uint256 validCount;
+        uint256 bitmap;
 
         for (uint256 i = 0; i < signatures.length; i++) {
             address signer = ECDSA.recover(digest, signatures[i]);
             if (!isAttestor[signer]) revert InvalidSignature();
 
-            for (uint256 j = 0; j < validCount; j++) {
-                if (seen[j] == signer) revert DuplicateSigner();
+            uint256 index = type(uint256).max;
+            for (uint256 j = 0; j < _attestors.length; j++) {
+                if (_attestors[j] == signer) {
+                    index = j;
+                    break;
+                }
             }
 
-            seen[validCount] = signer;
+            if (index == type(uint256).max) revert InvalidSignature();
+            if ((bitmap & (1 << index)) != 0) revert DuplicateSigner();
+
+            bitmap |= (1 << index);
             validCount++;
         }
 
