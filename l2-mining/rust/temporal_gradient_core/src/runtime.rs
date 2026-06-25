@@ -2517,7 +2517,17 @@ async fn submitter_loop(
                     ignore_hashes.insert(k.clone());
                 }
 
-                match crate::queue::pop_approved(&config.private_key_path, 0, &ignore_hashes) {
+                // Drain the approved queue back-to-back. Each submission still runs the
+                // full commit/reveal cycle sequentially (the contract only allows one
+                // active commitment per miner), but we no longer idle a whole 5s tick
+                // between approved solutions — this restores the "submit/reveal non-stop"
+                // throughput while keeping manual approval as the gate into this queue.
+                loop {
+                    if shutdown.is_cancelled() {
+                        break;
+                    }
+
+                    match crate::queue::pop_approved(&config.private_key_path, 0, &ignore_hashes) {
                     Ok(Some((queued, file_path))) => {
                         let hash_hex = hex::encode(queued.submission.commitment.commit_hash);
 
@@ -2572,6 +2582,10 @@ async fn submitter_loop(
                                 
                                 tracing::warn!("Queued submission failed{}: {err:#}", if is_prechain { " (pre-chain)" } else { "" });
                                 
+                                // Skip this hash for the remainder of this drain pass so a
+                                // failing item cannot be re-popped in a tight loop.
+                                ignore_hashes.insert(hash_hex.clone());
+
                                 let attempt = recent_failures.entry(hash_hex.clone()).or_insert(FailedAttempt {
                                     failed_at: std::time::Instant::now(),
                                     attempts: 0,
@@ -2599,9 +2613,11 @@ async fn submitter_loop(
                             }
                         }
                     }
-                    Ok(None) => {}
+                    Ok(None) => break,
                     Err(e) => {
                         tracing::error!("Error reading approved queue: {}", e);
+                        break;
+                    }
                     }
                 }
             }
