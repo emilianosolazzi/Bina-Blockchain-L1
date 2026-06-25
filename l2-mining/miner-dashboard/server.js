@@ -43,10 +43,8 @@ function deriveWalletAddressFromKey(keyPath) {
 }
 
 function classifyQueueProfile(keyPath, queueWallet, mainWallet) {
-	const keyFile = keyPath ? path.basename(keyPath).toLowerCase() : '';
 	if (queueWallet && mainWallet && queueWallet.toLowerCase() === mainWallet.toLowerCase()) return 'main-stack';
-	if (keyFile.includes('local') || keyFile.includes('self')) return 'self-mining';
-	return 'custom-miner';
+	return 'external-signer';
 }
 
 const MINER_CONFIG = loadMinerConfig();

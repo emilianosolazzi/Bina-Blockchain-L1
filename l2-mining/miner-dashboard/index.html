@@ -1290,7 +1290,7 @@
           </div>
         </div>
         <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:0 0 12px;font-size:12px;color:var(--muted);">
-          <span class="badge" id="queueProfileBadge" style="font-size:11px;">Queue profile: —</span>
+          <span class="badge" id="queueProfileBadge" style="font-size:11px;">Queue signer: —</span>
           <span>Submitter <span id="queueWalletAddress" class="mono" data-queue-wallet-address style="color:var(--accent);">—</span></span>
           <span>Gas <span id="queueWalletEth" data-queue-wallet-eth style="color:var(--muted);">—</span></span>
           <span>Main stack <span id="queueMainWalletAddress" class="mono" data-queue-main-wallet-address>—</span></span>
@@ -2056,7 +2056,7 @@ curl -s "http://127.0.0.1:4271/api/utxo/scan?seed=$BINARY_HASH" \
                 <div class="sol-filter" id="queueApprovedBadgeSecondary" data-queue-approved-badge>0 Approved</div>
                 <div class="sol-filter" id="queueRejectedBadgeSecondary" data-queue-rejected-badge>0 Rejected</div>
               </div>
-              <span class="badge" data-queue-profile-badge style="font-size:10px;">Queue profile: —</span>
+              <span class="badge" data-queue-profile-badge style="font-size:10px;">Queue signer: —</span>
               <button class="action-btn" style="padding:4px 8px;font-size:11px;" onclick="queueApproveAll()">Approve All</button>
               <button class="action-btn" style="padding:4px 8px;font-size:11px;border-color:rgba(239,68,68,.3);color:var(--danger);" onclick="queueFlush()">Flush All</button>
             </div>
@@ -5734,10 +5734,8 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
       const mainWallet = merged.mainStackWalletAddress || state.system?.chain?.mainStack?.walletAddress || state.system?.chain?.walletAddress || '';
       const profileLabel = merged.profile === 'main-stack'
         ? 'Main stack'
-        : merged.profile === 'self-mining'
-          ? 'Self mining'
-          : 'Custom miner';
-      const badgeText = `Queue profile: ${profileLabel}`;
+        : 'External signer';
+      const badgeText = `Queue signer: ${profileLabel}`;
       if (els.queueProfileBadge) els.queueProfileBadge.textContent = badgeText;
       document.querySelectorAll('[data-queue-profile-badge]').forEach(el => { el.textContent = badgeText; });
 
