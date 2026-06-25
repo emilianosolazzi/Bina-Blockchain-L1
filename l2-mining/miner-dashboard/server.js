@@ -8,15 +8,30 @@ const { ethers } = require('ethers');
 const { createStore } = require('./solution-store');
 
 const HOST = process.env.HOST || '127.0.0.1';
-const PORT = Number(process.env.PORT || 4173);
+const PORT = Number(process.env.PORT || 4273);
 const ROOT = __dirname;
 const INDEX = path.join(ROOT, 'index.html');
-const TELEMETRY_FILE = process.env.TELEMETRY_FILE || (process.env.LOCALAPPDATA
+const WORKSPACE_TELEMETRY_FILE = path.resolve(ROOT, '..', 'rust', 'miner-telemetry.jsonl');
+const APPDATA_TELEMETRY_FILE = process.env.LOCALAPPDATA
 	? path.join(process.env.LOCALAPPDATA, 'entropy', 'TemporalGradientMiner', 'data', 'logs', 'telemetry.jsonl')
-	: path.resolve(ROOT, '..', 'rust', 'miner-telemetry.jsonl'));
+	: null;
+const TELEMETRY_FILE = process.env.TELEMETRY_FILE
+	|| (fs.existsSync(WORKSPACE_TELEMETRY_FILE) ? WORKSPACE_TELEMETRY_FILE : APPDATA_TELEMETRY_FILE)
+	|| WORKSPACE_TELEMETRY_FILE;
 const RELAY_STATUS_FILE = process.env.RELAY_STATUS_FILE || path.join(path.dirname(TELEMETRY_FILE), `${path.parse(TELEMETRY_FILE).name}.relay-status.json`);
 const CONTROL_FILE = process.env.CONTROL_FILE || path.join(path.dirname(TELEMETRY_FILE), 'miner-control.json');
-const QUEUE_DIR = process.env.QUEUE_DIR || path.resolve(ROOT, '..', 'rust', 'package', 'keys', 'queue');
+const MINER_CONFIG_FILE = process.env.MINER_CONFIG_FILE || path.resolve(ROOT, '..', 'rust', 'miner-config.local-live.json');
+const CONFIGURED_PRIVATE_KEY_PATH = (() => {
+	try {
+		if (!fs.existsSync(MINER_CONFIG_FILE)) return null;
+		return JSON.parse(fs.readFileSync(MINER_CONFIG_FILE, 'utf8'))?.private_key_path || null;
+	} catch {
+		return null;
+	}
+})();
+const QUEUE_DIR = process.env.QUEUE_DIR
+	|| (CONFIGURED_PRIVATE_KEY_PATH ? path.join(path.dirname(CONFIGURED_PRIVATE_KEY_PATH), 'queue') : null)
+	|| path.resolve(ROOT, '..', 'rust', 'package', 'keys', 'queue');
 const RANDOMNESS_API_URL = process.env.RANDOMNESS_API_URL || 'http://127.0.0.1:4271';
 const RANDOMNESS_API_FALLBACK_URL = process.env.RANDOMNESS_API_FALLBACK_URL || 'http://127.0.0.1:3100';
 const HEARTBEAT_API_URL = process.env.HEARTBEAT_API_URL || 'http://127.0.0.1:4380';
@@ -63,10 +78,37 @@ const STALE_ORACLE_ABI = [
 	'event StaleBlockSubmitted(bytes32 indexed blockHash, bytes32 indexed canonicalHash, address indexed submitter, uint64 height, uint32 reorgDepth, uint32 qualityScore, bytes32 entropyDigest)',
 	'event StaleRewardClaimed(bytes32 indexed blockHash, address indexed submitter, uint256 reward)',
 ];
+const TOKENOMICS_ABI = [
+	'function getMiningEconomics() view returns (uint256 currentReward, uint256 currentEpoch, uint256 blocksPerEpoch, uint256 halvingInterval, uint256 nextHalvingBlock, uint256 currentBonusThreshold, uint256 currentBonusMultiplier, uint256 minedSoFar, uint256 remainingAllocation)',
+	'function getRateLimiterState() view returns (uint256 _targetSolutionsPerWindow, uint256 _windowBlocks, uint256 _windowStartBlock, uint256 _windowSolutions, uint256 _blocksRemainingInWindow, uint256 _effectiveRewardBps)'
+];
 
 // Difficulty-based reward estimate (mirrors miner Rust logic)
 const DIFFICULTY_BITS = 11;
-const EST_TGBT_PER_SOLUTION = Math.max(DIFFICULTY_BITS / 8, 1); // 1.375
+let EST_TGBT_PER_SOLUTION = 12.5; // Will be updated by TokenomicsV2
+
+async function pollTokenomicsReward() {
+	try {
+		const tokenomics = new ethers.Contract(TOKENOMICS_ADDRESS, TOKENOMICS_ABI, provider);
+		const eco = await tokenomics.getMiningEconomics();
+		let effectiveBps = 10000;
+		try {
+			const rl = await tokenomics.getRateLimiterState();
+			if (rl && rl._effectiveRewardBps) effectiveBps = Number(rl._effectiveRewardBps);
+		} catch (e) {
+			// fallback for V1
+		}
+
+		if (eco && eco.currentReward) {
+			const baseReward = Number(ethers.formatEther(eco.currentReward));
+			EST_TGBT_PER_SOLUTION = baseReward * (effectiveBps / 10000);
+		}
+	} catch (err) {
+		console.warn('[Dashboard] Failed to fetch TokenomicsV2 reward:', err.message);
+	}
+}
+setInterval(pollTokenomicsReward, 60000);
+pollTokenomicsReward();
 
 let store = null;
 
@@ -1709,30 +1751,91 @@ const server = http.createServer(async (req, res) => {
 		return;
 	}
 
-	if (url.pathname === '/api/queue' && req.method === 'GET') {
-		try {
-			const readDirJson = (subDir) => {
-				const dirPath = path.join(QUEUE_DIR, subDir);
-				if (!fs.existsSync(dirPath)) return [];
-				const files = fs.readdirSync(dirPath).filter(f => f.endsWith('.json'));
-				const items = [];
-				for (const file of files) {
-					try {
-						const content = fs.readFileSync(path.join(dirPath, file), 'utf8');
-						items.push(JSON.parse(content));
-					} catch (e) {
-						// ignore unparseable
-					}
-				}
-				// Sort by created_at ascending (oldest first)
-				return items.sort((a, b) => (a.created_at || 0) - (b.created_at || 0));
-			};
+	const readDirJson = (subDir) => {
+		const dirPath = path.join(QUEUE_DIR, subDir);
+		if (!fs.existsSync(dirPath)) return [];
+		const files = fs.readdirSync(dirPath).filter(f => f.endsWith('.json'));
+		const items = [];
+		for (const file of files) {
+			try {
+				const content = fs.readFileSync(path.join(dirPath, file), 'utf8');
+				const obj = JSON.parse(content);
+				items.push({
+					...obj,
+					hash: file.replace('.json', ''),
+					nonce: obj.submission?.nonce || obj.submission?.commitment?.nonce || obj.nonce || 0,
+					reward: obj.reward || EST_TGBT_PER_SOLUTION,
+					createdAt: obj.created_at || Math.floor(Date.now() / 1000)
+				});
+			} catch (e) { }
+		}
+		return items.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+	};
 
+	if (url.pathname === '/api/queue/stats' && req.method === 'GET') {
+		try {
+			sendJson(res, 200, {
+				pending: readDirJson('pending').length,
+				approved: readDirJson('approved').length,
+				rejected: readDirJson('rejected').length
+			});
+		} catch (err) {
+			sendJson(res, 500, { error: err.message });
+		}
+		return;
+	}
+
+	if (url.pathname === '/api/queue/list' && req.method === 'GET') {
+		try {
 			sendJson(res, 200, {
 				pending: readDirJson('pending'),
 				approved: readDirJson('approved'),
 				rejected: readDirJson('rejected')
 			});
+		} catch (err) {
+			sendJson(res, 500, { error: err.message });
+		}
+		return;
+	}
+
+	if (url.pathname === '/api/queue/approve-all' && req.method === 'POST') {
+		try {
+			const pending = readDirJson('pending');
+			let approvedCount = 0;
+			for (const item of pending) {
+				const hash = item.hash.replace(/^0x/i, '').toLowerCase();
+				const fileName = `${hash}.json`;
+				const pendingPath = path.join(QUEUE_DIR, 'pending', fileName);
+				const targetPath = path.join(QUEUE_DIR, 'approved', fileName);
+				if (!fs.existsSync(path.dirname(targetPath))) fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+				if (fs.existsSync(pendingPath)) {
+					fs.renameSync(pendingPath, targetPath);
+					approvedCount++;
+				}
+			}
+			sendJson(res, 200, { success: true, approved_count: approvedCount });
+		} catch (err) {
+			sendJson(res, 500, { error: err.message });
+		}
+		return;
+	}
+
+	if (url.pathname === '/api/queue/flush' && req.method === 'POST') {
+		try {
+			const pending = readDirJson('pending');
+			let flushedCount = 0;
+			for (const item of pending) {
+				const hash = item.hash.replace(/^0x/i, '').toLowerCase();
+				const fileName = `${hash}.json`;
+				const pendingPath = path.join(QUEUE_DIR, 'pending', fileName);
+				const targetPath = path.join(QUEUE_DIR, 'rejected', fileName);
+				if (!fs.existsSync(path.dirname(targetPath))) fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+				if (fs.existsSync(pendingPath)) {
+					fs.renameSync(pendingPath, targetPath);
+					flushedCount++;
+				}
+			}
+			sendJson(res, 200, { success: true, flushed_count: flushedCount });
 		} catch (err) {
 			sendJson(res, 500, { error: err.message });
 		}
@@ -1753,7 +1856,6 @@ const server = http.createServer(async (req, res) => {
 				return;
 			}
 
-			// Ensure target dir exists
 			if (!fs.existsSync(path.dirname(targetPath))) {
 				fs.mkdirSync(path.dirname(targetPath), { recursive: true });
 			}

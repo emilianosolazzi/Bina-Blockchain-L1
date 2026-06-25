@@ -17,14 +17,18 @@ else {
     Write-Host "  [SKIP] Miner not running" -ForegroundColor DarkGray
 }
 
-# Dashboard (port 4173)
-$dash = Get-NetTCPConnection -LocalPort 4173 -State Listen -ErrorAction SilentlyContinue
-if ($dash) {
-    $dpid = ($dash | Select-Object -First 1).OwningProcess
-    Stop-Process -Id $dpid -Force -ErrorAction SilentlyContinue
-    Write-Host "  [STOP] Dashboard stopped (PID $dpid)" -ForegroundColor Yellow
+# Dashboard (port 4273; legacy 4173 kept for cleanup)
+$dashStopped = $false
+foreach ($dashPort in @(4273, 4173)) {
+    $dash = Get-NetTCPConnection -LocalPort $dashPort -State Listen -ErrorAction SilentlyContinue
+    if ($dash) {
+        $dpid = ($dash | Select-Object -First 1).OwningProcess
+        Stop-Process -Id $dpid -Force -ErrorAction SilentlyContinue
+        Write-Host "  [STOP] Dashboard stopped on port $dashPort (PID $dpid)" -ForegroundColor Yellow
+        $dashStopped = $true
+    }
 }
-else {
+if (-not $dashStopped) {
     Write-Host "  [SKIP] Dashboard not running" -ForegroundColor DarkGray
 }
 

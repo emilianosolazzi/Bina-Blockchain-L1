@@ -285,21 +285,26 @@ async function recordStorageAttestationOnChain(wallet, epochId, attestationHash)
 // ── API push ────────────────────────────────────────────
 
 async function pushEpochToApi(epochData) {
+	const resp = await fetch(`${RANDOMNESS_API}/api/epochs`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(epochData),
+	});
+
+	let json;
 	try {
-		const resp = await fetch(`${RANDOMNESS_API}/api/epochs`, {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify(epochData),
-		});
-		const json = await resp.json();
-		if (resp.ok) {
-			console.log(`[EpochBuilder] Pushed epoch ${epochData.epochId} to Randomness API (${json.leafCount} leaves)`);
-		} else {
-			console.error(`[EpochBuilder] API push failed:`, json);
-		}
-	} catch (err) {
-		console.error(`[EpochBuilder] API push error:`, err.message);
+		json = await resp.json();
+	} catch {
+		json = null;
 	}
+
+	if (!resp.ok) {
+		const details = json?.error || json?.message || `HTTP ${resp.status}`;
+		throw new Error(`API push failed for epoch ${epochData.epochId}: ${details}`);
+	}
+
+	console.log(`[EpochBuilder] Pushed epoch ${epochData.epochId} to Randomness API (${json?.leafCount ?? epochData.leafCount} leaves)`);
+	return json;
 }
 
 async function verifyEpochStorageWithApi(epochId) {
@@ -500,8 +505,15 @@ async function processEpoch() {
 			console.error(`[EpochBuilder] IPFS pin failed for epoch ${epochId}:`, err.message);
 		}
 
-		// Push to Randomness API
-		await pushEpochToApi(epochData);
+		// Push to Randomness API. This must succeed before we advance epoch state.
+		try {
+			await pushEpochToApi(epochData);
+		} catch (err) {
+			console.error(`[EpochBuilder] Epoch ${epochId} not stored in API, re-queueing batch:`, err.message);
+			state.pendingLeaves.unshift(...batch);
+			saveState();
+			return;
+		}
 
 		// Commit on-chain if we have contract + key
 		if (BATCH_CONTRACT && MINER_PRIVATE_KEY) {

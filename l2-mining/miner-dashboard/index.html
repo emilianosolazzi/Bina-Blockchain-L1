@@ -2046,9 +2046,9 @@ curl -s "http://127.0.0.1:4271/api/utxo/scan?seed=$BINARY_HASH" \
             </div>
             <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;" onclick="event.stopPropagation()">
               <div class="solutions-filters">
-                <div class="sol-filter active" id="queuePendingBadge">0 Pending</div>
-                <div class="sol-filter" id="queueApprovedBadge">0 Approved</div>
-                <div class="sol-filter" id="queueRejectedBadge">0 Rejected</div>
+                <div class="sol-filter active" id="queuePendingBadgeSecondary" data-queue-pending-badge>0 Pending</div>
+                <div class="sol-filter" id="queueApprovedBadgeSecondary" data-queue-approved-badge>0 Approved</div>
+                <div class="sol-filter" id="queueRejectedBadgeSecondary" data-queue-rejected-badge>0 Rejected</div>
               </div>
               <button class="action-btn" style="padding:4px 8px;font-size:11px;" onclick="queueApproveAll()">Approve All</button>
               <button class="action-btn" style="padding:4px 8px;font-size:11px;border-color:rgba(239,68,68,.3);color:var(--danger);" onclick="queueFlush()">Flush All</button>
@@ -2065,7 +2065,7 @@ curl -s "http://127.0.0.1:4271/api/utxo/scan?seed=$BINARY_HASH" \
                   <th style="text-align:right;">Actions</th>
                 </tr>
               </thead>
-              <tbody id="queueTbody">
+              <tbody id="queueTbodySecondary" data-queue-tbody>
                 <tr><td class="sol-empty" colspan="5">Loading queue…</td></tr>
               </tbody>
             </table>
@@ -5685,6 +5685,18 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
     }
 
     // ── Queue Management API Integration ──
+    function setQueueBadge(primaryId, dataAttr, text) {
+      const primary = document.getElementById(primaryId);
+      if (primary) primary.textContent = text;
+      document.querySelectorAll(`[${dataAttr}]`).forEach(el => { el.textContent = text; });
+    }
+
+    function renderQueueBody(html) {
+      const primary = document.getElementById('queueTbody');
+      if (primary) primary.innerHTML = html;
+      document.querySelectorAll('[data-queue-tbody]').forEach(el => { el.innerHTML = html; });
+    }
+
     async function fetchQueueList() {
       try {
         const [listRes, statsRes] = await Promise.all([
@@ -5695,40 +5707,52 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
         const statsData = await statsRes.json();
 
         if (statsData.pending !== undefined) {
-          document.getElementById('queuePendingBadge').textContent = `${statsData.pending} Pending`;
-          document.getElementById('queueApprovedBadge').textContent = `${statsData.approved} Approved`;
-          document.getElementById('queueRejectedBadge').textContent = `${statsData.rejected} Rejected`;
+          setQueueBadge('queuePendingBadge', 'data-queue-pending-badge', `${statsData.pending} Pending`);
+          setQueueBadge('queueApprovedBadge', 'data-queue-approved-badge', `${statsData.approved} Approved`);
+          setQueueBadge('queueRejectedBadge', 'data-queue-rejected-badge', `${statsData.rejected} Rejected`);
         }
 
-        const tbody = document.getElementById('queueTbody');
         if (listData.error) {
-          tbody.innerHTML = `<tr><td colspan="5" class="sol-empty" style="color:var(--danger)">Error: ${listData.error}</td></tr>`;
+          renderQueueBody(`<tr><td colspan="5" class="sol-empty" style="color:var(--danger)">Error: ${listData.error}</td></tr>`);
           return;
         }
 
         const pending = listData.pending || [];
-        if (pending.length === 0) {
-          tbody.innerHTML = `<tr><td colspan="5" class="sol-empty">No pending solutions in queue.</td></tr>`;
+        const approved = listData.approved || [];
+        const rejected = listData.rejected || [];
+        if (pending.length === 0 && approved.length === 0 && rejected.length === 0) {
+          renderQueueBody(`<tr><td colspan="5" class="sol-empty">No queued solutions.</td></tr>`);
           return;
         }
 
         const now = Math.floor(Date.now() / 1000);
-        tbody.innerHTML = pending.map(s => {
+        const sectionRow = label => `<tr><td colspan="5" class="sol-empty" style="text-align:left;color:var(--muted);background:rgba(255,255,255,.03);">${label}</td></tr>`;
+        const solutionRow = (s, bucket) => {
           const ageSecs = now - s.createdAt;
           const ageStr = ageSecs < 60 ? `${ageSecs}s` : `${Math.floor(ageSecs/60)}m ${ageSecs%60}s`;
+          const actions = bucket === 'pending'
+            ? `<button class="action-btn" style="padding:4px 8px;font-size:11px;color:var(--accent-2);border-color:rgba(34,197,94,.3);" onclick="queueApprove('${s.hash}')">Approve</button>
+              <button class="action-btn" style="padding:4px 8px;font-size:11px;color:var(--warn);border-color:rgba(245,158,11,.3);" onclick="queueReject('${s.hash}')">Reject</button>`
+            : bucket === 'approved'
+              ? `<span class="badge ok" style="font-size:11px;">Waiting for submitter</span>`
+              : `<span class="badge fail" style="font-size:11px;">Rejected</span>`;
           return `<tr>
             <td class="sol-hash-cell" title="${s.hash}">${s.hash.slice(0, 16)}...</td>
             <td class="sol-nonce">${s.nonce}</td>
             <td>${ageStr}</td>
             <td style="color:var(--gold);">${fmtTGBT(s.reward)} TGBT (est)</td>
             <td style="text-align:right;">
-              <button class="action-btn" style="padding:4px 8px;font-size:11px;color:var(--accent-2);border-color:rgba(34,197,94,.3);" onclick="queueApprove('${s.hash}')">Approve</button>
-              <button class="action-btn" style="padding:4px 8px;font-size:11px;color:var(--warn);border-color:rgba(245,158,11,.3);" onclick="queueReject('${s.hash}')">Reject</button>
+              ${actions}
             </td>
           </tr>`;
-        }).join('');
+        };
+        const rows = [];
+        if (pending.length) rows.push(sectionRow('Pending approval'), ...pending.map(s => solutionRow(s, 'pending')));
+        if (approved.length) rows.push(sectionRow('Approved, waiting for on-chain submitter'), ...approved.map(s => solutionRow(s, 'approved')));
+        if (rejected.length) rows.push(sectionRow('Rejected'), ...rejected.slice(0, 10).map(s => solutionRow(s, 'rejected')));
+        renderQueueBody(rows.join(''));
       } catch (err) {
-        document.getElementById('queueTbody').innerHTML = `<tr><td colspan="5" class="sol-empty" style="color:var(--danger)">Network error: ${err.message}</td></tr>`;
+        renderQueueBody(`<tr><td colspan="5" class="sol-empty" style="color:var(--danger)">Network error: ${err.message}</td></tr>`);
       }
     }
 

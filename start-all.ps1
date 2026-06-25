@@ -10,12 +10,12 @@ $RAND = Join-Path $ROOT "l2-mining\randomness-api"
 $SEC  = Join-Path $ROOT "l2-mining\security"
 $RUST = Join-Path $ROOT "l2-mining\rust"
 $LOGS = Join-Path $ROOT ".runtime-logs\stack"
-$MINER_CONFIG = Join-Path $env:APPDATA "entropy\TemporalGradientMiner\config\miner-config.json"
+$MINER_CONFIG = Join-Path $RUST "miner-config.local-live.json"
 $MINER_EXE_BUILD = Join-Path $RUST "target\release\temporal-gradient-miner.exe"
 $MINER_EXE_DEPLOY = Join-Path $env:LOCALAPPDATA "entropy\TemporalGradientMiner\data\bin\temporal-gradient-miner.exe"
 # Prefer the deployed binary (matches running process path); fall back to build output
 $MINER_EXE = if (Test-Path $MINER_EXE_DEPLOY) { $MINER_EXE_DEPLOY } else { $MINER_EXE_BUILD }
-$TELEMETRY_FILE = Join-Path $env:LOCALAPPDATA "entropy\TemporalGradientMiner\data\logs\telemetry.jsonl"
+$TELEMETRY_FILE = Join-Path $RUST "miner-telemetry.jsonl"
 $MINER_TRUST_SEAL = Join-Path $env:LOCALAPPDATA "entropy\TemporalGradientMiner\data\logs\miner-trust-seal.json"
 
 New-Item -ItemType Directory -Force -Path $LOGS | Out-Null
@@ -363,9 +363,9 @@ else {
     }
 }
 
-# ---- 6. Miner Dashboard (port 4173) ----
+# ---- 6. Miner Dashboard (port 4273) ----
 Write-Host "[6/8] Miner Dashboard" -ForegroundColor Yellow
-$dashPort = 4173
+$dashPort = 4273
 $dashUp = Wait-ForPort -Port $dashPort -TimeoutSeconds 1
 if ($dashUp) {
     $dashPid = ($dashUp | Select-Object -First 1).OwningProcess
