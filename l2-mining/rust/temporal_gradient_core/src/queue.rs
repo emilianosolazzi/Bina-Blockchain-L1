@@ -1,5 +1,5 @@
 use crate::chain::LiveSubmission;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -140,11 +140,21 @@ pub fn pop_approved(key_path: &str, max_age_secs: u64, ignore_hashes: &std::coll
         };
         let queued: QueuedSolution = match serde_json::from_str(&content) {
             Ok(q) => q,
-            Err(_) => continue,
+            Err(e) => {
+                tracing::error!("Failed to parse queued solution in {:?}: {}", path, e);
+                continue;
+            }
         };
         
         let hash_hex = hex::encode(queued.submission.commitment.commit_hash);
         if ignore_hashes.contains(&hash_hex) {
+            continue;
+        }
+
+        let deadline = queued.submission.commitment.deadline;
+        if deadline > 0 && now >= deadline {
+            tracing::warn!("Rejecting expired approved solution with deadline {}: {:?}", deadline, path);
+            let _ = reject_solution(key_path, &path);
             continue;
         }
         

@@ -34,6 +34,8 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 type SharedOutputFilter = Arc<RwLock<TgOutputFilter<Ready>>>;
 
+const MANUAL_APPROVAL_WINDOW_SECS: u64 = 3600;
+
 #[derive(Debug, Clone, Default)]
 struct OutputFilterMetrics {
     output_count: u64,
@@ -852,7 +854,7 @@ async fn attempt_live_solution(
         commit_hash: candidate.commit_hash,
         pool_id: config.pool_id,
         nonce: commit_nonce,
-        deadline: unix_secs().saturating_add(300),
+        deadline: unix_secs().saturating_add(MANUAL_APPROVAL_WINDOW_SECS),
     };
 
     let preview = {
@@ -1042,7 +1044,7 @@ async fn run_worker(
                 &signing_key,
                 &material,
                 0,
-                unix_secs().saturating_add(300),
+                unix_secs().saturating_add(MANUAL_APPROVAL_WINDOW_SECS),
             );
 
             {

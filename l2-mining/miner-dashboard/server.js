@@ -21,13 +21,37 @@ const TELEMETRY_FILE = process.env.TELEMETRY_FILE
 const RELAY_STATUS_FILE = process.env.RELAY_STATUS_FILE || path.join(path.dirname(TELEMETRY_FILE), `${path.parse(TELEMETRY_FILE).name}.relay-status.json`);
 const CONTROL_FILE = process.env.CONTROL_FILE || path.join(path.dirname(TELEMETRY_FILE), 'miner-control.json');
 const MINER_CONFIG_FILE = process.env.MINER_CONFIG_FILE || path.resolve(ROOT, '..', 'rust', 'miner-config.local-live.json');
-const CONFIGURED_PRIVATE_KEY_PATH = (() => {
+function loadMinerConfig() {
 	try {
 		if (!fs.existsSync(MINER_CONFIG_FILE)) return null;
-		return JSON.parse(fs.readFileSync(MINER_CONFIG_FILE, 'utf8'))?.private_key_path || null;
+		return JSON.parse(fs.readFileSync(MINER_CONFIG_FILE, 'utf8'));
 	} catch {
 		return null;
 	}
+}
+
+function deriveWalletAddressFromKey(keyPath) {
+	try {
+		if (!keyPath || !fs.existsSync(keyPath)) return null;
+		let privateKey = fs.readFileSync(keyPath, 'utf8').trim();
+		if (!privateKey) return null;
+		if (!privateKey.startsWith('0x')) privateKey = `0x${privateKey}`;
+		return new ethers.Wallet(privateKey).address;
+	} catch {
+		return null;
+	}
+}
+
+function classifyQueueProfile(keyPath, queueWallet, mainWallet) {
+	const keyFile = keyPath ? path.basename(keyPath).toLowerCase() : '';
+	if (queueWallet && mainWallet && queueWallet.toLowerCase() === mainWallet.toLowerCase()) return 'main-stack';
+	if (keyFile.includes('local') || keyFile.includes('self')) return 'self-mining';
+	return 'custom-miner';
+}
+
+const MINER_CONFIG = loadMinerConfig();
+const CONFIGURED_PRIVATE_KEY_PATH = (() => {
+	return MINER_CONFIG?.private_key_path || null;
 })();
 const QUEUE_DIR = process.env.QUEUE_DIR
 	|| (CONFIGURED_PRIVATE_KEY_PATH ? path.join(path.dirname(CONFIGURED_PRIVATE_KEY_PATH), 'queue') : null)
@@ -45,6 +69,8 @@ const TGBT_ADDRESS = process.env.TGBT_ADDRESS || '0x31228eE520e895DA19f728DE5459
 const TOKENOMICS_ADDRESS = process.env.TOKENOMICS_ADDRESS || '0x7B871bdeDdED0064C34e22902181A9a983C9E2ab';
 const BATCH_ADDRESS = process.env.BATCH_ADDRESS || '0xAf07E37D104E9be17639FE7a51B36972D4738651';
 const WALLET_ADDRESS = process.env.WALLET_ADDRESS || '0x5cB4D906f0464b34c44d6555A770BF6aF4A2cEfe';
+const QUEUE_WALLET_ADDRESS = process.env.QUEUE_WALLET_ADDRESS || deriveWalletAddressFromKey(CONFIGURED_PRIVATE_KEY_PATH) || WALLET_ADDRESS;
+const QUEUE_PROFILE = process.env.QUEUE_PROFILE || classifyQueueProfile(CONFIGURED_PRIVATE_KEY_PATH, QUEUE_WALLET_ADDRESS, WALLET_ADDRESS);
 const RPC_API_KEY = process.env.RPC_API_KEY || 'fp_2d93df5e6cebe485b69c363a62e237fc9d0f88b9';
 const CHALLENGE_WINDOW = Number(process.env.CHALLENGE_WINDOW || 28800);
 const TELEMETRY_TAIL_CHUNK_BYTES = Number(process.env.TELEMETRY_TAIL_CHUNK_BYTES || 64 * 1024);
@@ -331,6 +357,8 @@ async function getSystemStatus() {
 		})),
 		provider.getBalance(WALLET_ADDRESS),
 		tgbt.balanceOf(WALLET_ADDRESS),
+		provider.getBalance(QUEUE_WALLET_ADDRESS),
+		tgbt.balanceOf(QUEUE_WALLET_ADDRESS),
 		tgbt.decimals(),
 		tgbt.symbol(),
 		core.moduleAddress(MODULE_IDS.BATCH_MINING_MODULE).catch(() => ethers.ZeroAddress),
@@ -346,12 +374,14 @@ async function getSystemStatus() {
 	const heartbeatApi = val(1, { status: 503, json: { error: 'Unreachable' } });
 	const ethBalance = val(2, 0n);
 	const tokenBalance = val(3, 0n);
-	const tokenDecimals = val(4, 18);
-	const tokenSymbol = val(5, 'TGBT');
-	const coreBatchModule = val(6, ethers.ZeroAddress);
-	const coreTokenomicsModule = val(7, ethers.ZeroAddress);
-	const l1Block = val(8, 0);
-	const network = val(9, { chainId: 42161n });
+	const queueEthBalance = val(4, 0n);
+	const queueTokenBalance = val(5, 0n);
+	const tokenDecimals = val(6, 18);
+	const tokenSymbol = val(7, 'TGBT');
+	const coreBatchModule = val(8, ethers.ZeroAddress);
+	const coreTokenomicsModule = val(9, ethers.ZeroAddress);
+	const l1Block = val(10, 0);
+	const network = val(11, { chainId: 42161n });
 
 	const liveBatchAddress = toChecksumOrNull(coreBatchModule);
 	const batchWiredCorrectly = liveBatchAddress?.toLowerCase() === BATCH_ADDRESS.toLowerCase();
@@ -417,6 +447,20 @@ async function getSystemStatus() {
 			chainId: Number(network.chainId),
 			l1Block,
 			challengeWindow: CHALLENGE_WINDOW,
+			mainStack: {
+				walletAddress: WALLET_ADDRESS,
+				ethBalance: ethers.formatEther(ethBalance),
+				tokenBalance: ethers.formatUnits(tokenBalance, tokenDecimals),
+			},
+			queue: {
+				profile: QUEUE_PROFILE,
+				walletAddress: QUEUE_WALLET_ADDRESS,
+				isMainStack: QUEUE_WALLET_ADDRESS.toLowerCase() === WALLET_ADDRESS.toLowerCase(),
+				ethBalance: ethers.formatEther(queueEthBalance),
+				tokenBalance: ethers.formatUnits(queueTokenBalance, tokenDecimals),
+				keyFile: CONFIGURED_PRIVATE_KEY_PATH ? path.basename(CONFIGURED_PRIVATE_KEY_PATH) : null,
+				queueDir: QUEUE_DIR,
+			},
 			walletAddress: WALLET_ADDRESS,
 			ethBalance: ethers.formatEther(ethBalance),
 			token: {
@@ -1765,19 +1809,35 @@ const server = http.createServer(async (req, res) => {
 					hash: file.replace('.json', ''),
 					nonce: obj.submission?.nonce || obj.submission?.commitment?.nonce || obj.nonce || 0,
 					reward: obj.reward || EST_TGBT_PER_SOLUTION,
-					createdAt: obj.created_at || Math.floor(Date.now() / 1000)
+					createdAt: obj.created_at || Math.floor(Date.now() / 1000),
+					deadline: obj.submission?.commitment?.deadline || null
 				});
 			} catch (e) { }
 		}
 		return items.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
 	};
 
+	const isExpiredQueueItem = (item) => {
+		const deadline = Number(item?.deadline || item?.submission?.commitment?.deadline || 0);
+		return deadline > 0 && Math.floor(Date.now() / 1000) >= deadline;
+	};
+
+	const queueProfile = () => ({
+		profile: QUEUE_PROFILE,
+		walletAddress: QUEUE_WALLET_ADDRESS,
+		mainStackWalletAddress: WALLET_ADDRESS,
+		isMainStack: QUEUE_WALLET_ADDRESS.toLowerCase() === WALLET_ADDRESS.toLowerCase(),
+		keyFile: CONFIGURED_PRIVATE_KEY_PATH ? path.basename(CONFIGURED_PRIVATE_KEY_PATH) : null,
+		queueDir: QUEUE_DIR,
+	});
+
 	if (url.pathname === '/api/queue/stats' && req.method === 'GET') {
 		try {
 			sendJson(res, 200, {
 				pending: readDirJson('pending').length,
 				approved: readDirJson('approved').length,
-				rejected: readDirJson('rejected').length
+				rejected: readDirJson('rejected').length,
+				profile: queueProfile()
 			});
 		} catch (err) {
 			sendJson(res, 500, { error: err.message });
@@ -1788,6 +1848,7 @@ const server = http.createServer(async (req, res) => {
 	if (url.pathname === '/api/queue/list' && req.method === 'GET') {
 		try {
 			sendJson(res, 200, {
+				profile: queueProfile(),
 				pending: readDirJson('pending'),
 				approved: readDirJson('approved'),
 				rejected: readDirJson('rejected')
@@ -1802,18 +1863,21 @@ const server = http.createServer(async (req, res) => {
 		try {
 			const pending = readDirJson('pending');
 			let approvedCount = 0;
+			let expiredCount = 0;
 			for (const item of pending) {
 				const hash = item.hash.replace(/^0x/i, '').toLowerCase();
 				const fileName = `${hash}.json`;
 				const pendingPath = path.join(QUEUE_DIR, 'pending', fileName);
-				const targetPath = path.join(QUEUE_DIR, 'approved', fileName);
+				const expired = isExpiredQueueItem(item);
+				const targetPath = path.join(QUEUE_DIR, expired ? 'rejected' : 'approved', fileName);
 				if (!fs.existsSync(path.dirname(targetPath))) fs.mkdirSync(path.dirname(targetPath), { recursive: true });
 				if (fs.existsSync(pendingPath)) {
 					fs.renameSync(pendingPath, targetPath);
-					approvedCount++;
+					if (expired) expiredCount++;
+					else approvedCount++;
 				}
 			}
-			sendJson(res, 200, { success: true, approved_count: approvedCount });
+			sendJson(res, 200, { success: true, approved_count: approvedCount, expired_count: expiredCount });
 		} catch (err) {
 			sendJson(res, 500, { error: err.message });
 		}
@@ -1858,6 +1922,19 @@ const server = http.createServer(async (req, res) => {
 
 			if (!fs.existsSync(path.dirname(targetPath))) {
 				fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+			}
+
+			if (action === 'approve') {
+				const item = JSON.parse(fs.readFileSync(pendingPath, 'utf8'));
+				if (isExpiredQueueItem(item)) {
+					const rejectedPath = path.join(QUEUE_DIR, 'rejected', fileName);
+					if (!fs.existsSync(path.dirname(rejectedPath))) {
+						fs.mkdirSync(path.dirname(rejectedPath), { recursive: true });
+					}
+					fs.renameSync(pendingPath, rejectedPath);
+					sendJson(res, 409, { success: false, expired: true, error: `Solution ${hash} expired before approval and was moved to rejected` });
+					return;
+				}
 			}
 
 			fs.renameSync(pendingPath, targetPath);
