@@ -39,6 +39,8 @@ const HOST = process.env.RANDOMNESS_HOST || '127.0.0.1';
 const PORT = Number(process.env.RANDOMNESS_PORT || 4271);
 const EPOCH_STORE_DIR = process.env.EPOCH_STORE || path.resolve(__dirname, 'epoch-store');
 const MINER_PRIVATE_KEY = process.env.MINER_PRIVATE_KEY || null;
+const PINATA_JWT = process.env.PINATA_JWT || '';
+const WEB3_STORAGE_TOKEN = process.env.WEB3_STORAGE_TOKEN || process.env.WEB3_STORAGE_API_TOKEN || '';
 
 // ── Ensure store directory ──────────────────────────────
 if (!fs.existsSync(EPOCH_STORE_DIR)) {
@@ -193,6 +195,18 @@ function resolveDocumentHash(body) {
 	throw new Error('Missing documentHash or documentText');
 }
 
+function optionalEthAddress(value, fieldName) {
+	if (!value) return null;
+	const raw = String(value).trim();
+	const getAddress = ethers.getAddress || ethers.utils?.getAddress;
+	if (!getAddress) throw new Error('ethers address normalization is unavailable');
+	try {
+		return getAddress(raw);
+	} catch {
+		throw new Error(`${fieldName} must be an Ethereum address when supplied`);
+	}
+}
+
 function canonicalizeValue(value) {
 	if (Array.isArray(value)) return value.map(canonicalizeValue);
 	if (value && typeof value === 'object') {
@@ -206,6 +220,67 @@ function canonicalizeValue(value) {
 
 function canonicalJson(value) {
 	return JSON.stringify(canonicalizeValue(value));
+}
+
+function httpError(message, statusCode) {
+	const err = new Error(message);
+	err.statusCode = statusCode;
+	return err;
+}
+
+async function uploadJsonToIpfs(document, filename) {
+	if (!document || typeof document !== 'object' || Array.isArray(document)) {
+		throw httpError('receipt must be a JSON object', 400);
+	}
+	const circularUriKey = ['metadataURI', 'metadataUri', 'receiptURI', 'receiptUri', 'ipfsURI', 'ipfsUri'].find(key => Object.prototype.hasOwnProperty.call(document, key));
+	if (circularUriKey) {
+		throw httpError(`receipt JSON must not include ${circularUriKey}; the upload CID is returned separately and used only in the mint payload`, 400);
+	}
+
+	const safeFilename = String(filename || `tgbt-provenance-receipt-${Date.now()}.json`).replace(/[^a-z0-9_.-]/gi, '-');
+	const payload = JSON.stringify(document, null, 2);
+
+	if (PINATA_JWT) {
+		const resp = await fetch('https://api.pinata.cloud/pinning/pinJSONToIPFS', {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				'Authorization': `Bearer ${PINATA_JWT}`,
+			},
+			body: JSON.stringify({
+				pinataMetadata: { name: safeFilename },
+				pinataContent: document,
+			}),
+		});
+		const json = await resp.json();
+		if (!resp.ok) {
+			throw new Error(json.error?.details || json.error || json.message || 'Pinata upload failed');
+		}
+		const cid = json.IpfsHash || json.cid || null;
+		if (!cid) throw new Error('Pinata upload succeeded but no CID was returned');
+		return { provider: 'pinata', cid, metadataURI: `ipfs://${cid}` };
+	}
+
+	if (WEB3_STORAGE_TOKEN) {
+		const resp = await fetch('https://api.web3.storage/upload', {
+			method: 'POST',
+			headers: {
+				'Authorization': `Bearer ${WEB3_STORAGE_TOKEN}`,
+				'Content-Type': 'application/json',
+				'X-NAME': safeFilename,
+			},
+			body: payload,
+		});
+		const json = await resp.json();
+		if (!resp.ok) {
+			throw new Error(json.message || json.error || 'web3.storage upload failed');
+		}
+		const cid = json.cid || json.value?.cid || null;
+		if (!cid) throw new Error('web3.storage upload succeeded but no CID was returned');
+		return { provider: 'web3.storage', cid, metadataURI: `ipfs://${cid}` };
+	}
+
+	throw httpError('IPFS upload is not configured. Set PINATA_JWT or WEB3_STORAGE_TOKEN in l2-mining/randomness-api/.env.', 503);
 }
 
 function certTypeToIndex(value) {
@@ -257,20 +332,21 @@ function resolveAnchorRecord(body = {}) {
 function buildUtxoCertificatePayload(body = {}) {
 	const anchor = resolveAnchorRecord(body);
 	const documentHash = resolveDocumentHash(body);
-	const recipient = body.recipient || body.issuedTo || null;
+	const owner = body.owner || body.subject || null;
+	const recipient = optionalEthAddress(body.recipient || body.issuedTo || null, 'recipient');
 	const metadataURI = String(body.metadataURI || '');
 	const certType = certTypeToIndex(body.certType);
-	const attestor = body.attestor || anchor.attestor || null;
+	const attestor = optionalEthAddress(body.attestor || anchor.attestor || null, 'attestor');
 	const documentDescriptor = body.documentText ? { source: 'documentText', sha256: documentHash } : { source: 'documentHash', sha256: documentHash };
 
-	const verifierRegistration = utxoScanner.buildVerifierRegistrationPayload(anchor, attestor);
-	const certificateMint = utxoScanner.buildCertificateMintPayload(anchor, {
+	const verifierRegistration = attestor ? utxoScanner.buildVerifierRegistrationPayload(anchor, attestor) : null;
+	const certificateMint = recipient && attestor && metadataURI ? utxoScanner.buildCertificateMintPayload(anchor, {
 		recipient,
 		documentHash,
 		certType,
 		metadataURI,
 		attestationSignature: body.attestationSignature || null,
-	});
+	}) : null;
 
 	return {
 		anchor,
@@ -286,12 +362,21 @@ function buildUtxoCertificatePayload(body = {}) {
 		verifierRegistration,
 		certificateMint,
 		context: {
+			mode: certificateMint ? 'blockchain' : 'api',
+			trustModel: attestor
+				? 'cryptographic proof plus organizational attestor context'
+				: 'independently verifiable Bitcoin-backed proof',
+			owner,
 			attestor,
 			recipient,
 			metadataURI,
 			certType,
-			attestationSignatureRequired: true,
-			contractExpectation: 'Anchor must be registered in UTXOAnchorVerifier before mintCertificate succeeds.',
+			attestationSignatureRequired: Boolean(certificateMint),
+			registerAnchorAvailable: Boolean(verifierRegistration),
+			mintCertificateAvailable: Boolean(certificateMint),
+			contractExpectation: certificateMint
+				? 'Blockchain mode: registerAnchor requires an authorized attestor, and mintCertificate requires an attestor signature before it can execute.'
+				: 'API mode: no wallet transfer or NFT mint is implied. The uploaded receipt is independently verifiable from Bitcoin and the artifact hash.',
 		},
 	};
 }
@@ -522,6 +607,22 @@ async function handleBuildUtxoCertificatePayload(req, res) {
 	}
 }
 
+async function handleUploadUtxoReceipt(req, res) {
+	try {
+		const body = await readBody(req);
+		const receipt = body.receipt || body;
+		const filename = body.filename || `tgbt-provenance-receipt-${Date.now()}.json`;
+		const result = await uploadJsonToIpfs(receipt, filename);
+		return sendJson(res, 200, {
+			ok: true,
+			...result,
+			uploadedAt: new Date().toISOString(),
+		});
+	} catch (err) {
+		return sendJson(res, err.statusCode || 503, { error: err.message });
+	}
+}
+
 // ── Router ──────────────────────────────────────────────
 const server = http.createServer((req, res) => {
 	const url = parseUrl(req);
@@ -613,6 +714,9 @@ const server = http.createServer((req, res) => {
 		if (req.method === 'POST' && p === '/api/utxo/certificate-payload') {
 			return handleBuildUtxoCertificatePayload(req, res);
 		}
+		if (req.method === 'POST' && p === '/api/utxo/receipt-upload') {
+			return handleUploadUtxoReceipt(req, res);
+		}
 		if (req.method === 'GET' && p === '/api/utxo/discover') {
 			const url = new URL(req.url, `http://${req.headers.host}`);
 			const blocks = Math.min(parseInt(url.searchParams.get('blocks') || '3', 10), 10);
@@ -682,6 +786,7 @@ server.listen(PORT, HOST, () => {
 	console.log(`    GET  /api/utxo/anchor/:anchorId`);
 	console.log(`    GET  /api/utxo/inventory`);
 	console.log(`    GET  /api/utxo/history`);
+	console.log(`    POST /api/utxo/receipt-upload`);
 	console.log(`    POST /api/utxo/certificate-payload`);
 	console.log(`    GET  /api/utxo/discover?blocks=3\n`);
 });

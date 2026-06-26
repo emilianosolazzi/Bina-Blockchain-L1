@@ -1012,6 +1012,22 @@
       border: 1px solid rgba(56,189,248,.18); display: none;
     }
     .cert-action-panel.show { display: block; }
+    .provenance-panel {
+      grid-column: span 12;
+      border-color: rgba(34,197,94,.22);
+      background: linear-gradient(135deg, rgba(6,78,59,.22), rgba(15,23,42,.94));
+    }
+    .provenance-flow {
+      display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px;
+      margin: 12px 0 14px;
+    }
+    .provenance-step {
+      padding: 12px; border-radius: 8px; border: 1px solid rgba(148,163,184,.12);
+      background: rgba(15,23,42,.45);
+    }
+    .provenance-step strong { display: block; color: var(--text); font-size: 12px; margin-bottom: 4px; }
+    .provenance-step span { display: block; color: var(--muted); font-size: 11px; line-height: 1.45; }
+    .provenance-cert-mount .cert-action-panel { display: block; background: rgba(2,6,23,.26); }
     .cert-action-header {
       display: flex; align-items: flex-start; justify-content: space-between;
       gap: 12px; margin-bottom: 12px; flex-wrap: wrap;
@@ -1045,6 +1061,10 @@
     .cert-action-toolbar {
       display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 12px;
     }
+    .cert-receipt-actions {
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 0 12px;
+    }
+    .cert-receipt-actions .action-btn:disabled { opacity: .45; cursor: not-allowed; }
     .cert-action-build {
       padding: 9px 14px; border-radius: 9px; border: 1px solid rgba(56,189,248,.28);
       background: rgba(56,189,248,.12); color: var(--accent); font-size: 12px; font-weight: 700; cursor: pointer;
@@ -1088,8 +1108,18 @@
       font-family: 'SF Mono','Fira Code',monospace; font-size: 11px; line-height: 1.55;
       max-height: 320px; overflow: auto; white-space: pre-wrap; word-break: break-word;
     }
+    .cert-advanced-payloads {
+      margin-top: 12px; border: 1px solid rgba(148,163,184,.12); border-radius: 8px;
+      background: rgba(15,23,42,.35);
+    }
+    .cert-advanced-payloads summary {
+      cursor: pointer; list-style: none; padding: 10px 12px; color: var(--accent);
+      font-size: 12px; font-weight: 700;
+    }
+    .cert-advanced-payloads .cert-payload-grid { padding: 0 12px 12px; }
     @media (max-width: 980px) {
       .cert-action-grid, .cert-payload-grid, .anchor-cert-grid { grid-template-columns: 1fr; }
+      .provenance-flow { grid-template-columns: 1fr; }
     }
 
     /* ── Inventory Browser ── */
@@ -1392,6 +1422,28 @@
       </div>
     </section>
 
+    <!-- ── Bitcoin Provenance Network ── -->
+    <section class="grid" style="margin-top:16px;">
+      <div class="panel provenance-panel">
+        <div class="solutions-header" style="margin-bottom:8px;">
+          <div>
+            <h3 class="section-title" style="display:inline;">Bitcoin Provenance Network</h3>
+            <p class="helper" style="margin:6px 0 0;max-width:760px;line-height:1.5;">Issue cryptographic receipts for documents, datasets, builds, and enterprise checkpoints using the same dead-UTXO Bitcoin anchor infrastructure that powers the miner.</p>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+            <span class="badge ok">Provenance Service</span>
+            <button class="action-btn" id="provenanceScanAnchorBtn">Select Bitcoin anchor</button>
+          </div>
+        </div>
+        <div class="provenance-flow">
+          <div class="provenance-step"><strong>Choose artifact</strong><span>Paste canonical text or provide a SHA-256 document hash for the file, model update, legal record, or operational checkpoint.</span></div>
+          <div class="provenance-step"><strong>Select Bitcoin anchor</strong><span>Use the latest verified dead UTXO anchor, or run a fresh live scan to bind the receipt to a public Bitcoin block.</span></div>
+          <div class="provenance-step"><strong>Issue receipt</strong><span>Generate the verifier registration and certificate mint payloads, with raw ABI inputs kept under Advanced.</span></div>
+        </div>
+        <div class="provenance-cert-mount" id="provenanceCertificateMount"></div>
+      </div>
+    </section>
+
     <!-- ── Unified Entropy Pipeline ── -->
     <section class="grid" style="margin-top:16px;">
       <div class="panel" style="grid-column: span 12;">
@@ -1584,37 +1636,43 @@
             <div class="cert-action-panel" id="utxoCertActionSection">
               <div class="cert-action-header">
                 <div>
-                  <div class="cert-action-title">🖱️ Certificate Actions</div>
-                  <div class="cert-action-subtitle">Generate the exact on-chain payloads for the currently selected anchor. This stays quiet until you have a real anchor, then gives you one clean place to prepare verifier registration and NFT mint inputs.</div>
+                  <div class="cert-action-title">Issue Provenance Certificate</div>
+                  <div class="cert-action-subtitle">Create an independently verifiable Bitcoin-backed proof. Wallet owner and attestor fields are optional unless you also want blockchain mint calldata.</div>
                   <div class="cert-action-anchor" id="utxoPayloadAnchorLabel">No anchor selected yet</div>
                 </div>
               </div>
               <div class="cert-action-grid">
                 <div class="cert-action-field full">
-                  <label class="cert-action-label" for="utxoPayloadDocumentText">Document text</label>
-                  <textarea class="cert-action-textarea" id="utxoPayloadDocumentText" placeholder="Paste the document text or a canonical string to hash into documentHash."></textarea>
-                  <div class="cert-action-help">Use either document text or a precomputed 32-byte document hash below. If both are filled, the explicit document hash wins.</div>
+                  <label class="cert-action-label" for="utxoPayloadFileInput">Choose file</label>
+                  <input class="cert-action-input" id="utxoPayloadFileInput" type="file" />
+                  <div class="cert-action-help" id="utxoPayloadFileHashStatus">Optional. The file is hashed locally in this browser; only the SHA-256 hash is used in the receipt.</div>
                 </div>
                 <div class="cert-action-field full">
-                  <label class="cert-action-label" for="utxoPayloadDocumentHash">Document hash</label>
-                  <input class="cert-action-input" id="utxoPayloadDocumentHash" placeholder="0x... 32-byte document hash (optional if document text is provided)" />
+                  <label class="cert-action-label" for="utxoPayloadDocumentText">Artifact text</label>
+                  <textarea class="cert-action-textarea" id="utxoPayloadDocumentText" placeholder="Paste document text, checkpoint JSON, build manifest, or another canonical string to hash."></textarea>
+                  <div class="cert-action-help">Use either artifact text or a precomputed 32-byte SHA-256 hash below. If both are filled, the explicit hash wins.</div>
+                </div>
+                <div class="cert-action-field full">
+                  <label class="cert-action-label" for="utxoPayloadDocumentHash">Artifact hash</label>
+                  <input class="cert-action-input" id="utxoPayloadDocumentHash" placeholder="0x... 32-byte SHA-256 hash (optional if artifact text is provided)" />
                 </div>
                 <div class="cert-action-field">
-                  <label class="cert-action-label" for="utxoPayloadRecipient">Recipient</label>
-                  <input class="cert-action-input" id="utxoPayloadRecipient" placeholder="0x... certificate owner" />
-                  <div class="cert-action-help">Saved locally as your default recipient after you edit it.</div>
+                  <label class="cert-action-label" for="utxoPayloadRecipient">Owner / Subject (optional)</label>
+                  <input class="cert-action-input" id="utxoPayloadRecipient" placeholder="Acme Manufacturing, customer-8273, did:key:..., email, or 0x..." />
+                  <div class="cert-action-help">Recorded in the receipt when provided. Use a 0x wallet only when minting an on-chain certificate.</div>
                 </div>
                 <div class="cert-action-field">
-                  <label class="cert-action-label" for="utxoPayloadAttestor">Attestor</label>
-                  <input class="cert-action-input" id="utxoPayloadAttestor" placeholder="0x... authorized attestor" />
-                  <div class="cert-action-help">Saved locally as your default attestor after you edit it.</div>
+                  <label class="cert-action-label" for="utxoPayloadAttestor">Issuer / Attestor (optional)</label>
+                  <input class="cert-action-input" id="utxoPayloadAttestor" placeholder="0x... authorized attestor, only for organization-attested certificates" />
+                  <div class="cert-action-help">Blank means trustless proof: independently verifiable from the artifact hash, receipt fields, and public Bitcoin data.</div>
                 </div>
                 <div class="cert-action-field">
-                  <label class="cert-action-label" for="utxoPayloadMetadataUri">Metadata URI</label>
-                  <input class="cert-action-input" id="utxoPayloadMetadataUri" placeholder="ipfs://... certificate metadata" />
+                  <label class="cert-action-label" for="utxoPayloadMetadataUri">Receipt metadata URI</label>
+                  <input class="cert-action-input" id="utxoPayloadMetadataUri" placeholder="Auto-generated after receipt is uploaded" readonly />
+                  <div class="cert-action-help">Generated after the receipt JSON is uploaded. This CID goes into the mint payload, not into the receipt JSON itself.</div>
                 </div>
                 <div class="cert-action-field">
-                  <label class="cert-action-label" for="utxoPayloadCertType">Certificate type</label>
+                  <label class="cert-action-label" for="utxoPayloadCertType">Receipt type</label>
                   <select class="cert-action-select" id="utxoPayloadCertType">
                     <option value="DocumentNotarisation">Document notarisation</option>
                     <option value="SupplyChain">Supply chain</option>
@@ -1628,26 +1686,33 @@
                 </div>
               </div>
               <div class="cert-action-toolbar">
-                <button class="cert-action-build" id="utxoBuildPayloadBtn">⚙️ Build verifier + mint payloads</button>
-                <div class="cert-action-status" id="utxoPayloadStatus">Scan a real anchor, fill in the document + recipient details, then click once to build both on-chain payloads.</div>
+                <button class="cert-action-build" id="utxoBuildPayloadBtn">Generate Receipt</button>
+                <div class="cert-action-status" id="utxoPayloadStatus">Select an artifact, verify a Bitcoin anchor, then generate the receipt JSON and mint payload.</div>
               </div>
               <div class="cert-action-digests" id="utxoPayloadDigests"></div>
-              <div class="cert-payload-grid">
-                <div class="cert-payload-card">
-                  <div class="cert-payload-head">
-                    <span class="cert-payload-name">UTXOAnchorVerifier payload</span>
-                    <button class="cert-payload-copy" id="utxoCopyVerifierBtn">Copy</button>
-                  </div>
-                  <pre class="cert-payload-body" id="utxoVerifierPayloadBox">Build a payload to see the verifier registration args.</pre>
-                </div>
-                <div class="cert-payload-card">
-                  <div class="cert-payload-head">
-                    <span class="cert-payload-name">UTXOCertificateRegistry payload</span>
-                    <button class="cert-payload-copy" id="utxoCopyMintBtn">Copy</button>
-                  </div>
-                  <pre class="cert-payload-body" id="utxoMintPayloadBox">Build a payload to see the certificate mint args.</pre>
-                </div>
+              <div class="cert-receipt-actions">
+                <button class="action-btn" id="utxoDownloadReceiptBtn" disabled>Download receipt</button>
+                <button class="action-btn" id="utxoVerifyOnlineBtn" disabled>Verify online</button>
               </div>
+              <details class="cert-advanced-payloads">
+                <summary>Advanced: verifier and mint payloads</summary>
+                <div class="cert-payload-grid">
+                  <div class="cert-payload-card">
+                    <div class="cert-payload-head">
+                      <span class="cert-payload-name">Register Anchor payload</span>
+                      <button class="cert-payload-copy" id="utxoCopyVerifierBtn">Copy</button>
+                    </div>
+                    <pre class="cert-payload-body" id="utxoVerifierPayloadBox">Build a payload to see the register-anchor args.</pre>
+                  </div>
+                  <div class="cert-payload-card">
+                    <div class="cert-payload-head">
+                      <span class="cert-payload-name">Mint Certificate payload</span>
+                      <button class="cert-payload-copy" id="utxoCopyMintBtn">Copy</button>
+                    </div>
+                    <pre class="cert-payload-body" id="utxoMintPayloadBox">Build a payload to see the mint-certificate args.</pre>
+                  </div>
+                </div>
+              </details>
             </div>
           </div>
 
@@ -2819,6 +2884,17 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
     ];
 
     const els = Object.fromEntries([...document.querySelectorAll('[id]')].map(el => [el.id, el]));
+
+    function initProvenancePanel() {
+      if (els.provenanceCertificateMount && els.utxoCertActionSection && els.utxoCertActionSection.parentElement !== els.provenanceCertificateMount) {
+        els.provenanceCertificateMount.appendChild(els.utxoCertActionSection);
+      }
+      if (els.provenanceScanAnchorBtn) {
+        els.provenanceScanAnchorBtn.addEventListener('click', () => runUtxoScan({
+          seed: utxoCurrentArtifactSeed(),
+        }));
+      }
+    }
 
     /* ── Chart tab switching ── */
     document.querySelectorAll('.chart-tab').forEach(tab => {
@@ -5070,6 +5146,9 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
     }
 
     let utxoPayloadResponse = null;
+    let utxoReceiptArtifact = null;
+    let utxoReceiptDocument = null;
+    let utxoReceiptUpload = null;
     const UTXO_DEFAULT_RECIPIENT_KEY = 'tgbt-utxo-default-recipient';
     const UTXO_DEFAULT_ATTESTOR_KEY = 'tgbt-utxo-default-attestor';
 
@@ -5104,15 +5183,19 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
       return utxoLastScanData && utxoLastScanData.summary ? utxoLastScanData : null;
     }
 
-    function utxoResetPayloadOutputs(message = 'Scan a real anchor, fill in the document + recipient details, then click once to build both on-chain payloads.') {
+    function utxoResetPayloadOutputs(message = 'Select an artifact, verify a Bitcoin anchor, then generate the receipt JSON and mint payload.') {
       utxoPayloadResponse = null;
+      utxoReceiptDocument = null;
+      utxoReceiptUpload = null;
       if (els.utxoPayloadStatus) {
         els.utxoPayloadStatus.className = 'cert-action-status';
         els.utxoPayloadStatus.textContent = message;
       }
+      if (els.utxoPayloadMetadataUri) els.utxoPayloadMetadataUri.value = '';
       if (els.utxoPayloadDigests) els.utxoPayloadDigests.innerHTML = '';
-      if (els.utxoVerifierPayloadBox) els.utxoVerifierPayloadBox.textContent = 'Build a payload to see the verifier registration args.';
-      if (els.utxoMintPayloadBox) els.utxoMintPayloadBox.textContent = 'Build a payload to see the certificate mint args.';
+      if (els.utxoVerifierPayloadBox) els.utxoVerifierPayloadBox.textContent = 'Build a payload to see the register-anchor args.';
+      if (els.utxoMintPayloadBox) els.utxoMintPayloadBox.textContent = 'Build a payload to see the mint-certificate args.';
+      utxoSyncReceiptActions();
     }
 
     function utxoSyncPayloadSection(scan) {
@@ -5127,18 +5210,21 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
       if (els.utxoPayloadAnchorLabel) {
         els.utxoPayloadAnchorLabel.textContent = `${s.anchorId.slice(0, 18)}… • ${s.type || 'utxo'} • block ${Number(s.blockHeight || 0).toLocaleString()}`;
       }
-      if (els.utxoPayloadMetadataUri && !els.utxoPayloadMetadataUri.value && s.storageReference) {
-        els.utxoPayloadMetadataUri.value = s.storageReference;
-      }
       utxoApplyPartyDefaults();
-      utxoResetPayloadOutputs(`Anchor ready. Click once to build the verifier registration and certificate mint payloads for ${s.anchorId.slice(0, 18)}…`);
+      utxoResetPayloadOutputs(`Bitcoin anchor ready. Generate the receipt JSON for ${s.anchorId.slice(0, 18)}…`);
     }
 
     function utxoRenderPayloadResponse(data) {
       utxoPayloadResponse = data;
       if (els.utxoPayloadStatus) {
         els.utxoPayloadStatus.className = 'cert-action-status ok';
-        els.utxoPayloadStatus.textContent = 'Payloads built from the real stored anchor. Register the anchor first, then submit the certificate mint payload with an attestor signature.';
+        const metadataUri = utxoReceiptUpload?.metadataURI || data?.context?.metadataURI || '—';
+        const payloadState = data?.context?.mintCertificateAvailable
+          ? 'Register Anchor -> Mint Certificate payloads are ready.'
+          : data?.context?.registerAnchorAvailable
+            ? 'Register Anchor payload is ready; add a wallet owner to prepare mint calldata.'
+            : 'Trustless API receipt ready; no wallet or attestor is required.';
+        els.utxoPayloadStatus.textContent = `Receipt JSON generated. Uploaded to IPFS. Metadata URI: ${metadataUri}. ${payloadState}`;
       }
       if (els.utxoPayloadDigests) {
         const digests = [
@@ -5154,55 +5240,303 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
           </div>`).join('');
       }
       if (els.utxoVerifierPayloadBox) {
-        els.utxoVerifierPayloadBox.textContent = JSON.stringify(data.verifierRegistration, null, 2);
+        els.utxoVerifierPayloadBox.textContent = data.verifierRegistration
+          ? JSON.stringify(data.verifierRegistration, null, 2)
+          : 'API mode: no issuer / attestor supplied, so no on-chain register-anchor payload was generated. The receipt remains independently verifiable from Bitcoin evidence.';
       }
       if (els.utxoMintPayloadBox) {
-        els.utxoMintPayloadBox.textContent = JSON.stringify(data.certificateMint, null, 2);
+        els.utxoMintPayloadBox.textContent = data.certificateMint
+          ? JSON.stringify(data.certificateMint, null, 2)
+          : 'API mode: no wallet owner plus attestor supplied, so no NFT mint payload was generated. Add a 0x owner wallet and issuer / attestor for blockchain mode.';
       }
+      utxoSyncReceiptActions();
+    }
+
+    function utxoBytesToHex(buffer) {
+      return [...new Uint8Array(buffer)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+    }
+
+    async function utxoSha256Utf8(value) {
+      if (!globalThis.crypto?.subtle) throw new Error('This browser does not expose crypto.subtle for SHA-256 hashing.');
+      const digest = await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(value || '')));
+      return `0x${utxoBytesToHex(digest)}`;
+    }
+
+    async function utxoHashSelectedFile() {
+      const file = els.utxoPayloadFileInput?.files?.[0];
+      if (!file) return;
+      if (!globalThis.crypto?.subtle) {
+        if (els.utxoPayloadFileHashStatus) els.utxoPayloadFileHashStatus.textContent = 'This browser does not expose crypto.subtle for local file hashing.';
+        showToast('Local file hashing is not available in this browser.', true);
+        return;
+      }
+      if (els.utxoPayloadFileHashStatus) els.utxoPayloadFileHashStatus.textContent = `Hashing ${file.name} locally...`;
+      try {
+        const digest = await globalThis.crypto.subtle.digest('SHA-256', await file.arrayBuffer());
+        const documentHash = `0x${utxoBytesToHex(digest)}`;
+        utxoReceiptArtifact = {
+          source: 'file',
+          name: file.name,
+          size: file.size,
+          type: file.type || 'application/octet-stream',
+          lastModified: file.lastModified,
+          sha256: documentHash,
+        };
+        if (els.utxoPayloadDocumentHash) els.utxoPayloadDocumentHash.value = documentHash;
+        if (els.utxoPayloadDocumentText) els.utxoPayloadDocumentText.value = '';
+        if (els.utxoPayloadFileHashStatus) els.utxoPayloadFileHashStatus.textContent = `${file.name} hashed locally: ${documentHash.slice(0, 18)}...`;
+        utxoResetPayloadOutputs('File hash ready. Select a Bitcoin anchor, then generate the receipt.');
+      } catch (err) {
+        utxoReceiptArtifact = null;
+        if (els.utxoPayloadFileHashStatus) els.utxoPayloadFileHashStatus.textContent = `File hash failed: ${err.message}`;
+        showToast('File hash failed.', true);
+      }
+    }
+
+    function utxoCurrentArtifactSeed() {
+      const documentHash = (els.utxoPayloadDocumentHash?.value || '').trim();
+      const documentText = (els.utxoPayloadDocumentText?.value || '').trim();
+      if (documentHash) return documentHash;
+      if (documentText) return documentText;
+      return '';
+    }
+
+    function utxoSyncReceiptActions() {
+      const scan = utxoActiveScan();
+      if (els.utxoDownloadReceiptBtn) els.utxoDownloadReceiptBtn.disabled = !utxoReceiptDocument;
+      if (els.utxoVerifyOnlineBtn) els.utxoVerifyOnlineBtn.disabled = !scan?.summary?.explorerUrl;
+    }
+
+    function utxoCanonicalizeValue(value) {
+      if (Array.isArray(value)) return value.map(utxoCanonicalizeValue);
+      if (value && typeof value === 'object') {
+        return Object.keys(value).sort().reduce((acc, key) => {
+          acc[key] = utxoCanonicalizeValue(value[key]);
+          return acc;
+        }, {});
+      }
+      return value;
+    }
+
+    function utxoCanonicalJson(value) {
+      return JSON.stringify(utxoCanonicalizeValue(value || {}));
+    }
+
+    function utxoStepData(scan, stepNumber) {
+      return scan?.steps?.find(step => Number(step.step) === Number(stepNumber))?.data || {};
+    }
+
+    function utxoOwnerIdentity(value) {
+      const raw = String(value || '').trim();
+      if (!raw) return null;
+      if (/^0x[0-9a-fA-F]{40}$/.test(raw)) return { type: 'wallet', value: `0x${raw.slice(2).toLowerCase()}` };
+      if (/^did:/i.test(raw)) return { type: 'did', value: raw };
+      if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(raw)) return { type: 'email', value: raw };
+      if (/^(customer|client|account|org|organization)-/i.test(raw)) return { type: 'external_id', value: raw };
+      return { type: 'organization', value: raw };
+    }
+
+    function utxoOptionalWallet(value, label) {
+      const raw = String(value || '').trim();
+      if (!raw) return '';
+      if (!/^0x[0-9a-fA-F]{40}$/.test(raw)) throw new Error(`${label} must be a 0x Ethereum address when supplied.`);
+      return `0x${raw.slice(2).toLowerCase()}`;
+    }
+
+    function utxoBuildReceiptDocument(artifactHash, ownerValue = '', attestorValue = '') {
+      const scan = utxoActiveScan();
+      if (!scan?.summary || !artifactHash) return null;
+      const summary = scan.summary;
+      const bitcoinData = utxoStepData(scan, 3);
+      const deadData = utxoStepData(scan, 4);
+      const owner = utxoOwnerIdentity(ownerValue);
+      const attestor = attestorValue ? { type: 'wallet', value: attestorValue } : null;
+      const blockHash = summary.blockHash || bitcoinData.blockHash || null;
+      const blockHeader = summary.blockHeaderHex || bitcoinData.blockHeaderHex || null;
+      const scriptPubKey = summary.scriptPubKey || bitcoinData.voutScriptpubkey || null;
+      const metadataCanonicalJson = utxoCanonicalJson(summary.metadata || {});
+      const receipt = {
+        name: 'Bitcoin Provenance Certificate',
+        schema: 'tgbt-bitcoin-provenance-receipt-v1',
+        issuedAt: new Date().toISOString(),
+        proofMode: attestor ? 'cryptographic_proof_plus_organizational_signature' : 'trustless_cryptographic_proof',
+        verificationStatement: attestor
+          ? 'This receipt combines independently verifiable Bitcoin evidence with an organizational attestor context.'
+          : 'This receipt is not based on issuer trust. It can be independently verified from the artifact hash, receipt fields, and public Bitcoin blockchain data.',
+        artifactHash,
+        anchorId: summary.anchorId,
+        utxoId: summary.utxoId || `${summary.txid}:${summary.vout}`,
+        bitcoinBlockHeight: Number(summary.blockHeight || bitcoinData.blockHeight || 0),
+        bitcoinBlockHash: blockHash,
+        blockHeader,
+        scriptPubKey,
+        deadOutputReason: summary.deadReason || deadData.reason || null,
+        metadataDigest: summary.metadataDigest || null,
+        canonicalMetadataJson: metadataCanonicalJson,
+        verificationFormula: 'anchor_id = sha256(utxo_id || data_hash_hex || merkle_root_hex || storage_reference || created_at_le)',
+        anchor: {
+          anchorId: summary.anchorId,
+          utxoId: summary.utxoId || `${summary.txid}:${summary.vout}`,
+          txid: summary.txid || null,
+          vout: Number(summary.vout || 0),
+          dataHash: summary.dataHash || null,
+          merkleRoot: summary.merkleRoot || null,
+          storageReference: summary.storageReference || '',
+          metadataDigest: summary.metadataDigest || null,
+          anchorCreatedAt: summary.anchorCreatedAt || null,
+          method: summary.method || 'dead_utxo_anchor_v1',
+        },
+        bitcoin: {
+          txid: summary.txid || null,
+          vout: Number(summary.vout || 0),
+          blockHeight: Number(summary.blockHeight || bitcoinData.blockHeight || 0),
+          blockHash,
+          blockHeader,
+          confirmed: Boolean(summary.confirmed ?? bitcoinData.confirmed),
+          scriptPubKey,
+          scriptType: summary.scriptType || bitcoinData.voutType || summary.type || null,
+          outputValueSats: summary.outputValueSats ?? bitcoinData.voutValue ?? null,
+          spent: summary.spent ?? bitcoinData.isSpent ?? null,
+        },
+        deadOutput: {
+          verified: Boolean(summary.isDead),
+          reason: summary.deadReason || deadData.reason || null,
+          checks: deadData.checks || null,
+        },
+        metadata: {
+          digest: summary.metadataDigest || null,
+          canonicalJson: metadataCanonicalJson,
+        },
+        links: {
+          explorer: summary.explorerUrl || null,
+          txApi: summary.apiUrls?.tx || bitcoinData.apiUrls?.tx || null,
+          outspendApi: summary.apiUrls?.outspend || bitcoinData.apiUrls?.outspend || null,
+          blockApi: blockHash ? `https://mempool.space/api/block/${blockHash}` : null,
+          blockExplorer: summary.blockExplorerUrl || (blockHash ? `https://mempool.space/block/${blockHash}` : null),
+        },
+      };
+      if (owner) receipt.owner = owner;
+      if (attestor) receipt.issuerAttestor = attestor;
+      return receipt;
+    }
+
+    async function utxoResolveArtifactHash(documentHash, documentText) {
+      if (documentHash) {
+        const hex = String(documentHash).trim().replace(/^0x/i, '');
+        if (!/^[0-9a-fA-F]{64}$/.test(hex)) throw new Error('Artifact hash must be a 32-byte SHA-256 hex value.');
+        const normalized = `0x${hex.toLowerCase()}`;
+        if (els.utxoPayloadDocumentHash) els.utxoPayloadDocumentHash.value = normalized;
+        return normalized;
+      }
+      if (!documentText) return '';
+      const hashed = await utxoSha256Utf8(documentText);
+      utxoReceiptArtifact = { source: 'artifactText', sha256: hashed };
+      if (els.utxoPayloadDocumentHash) els.utxoPayloadDocumentHash.value = hashed;
+      return hashed;
+    }
+
+    async function utxoUploadReceiptDocument(receipt) {
+      const anchorId = String(receipt.anchorId || 'anchor').replace(/^0x/i, '').slice(0, 12);
+      const resp = await fetch(`${RANDOMNESS_API}/api/utxo/receipt-upload`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          filename: `tgbt-provenance-receipt-${anchorId}.json`,
+          receipt,
+        }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+      return data;
+    }
+
+    function utxoDownloadReceipt() {
+      const receipt = utxoReceiptDocument;
+      if (!receipt) {
+        showToast('Generate the receipt first.', true);
+        return;
+      }
+      const anchorId = String(receipt.anchorId || 'anchor').replace(/^0x/i, '').slice(0, 12);
+      const blob = new Blob([JSON.stringify(receipt, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `tgbt-provenance-receipt-${anchorId}.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      showToast('Provenance receipt downloaded.');
+    }
+
+    function utxoVerifyOnline() {
+      const scan = utxoActiveScan();
+      const url = scan?.summary?.explorerUrl;
+      if (!url) {
+        showToast('No Bitcoin explorer URL is available for this anchor.', true);
+        return;
+      }
+      window.open(url, '_blank', 'noopener');
     }
 
     async function utxoBuildCertificatePayload() {
       const scan = utxoActiveScan();
       if (!scan?.summary?.anchorId) {
-        utxoResetPayloadOutputs('No active anchor selected. Run a scan or replay a stored scan first.');
+        utxoResetPayloadOutputs('No Bitcoin anchor selected. Select an anchor or run a live scan first.');
         if (els.utxoPayloadStatus) els.utxoPayloadStatus.className = 'cert-action-status fail';
         return;
       }
 
       const documentHash = (els.utxoPayloadDocumentHash?.value || '').trim();
       const documentText = (els.utxoPayloadDocumentText?.value || '').trim();
-      const recipient = (els.utxoPayloadRecipient?.value || '').trim();
-      const attestor = (els.utxoPayloadAttestor?.value || '').trim();
-      const metadataURI = (els.utxoPayloadMetadataUri?.value || '').trim();
+      const ownerValue = (els.utxoPayloadRecipient?.value || '').trim();
+      const attestorValue = (els.utxoPayloadAttestor?.value || '').trim();
       const certType = els.utxoPayloadCertType?.value || 'DocumentNotarisation';
 
       if (!documentHash && !documentText) {
-        utxoResetPayloadOutputs('Provide either document text or a 32-byte document hash.');
+        utxoResetPayloadOutputs('Provide either artifact text or a 32-byte artifact hash.');
         if (els.utxoPayloadStatus) els.utxoPayloadStatus.className = 'cert-action-status fail';
         return;
       }
-      if (!recipient || !attestor || !metadataURI) {
-        utxoResetPayloadOutputs('Recipient, attestor, and metadata URI are required for a useful mint payload.');
-        if (els.utxoPayloadStatus) els.utxoPayloadStatus.className = 'cert-action-status fail';
-        return;
-      }
-
       const btn = els.utxoBuildPayloadBtn;
-      if (btn) { btn.disabled = true; btn.textContent = '⏳ Building payloads…'; }
+      if (btn) { btn.disabled = true; btn.textContent = 'Generating receipt…'; }
       if (els.utxoPayloadStatus) {
         els.utxoPayloadStatus.className = 'cert-action-status';
-        els.utxoPayloadStatus.textContent = 'Building payloads from the current anchor…';
+        els.utxoPayloadStatus.textContent = 'Generating receipt JSON from the current artifact and Bitcoin anchor…';
       }
 
       try {
+        utxoPayloadResponse = null;
+        utxoReceiptDocument = null;
+        utxoReceiptUpload = null;
+        if (els.utxoPayloadMetadataUri) els.utxoPayloadMetadataUri.value = '';
+        if (els.utxoPayloadDigests) els.utxoPayloadDigests.innerHTML = '';
+        if (els.utxoVerifierPayloadBox) els.utxoVerifierPayloadBox.textContent = 'Build a payload to see the register-anchor args.';
+        if (els.utxoMintPayloadBox) els.utxoMintPayloadBox.textContent = 'Build a payload to see the mint-certificate args.';
+        utxoSyncReceiptActions();
+        const artifactHash = await utxoResolveArtifactHash(documentHash, documentText);
+        const owner = utxoOwnerIdentity(ownerValue);
+        const recipient = owner?.type === 'wallet' ? owner.value : '';
+        const attestor = utxoOptionalWallet(attestorValue, 'Issuer / attestor');
+        const receipt = utxoBuildReceiptDocument(artifactHash, ownerValue, attestor);
+        if (!receipt) throw new Error('Could not build receipt JSON from the current anchor.');
+        utxoReceiptDocument = receipt;
+        utxoSyncReceiptActions();
+        if (els.utxoPayloadStatus) els.utxoPayloadStatus.textContent = 'Receipt JSON generated. Uploading to IPFS…';
+
+        utxoReceiptUpload = await utxoUploadReceiptDocument(receipt);
+        if (els.utxoPayloadMetadataUri) els.utxoPayloadMetadataUri.value = utxoReceiptUpload.metadataURI || '';
+        if (els.utxoPayloadStatus) els.utxoPayloadStatus.textContent = `Receipt JSON generated. Uploaded to IPFS. Metadata URI: ${utxoReceiptUpload.metadataURI}. Building mint payload…`;
+
         const body = {
           anchorId: scan.summary.anchorId,
-          recipient,
-          attestor,
-          metadataURI,
+          owner,
+          metadataURI: utxoReceiptUpload.metadataURI,
           certType,
         };
-        if (documentHash) body.documentHash = documentHash;
+        if (recipient) body.recipient = recipient;
+        if (attestor) body.attestor = attestor;
+        if (artifactHash) body.documentHash = artifactHash;
         else body.documentText = documentText;
 
         const resp = await fetch(`${RANDOMNESS_API}/api/utxo/certificate-payload`, {
@@ -5213,13 +5547,16 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
         utxoRenderPayloadResponse(data);
-        showToast('Certificate payloads built from the real UTXO anchor.');
+        showToast(data?.context?.mintCertificateAvailable
+          ? 'Receipt generated, uploaded, and mint payload prepared.'
+          : 'Trustless Bitcoin-backed receipt generated and uploaded.');
       } catch (err) {
-        utxoResetPayloadOutputs(err.message || 'Failed to build certificate payloads.');
+        if (els.utxoPayloadStatus) els.utxoPayloadStatus.textContent = err.message || 'Failed to generate receipt.';
         if (els.utxoPayloadStatus) els.utxoPayloadStatus.className = 'cert-action-status fail';
-        showToast('Certificate payload build failed.');
+        utxoSyncReceiptActions();
+        showToast('Receipt generation failed.');
       } finally {
-        if (btn) { btn.disabled = false; btn.textContent = '⚙️ Build verifier + mint payloads'; }
+        if (btn) { btn.disabled = false; btn.textContent = 'Generate Receipt'; }
       }
     }
 
@@ -5231,6 +5568,12 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
       const payload = kind === 'verifier'
         ? utxoPayloadResponse.verifierRegistration
         : utxoPayloadResponse.certificateMint;
+      if (!payload) {
+        showToast(kind === 'verifier'
+          ? 'No Register Anchor payload in trustless API mode. Add an issuer / attestor for blockchain registration.'
+          : 'No Mint Certificate payload in API mode. Add a 0x owner wallet and issuer / attestor for blockchain minting.', true);
+        return;
+      }
       navigator.clipboard.writeText(JSON.stringify(payload, null, 2)).then(() => {
         showToast(`${kind === 'verifier' ? 'Verifier' : 'Mint'} payload copied.`);
       }).catch(() => showToast('Failed to copy payload.'));
@@ -5301,7 +5644,10 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
       if (isAutoScan && els.utxoAutoScanIndicator) els.utxoAutoScanIndicator.style.display = '';
 
       try {
-        const resp = await fetch(`${RANDOMNESS_API}/api/utxo/scan`);
+        const scanUrl = new URL(`${RANDOMNESS_API}/api/utxo/scan`);
+        if (opts.seed) scanUrl.searchParams.set('seed', opts.seed);
+        if (opts.storageReference) scanUrl.searchParams.set('storageReference', opts.storageReference);
+        const resp = await fetch(scanUrl.toString());
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
         utxoLastScanData = data;
@@ -5352,6 +5698,7 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
 
     // ── Event Listeners ──
 
+    initProvenancePanel();
     els.utxoScanBtn.addEventListener('click', () => runUtxoScan());
     els.utxoScanClose.addEventListener('click', () => {
       els.utxoScanPanel.classList.add('hidden');
@@ -5361,6 +5708,15 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
     }
     if (els.utxoBuildPayloadBtn) {
       els.utxoBuildPayloadBtn.addEventListener('click', utxoBuildCertificatePayload);
+    }
+    if (els.utxoPayloadFileInput) {
+      els.utxoPayloadFileInput.addEventListener('change', utxoHashSelectedFile);
+    }
+    if (els.utxoDownloadReceiptBtn) {
+      els.utxoDownloadReceiptBtn.addEventListener('click', utxoDownloadReceipt);
+    }
+    if (els.utxoVerifyOnlineBtn) {
+      els.utxoVerifyOnlineBtn.addEventListener('click', utxoVerifyOnline);
     }
     if (els.utxoPayloadRecipient) {
       els.utxoPayloadRecipient.addEventListener('change', () => {

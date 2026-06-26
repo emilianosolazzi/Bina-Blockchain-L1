@@ -19,7 +19,6 @@ contract UTXOCertificateRegistry is ERC721, ModuleBase, ReentrancyGuard {
 
     uint256 private constant BPS_SCALE = 10_000;
     uint16 public constant MAX_PROTOCOL_FEE_BPS = 5_000;
-    bytes32 private constant GOVERNANCE_ROLE = keccak256("GOVERNANCE_ROLE");
 
     enum CertificateType {
         DocumentNotarisation,
@@ -195,7 +194,7 @@ contract UTXOCertificateRegistry is ERC721, ModuleBase, ReentrancyGuard {
 
         // FIXED: Query the exact recorded attestor address stored inside the UTXOAnchorVerifier
         // structure instead of guessing alignment configurations blindly.
-        (, , , , , , , address verifierRecordedAttestor, ) = IUTXOAnchorVerifier(anchorVerifier).getAnchor(anchorId);
+        IUTXOAnchorVerifier.AnchorRecord memory verifierRecord = IUTXOAnchorVerifier(anchorVerifier).getAnchor(anchorId);
 
         bool validAnchor = IUTXOAnchorVerifier(anchorVerifier).verifyStoredAnchor(
             anchorId,
@@ -205,7 +204,7 @@ contract UTXOCertificateRegistry is ERC721, ModuleBase, ReentrancyGuard {
             storageReferenceHash,
             metadataDigest,
             anchorCreatedAt,
-            verifierRecordedAttestor
+            verifierRecord.attestor
         );
         if (!validAnchor) revert InvalidAnchor();
 
@@ -259,7 +258,7 @@ contract UTXOCertificateRegistry is ERC721, ModuleBase, ReentrancyGuard {
         }
 
         // FIXED: Re-verify dynamic routing alignment
-        (, , , , , , , address verifierRecordedAttestor, ) = IUTXOAnchorVerifier(anchorVerifier).getAnchor(certificate.anchorId);
+        IUTXOAnchorVerifier.AnchorRecord memory verifierRecord = IUTXOAnchorVerifier(anchorVerifier).getAnchor(certificate.anchorId);
 
         valid = IUTXOAnchorVerifier(anchorVerifier).verifyStoredAnchor(
             certificate.anchorId,
@@ -269,7 +268,7 @@ contract UTXOCertificateRegistry is ERC721, ModuleBase, ReentrancyGuard {
             certificate.storageReferenceHash,
             certificate.metadataDigest,
             certificate.anchorCreatedAt,
-            verifierRecordedAttestor
+            verifierRecord.attestor
         );
     }
 

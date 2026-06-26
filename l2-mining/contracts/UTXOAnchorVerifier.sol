@@ -6,11 +6,10 @@ import { ModuleBase } from "./modules/ModuleBase.sol";
 /**
  * @title UTXOAnchorVerifier
  * @notice On-chain registry for canonical dead-UTXO anchors.
- * Upgraded to guarantee strict collision safety against variable-length strings.
+ * @dev Anchor IDs intentionally match the Rust/API formula:
+ *      sha256(utxo_id || data_hash_hex || merkle_root_hex || storage_reference || created_at_le).
  */
 contract UTXOAnchorVerifier is ModuleBase {
-    bytes32 private constant GOVERNANCE_ROLE = keccak256("GOVERNANCE_ROLE");
-
     struct AnchorRecord {
         bytes32 anchorId;
         bytes32 utxoIdHash;
@@ -160,8 +159,9 @@ contract UTXOAnchorVerifier is ModuleBase {
     }
 
     /**
-     * @notice Computes a deterministic identity hash for the UTXO parameter mapping.
-     * @dev FIXED: Wraps components via explicit typed grouping to block bytes.concat position shifts.
+     * @notice Computes the canonical Rust/API dead-UTXO anchor id.
+     * @dev dataHashHex and merkleRootHex are normalized to lowercase 64-char hex without 0x
+     *      before hashing, matching the values emitted by the scanner.
      */
     function computeAnchorId(
         string calldata utxoId,
@@ -172,19 +172,31 @@ contract UTXOAnchorVerifier is ModuleBase {
     ) public pure returns (bytes32 anchorId) {
         return sha256(
             abi.encodePacked(
-                keccak256(bytes(utxoId)),
-                keccak256(bytes(dataHashHex)),
-                keccak256(bytes(merkleRootHex)),
-                keccak256(bytes(storageReference)),
+                bytes(utxoId),
+                _hex32Ascii(_parseHex32(dataHashHex)),
+                _hex32Ascii(_parseHex32(merkleRootHex)),
+                bytes(storageReference),
                 _toLittleEndian(createdAt)
             )
         );
     }
 
+    function _hex32Ascii(bytes32 value) internal pure returns (bytes memory out) {
+        bytes16 symbols = "0123456789abcdef";
+        out = new bytes(64);
+        for (uint256 i = 0; i < 32; i++) {
+            uint8 b = uint8(value[i]);
+            out[i * 2] = symbols[b >> 4];
+            out[(i * 2) + 1] = symbols[b & 0x0f];
+        }
+    }
+
     function _toLittleEndian(uint64 value) internal pure returns (bytes memory out) {
         out = new bytes(8);
         for (uint256 i = 0; i < 8; i++) {
-            out[i] = bytes1(uint8(value >> (i * 8)));
+            uint64 shifted = value >> (i * 8);
+            // forge-lint: disable-next-line(unsafe-typecast)
+            out[i] = bytes1(uint8(shifted & 0xff));
         }
     }
 
@@ -213,5 +225,3 @@ contract UTXOAnchorVerifier is ModuleBase {
         revert InvalidHexString();
     }
 }
-
-```
