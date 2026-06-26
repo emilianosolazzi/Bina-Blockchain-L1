@@ -16,7 +16,15 @@ $MINER_EXE_DEPLOY = Join-Path $env:LOCALAPPDATA "entropy\TemporalGradientMiner\d
 # Prefer the deployed binary (matches running process path); fall back to build output
 $MINER_EXE = if (Test-Path $MINER_EXE_DEPLOY) { $MINER_EXE_DEPLOY } else { $MINER_EXE_BUILD }
 $TELEMETRY_FILE = Join-Path $RUST "miner-telemetry.jsonl"
+# Export the telemetry path so child node services (heartbeat sidecar, dashboard) read the
+# same workspace file the miner writes to. Without this the sidecar defaults to the stale
+# AppData telemetry.jsonl and raises false telemetry_stale / heartbeat_gap alarms.
+$env:TELEMETRY_FILE = $TELEMETRY_FILE
 $MINER_TRUST_SEAL = Join-Path $env:LOCALAPPDATA "entropy\TemporalGradientMiner\data\logs\miner-trust-seal.json"
+# The running miner uses --config miner-config.local-live.json, whose telemetry path lives in
+# $RUST. Its trust seal sits next to that telemetry file, NOT in AppData. This is the seal the
+# tamper monitor actually loads, so it must be cleared on binary sync or rebuilds trip the lock.
+$MINER_TRUST_SEAL_LOCAL = Join-Path (Split-Path $TELEMETRY_FILE) "miner-trust-seal.json"
 
 New-Item -ItemType Directory -Force -Path $LOGS | Out-Null
 
@@ -190,6 +198,9 @@ function Ensure-MinerBinary {
                 if (Test-Path $MINER_TRUST_SEAL) {
                     Remove-Item $MINER_TRUST_SEAL -Force -ErrorAction SilentlyContinue
                 }
+                if (Test-Path $MINER_TRUST_SEAL_LOCAL) {
+                    Remove-Item $MINER_TRUST_SEAL_LOCAL -Force -ErrorAction SilentlyContinue
+                }
                 Write-Host "  [OK] Synced newer build binary to $deployBin" -ForegroundColor Green
             }
         }
@@ -232,6 +243,9 @@ function Ensure-MinerBinary {
         Copy-Item -Path $BinaryPath -Destination $deployBin -Force
         if (Test-Path $MINER_TRUST_SEAL) {
             Remove-Item $MINER_TRUST_SEAL -Force -ErrorAction SilentlyContinue
+        }
+        if (Test-Path $MINER_TRUST_SEAL_LOCAL) {
+            Remove-Item $MINER_TRUST_SEAL_LOCAL -Force -ErrorAction SilentlyContinue
         }
         Write-Host "  [OK] Synced patched binary to $deployBin" -ForegroundColor Green
     }

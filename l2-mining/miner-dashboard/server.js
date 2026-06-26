@@ -798,6 +798,40 @@ async function getOnChainEpoch(epochId) {
 	};
 }
 
+// Cache of epochs already confirmed finalized on-chain. Finalization is a
+// terminal state, so once true we never re-query the chain for it. This keeps
+// the per-refresh RPC cost bounded to the handful of not-yet-finalized epochs.
+const finalizedEpochCache = new Map();
+
+// Merge authoritative on-chain finalize/attestation state into a legacy
+// randomness-API epoch record. The randomness-API persists `finalized:false`
+// at creation and never updates it, so without this the dashboard table shows
+// "Ready to finalize" even for epochs that are already finalized on-chain.
+async function mergeOnChainEpochStatus(record) {
+	const id = Number(record?.epochId ?? record?.id);
+	if (!Number.isFinite(id)) return record;
+	if (finalizedEpochCache.has(id)) {
+		return { ...record, ...finalizedEpochCache.get(id) };
+	}
+	try {
+		const chain = await getOnChainEpoch(id);
+		const merged = {
+			finalized: chain.finalized,
+			storageAttested: chain.storageAttested,
+			blocksUntilFinalizable: chain.blocksUntilFinalizable,
+			blocksPastChallenge: chain.blocksPastChallenge,
+			etaHours: chain.etaHours,
+			onChainStatusSource: 'on-chain',
+		};
+		if (chain.finalized) {
+			finalizedEpochCache.set(id, merged);
+		}
+		return { ...record, ...merged };
+	} catch (err) {
+		return record;
+	}
+}
+
 async function listOnChainEpochs(limit = 50) {
 	const batch = new ethers.Contract(BATCH_ADDRESS, BATCH_ABI, provider);
 	const currentEpochId = Number(await batch.currentEpochId().catch(() => 0n));
@@ -1432,7 +1466,10 @@ const server = http.createServer(async (req, res) => {
 	const url = new URL(req.url, `http://${req.headers.host}`);
 
 	if (url.pathname === '/') {
-		res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+		res.writeHead(200, {
+			'Content-Type': 'text/html; charset=utf-8',
+			'Cache-Control': 'no-store'
+		});
 		fs.createReadStream(INDEX).pipe(res);
 		return;
 	}
@@ -1690,7 +1727,8 @@ const server = http.createServer(async (req, res) => {
 			const legacy = await requestPrimaryRandomnessApi(`/api/epochs/${epochProxyMatch[1]}`);
 			if (legacy.status >= 200 && legacy.status < 300) {
 				const rewardLookup = await getRewardLookup();
-				sendJson(res, 200, enrichEpochReward(legacy.json ?? {}, rewardLookup));
+				const enriched = enrichEpochReward(legacy.json ?? {}, rewardLookup);
+				sendJson(res, 200, await mergeOnChainEpochStatus(enriched));
 				return;
 			}
 			const epoch = await getOnChainEpoch(Number(epochProxyMatch[1]));

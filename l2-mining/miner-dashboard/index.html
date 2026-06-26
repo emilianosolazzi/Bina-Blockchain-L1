@@ -2296,7 +2296,7 @@ curl -s "http://127.0.0.1:4271/api/utxo/scan?seed=$BINARY_HASH" \
               <div style="display:flex;justify-content:space-between;align-items:center;">
                 <span style="color:var(--muted);">Queue wallet</span>
                 <span style="display:flex;align-items:center;gap:6px;">
-                  <span id="advancedQueueWalletAddress" class="mono" style="font-size:11px;color:var(--accent);cursor:pointer;" title="Click to copy" onclick="navigator.clipboard.writeText(this.dataset.full||this.textContent)">—</span>
+                  <span id="advancedQueueWalletAddress" data-queue-wallet-address class="mono" style="font-size:11px;color:var(--accent);cursor:pointer;" title="Click to copy" onclick="navigator.clipboard.writeText(this.dataset.full||this.textContent)">—</span>
                   <a id="queueWalletExplorerLink" href="#" target="_blank" rel="noopener" style="font-size:10px;color:var(--muted);text-decoration:none;" title="Arbiscan">↗</a>
                 </span>
               </div>
@@ -2503,27 +2503,11 @@ const beacon = new ethers.Contract(
     provider
 );
 
-      renderQueueProfile(sys.chain?.queue || null);
-
 const isValid = await beacon.verifyRandomnessLeaf(
     latest.epochId,
-      const queue = sys.chain?.queue || {};
-      const queueWalletAddr = queue.walletAddress || walletAddr;
-      const displayedEthBalance = queue.ethBalance ?? sys.chain?.ethBalance ?? 0;
-      const ethBalance = Number(displayedEthBalance || 0);
+    latest.leafIndex,
     latest.outputHash,
-      els.walletEth.textContent = ethBalance > 0 || !sys._error ? fmtEth(displayedEthBalance) : '…';
-      if (els.ethWarnAddr) els.ethWarnAddr.textContent = abbrevAddr(queueWalletAddr);
-
-      if (els.advancedQueueWalletAddress) {
-        els.advancedQueueWalletAddress.textContent = abbrevAddr(queueWalletAddr);
-        els.advancedQueueWalletAddress.dataset.full = queueWalletAddr;
-        els.advancedQueueWalletAddress.title = queueWalletAddr || 'Click to copy';
-      }
-      if (queueWalletAddr && els.queueWalletExplorerLink) {
-        els.queueWalletExplorerLink.href = arbiscanAddr(queueWalletAddr);
-        els.queueWalletExplorerLink.style.display = '';
-      }
+    proof.verifyOnChain.args[3]   // Merkle proof nodes
 );
 console.log("Randomness is valid:", isValid);  // true ✓
 
@@ -3000,6 +2984,14 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
       return Intl.NumberFormat('en-US', { minimumFractionDigits: 0, maximumFractionDigits }).format(num);
     }
     function fmtHashrate(v) { return v == null ? '—' : `${fmtNum(v)} H/s`; }
+    function effectiveHashrate(snap) {
+      if (!snap) return 0;
+      const live = Number(snap.hashrate_hs || 0);
+      if (live > 0) return live;
+      const hashes = Number(snap.hashes || 0);
+      const uptime = Number(snap.uptime_seconds || 0);
+      return hashes > 0 && uptime > 0 ? hashes / uptime : 0;
+    }
     function fmtDuration(sec) {
       if (sec == null) return '—';
       const s = Math.max(0, Math.floor(sec));
@@ -3012,6 +3004,20 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
     function fmtMsDuration(ms) {
       if (ms == null) return '—';
       return fmtDuration(Math.round(Number(ms) / 1000));
+    }
+
+    // Compact "… ago" formatter that rolls minutes up into hours/days so old
+    // events read as "93d 5h ago" instead of a giant minute count like "133815m ago".
+    function fmtAgeShort(sec) {
+      if (sec == null || !Number.isFinite(Number(sec))) return '—';
+      const s = Math.max(0, Math.floor(Number(sec)));
+      if (s < 60) return `${s}s ago`;
+      const m = Math.floor(s / 60);
+      if (m < 60) return `${m}m ago`;
+      const h = Math.floor(m / 60);
+      if (h < 24) return `${h}h ${m % 60}m ago`;
+      const d = Math.floor(h / 24);
+      return `${d}d ${h % 24}h ago`;
     }
 
     function fmtBytes(bytes) {
@@ -3079,6 +3085,16 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
         return { label: `~${ep.etaHours.toFixed(0)}h left`, kind: 'warn' };
       }
       if (ep?.blocksPastChallenge > 0) return { label: 'Ready to finalize', kind: 'warn' };
+      // No explicit challenge-window fields from the API: derive status from epoch age.
+      // finalizeEpoch() is only allowed after the 28,800 L1-block (~96h) challenge window.
+      const CHALLENGE_WINDOW_MS = 28800 * 12 * 1000; // ~96h
+      const createdMs = ep?.createdAt ? new Date(ep.createdAt).getTime() : NaN;
+      if (Number.isFinite(createdMs)) {
+        const elapsed = Date.now() - createdMs;
+        if (elapsed >= CHALLENGE_WINDOW_MS) return { label: 'Ready to finalize', kind: 'warn' };
+        const hoursLeft = Math.ceil((CHALLENGE_WINDOW_MS - elapsed) / 3600000);
+        return { label: `~${hoursLeft}h left`, kind: 'warn' };
+      }
       return { label: 'Pending', kind: 'warn' };
     }
 
@@ -3259,8 +3275,7 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
       }
 
       // Use session-average hashrate when instantaneous is 0 (workers idle during clearance/lock)
-      const effectiveHashrate = snap.hashrate_hs || (snap.hashes > 0 && snap.uptime_seconds > 0 ? snap.hashes / snap.uptime_seconds : 0);
-      els.hashrate.textContent = fmtHashrate(effectiveHashrate);
+      els.hashrate.textContent = fmtHashrate(effectiveHashrate(snap));
       els.hashes.textContent = `${fmtNum(snap.hashes)} hashes total`;
       els.solutions.textContent = fmtNum(snap.solutions);
       els.lastNonce.textContent = snap.last_solution_nonce != null ? `Last nonce ${fmtNum(snap.last_solution_nonce)}` : 'No solution yet';
@@ -4116,7 +4131,7 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
 
       const padding = 40;
       const isRewardChart = state.chartMode === 'rewards';
-      const values = state.history.map(x => isRewardChart ? effectiveRewards(x).total : (x.hashrate_hs || 0));
+      const values = state.history.map(x => isRewardChart ? effectiveRewards(x).total : effectiveHashrate(x));
       const max = Math.max(0.001, ...values);
 
       // Grid lines + labels
@@ -4605,7 +4620,7 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
               <span class="sb-meta" style="margin-left:8px;">Height ${heightLabel} • ${b.leadingZeros || 0} zero bits • depth ${b.reorgDepth || 0}</span>
             </div>
             <div style="display:flex;gap:10px;align-items:center;">
-              <span class="sb-meta">${ageSecs < 60 ? ageSecs + 's ago' : Math.floor(ageSecs / 60) + 'm ago'}</span>
+              <span class="sb-meta">${fmtAgeShort(ageSecs)}</span>
               <span style="color:var(--gold);font-weight:600;font-size:12px;">+${fmtTGBT(Number(b.reward || 0))} TGBT</span>
             </div>
           </div>`;
@@ -4619,7 +4634,7 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
               <span class="sb-meta" style="margin-left:8px;">Height ${fmtNum(b.height)} • ${b.zeroBits} zero bits</span>
             </div>
             <div style="display:flex;gap:10px;align-items:center;">
-              <span class="sb-meta">${b.age < 60 ? b.age + 's ago' : Math.floor(b.age / 60) + 'm ago'}</span>
+              <span class="sb-meta">${fmtAgeShort(b.age)}</span>
               ${logPending
                 ? `<span style="color:var(--warn);font-weight:600;font-size:12px;">⏳ ${b.reward} TGBT (pending)</span>`
                 : `<span style="color:var(--gold);font-weight:600;font-size:12px;">+${b.reward} TGBT</span>`}
@@ -5745,6 +5760,10 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
         el.dataset.full = queueWallet;
         el.title = queueWallet || 'Queue submitter wallet';
       });
+      if (queueWallet && els.queueWalletExplorerLink) {
+        els.queueWalletExplorerLink.href = arbiscanAddr(queueWallet);
+        els.queueWalletExplorerLink.style.display = '';
+      }
       document.querySelectorAll('[data-queue-main-wallet-address]').forEach(el => {
         el.textContent = abbrevAddr(mainWallet);
         el.dataset.full = mainWallet;

@@ -588,13 +588,41 @@ impl LiveMiningClient {
             }
         }
 
-        let commitment_signature = self.sign_commitment(&submission.commitment).await?;
+        // ── Re-stamp the sequential commitment nonce + deadline at submit time ──
+        // The nonce baked in at mining time goes stale when several solutions are
+        // queued in manual mode: the contract enforces `nonces[miner] == nonce`
+        // exactly and increments it on every successful commit, so only the FIRST
+        // queued solution sharing a given nonce can succeed — the rest revert with
+        // InvalidNonce() forever. The commit_hash is derived from the mining/reveal
+        // nonce (submission.nonce), NOT this sequential counter, and the reveal also
+        // uses submission.nonce, so re-stamping + re-signing the commitment here is
+        // safe and lets every approved solution commit sequentially.
+        let mut commitment = submission.commitment.clone();
+        let fresh_nonce = self.next_commit_nonce().await?;
+        if commitment.nonce != fresh_nonce {
+            tracing::info!(
+                "Re-stamping commitment nonce {} -> {} (fresh on-chain) before submit",
+                commitment.nonce,
+                fresh_nonce
+            );
+            commitment.nonce = fresh_nonce;
+        }
+        // Refresh the EIP-712 deadline so a long-queued solution is not rejected
+        // with DeadlineExpired() (contract checks `block.timestamp > deadline`).
+        const COMMITMENT_DEADLINE_WINDOW_SECS: u64 = 3600;
+        commitment.deadline = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(commitment.deadline)
+            .saturating_add(COMMITMENT_DEADLINE_WINDOW_SECS);
+
+        let commitment_signature = self.sign_commitment(&commitment).await?;
 
         let commit_tx = contract.submit_mining_commitment(
-            submission.commitment.commit_hash.into(),
-            submission.commitment.pool_id,
-            U256::from(submission.commitment.nonce),
-            U256::from(submission.commitment.deadline),
+            commitment.commit_hash.into(),
+            commitment.pool_id,
+            U256::from(commitment.nonce),
+            U256::from(commitment.deadline),
             commitment_signature,
         );
         let commit_gas = match commit_tx.estimate_gas().await {

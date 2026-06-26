@@ -345,6 +345,8 @@ Full economics model with projections: `l2-mining/mining_economics_model.py`
 | MiningModule | `0xb2b3d9bC63993b725Aea36aC90601c22292F3171` | ✅ Live + Verified (redeployed Apr 2026, commit-reveal mining) |
 | BatchMiningModule | `0xAf07E37D104E9be17639FE7a51B36972D4738651` | ✅ Live |
 | StaleBlockOracle | `0xdc4eDF632187d05da50393Af87D19A08f6986517` | ✅ Live + Initialized (v2, LE zero-bit fix) |
+| RandomnessModule | `0x583863CFC5EFc0106886BA485e1b67F0966584f9` | ✅ Live + registered module (`isModule`=true, 10,106 bytes) |
+| RateLimitModule | `0x61dEEEf2B2956db3AD291c639939669cD5399c1B` | ✅ Live + registered module (`isModule`=true, 5,274 bytes) |
 | TGBT Token | `0x31228eE520e895DA19f728DE5459b1b317d9b8D8` | ✅ Live |
 | TokenomicsModuleV2 (active) | `0x7B871bdeDdED0064C34e22902181A9a983C9E2ab` | ✅ Live |
 | TokenomicsModule V1 (deauthorized) | `0xF6069614FE09B91e5B00DA0a13A11B2BFcCabC36` | ❌ Deauthorized |
