@@ -57,6 +57,7 @@ const QUEUE_DIR = process.env.QUEUE_DIR
 const RANDOMNESS_API_URL = process.env.RANDOMNESS_API_URL || 'http://127.0.0.1:4271';
 const RANDOMNESS_API_FALLBACK_URL = process.env.RANDOMNESS_API_FALLBACK_URL || 'http://127.0.0.1:3100';
 const HEARTBEAT_API_URL = process.env.HEARTBEAT_API_URL || 'http://127.0.0.1:4380';
+const SPSF_API_URL = process.env.SPSF_API_URL || process.env.SPSF_SERVER_URL || 'http://127.0.0.1:8000';
 const RANDOMNESS_HEALTH_PATH = process.env.RANDOMNESS_HEALTH_PATH || '/api/health';
 const RANDOMNESS_LATEST_PATH = process.env.RANDOMNESS_LATEST_PATH || '/api/randomness/latest';
 const RANDOMNESS_FALLBACK_HEALTH_PATH = process.env.RANDOMNESS_FALLBACK_HEALTH_PATH || '/healthz';
@@ -1460,6 +1461,39 @@ async function proxyRandomnessApi(req, res, targetPath, method = 'GET', body = n
 	}
 }
 
+function normalizeServerUrl(value, fallback) {
+	const raw = String(value || fallback || '').trim().replace(/\/+$/, '');
+	if (!raw) throw new Error('SPSF server URL is required');
+	const parsed = new URL(raw);
+	if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('SPSF server URL must use http or https');
+	return parsed.toString().replace(/\/+$/, '');
+}
+
+async function proxySpsfExampleContribution(req, res) {
+	try {
+		const body = await readBody(req);
+		const prompt = String(body.prompt || '').trim();
+		const completion = String(body.completion || '').trim();
+		if (prompt.length < 3) {
+			return sendJson(res, 400, { accepted: false, reason: 'prompt is missing' });
+		}
+		if (completion.length < 8) {
+			return sendJson(res, 400, { accepted: false, reason: 'completion is too short' });
+		}
+
+		const serverUrl = normalizeServerUrl(body.serverUrl, SPSF_API_URL);
+		const response = await requestJson(`${serverUrl}/contribute/example`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ prompt, completion }),
+			timeoutMs: 10000,
+		});
+		return sendJson(res, response.status, response.json || { accepted: false, reason: 'empty SPSF response' });
+	} catch (err) {
+		return sendJson(res, 502, { accepted: false, reason: 'Could not reach SPSF server', detail: shortError(err) });
+	}
+}
+
 // ── HTTP Server ─────────────────────────────────────────
 
 const server = http.createServer(async (req, res) => {
@@ -1491,6 +1525,10 @@ const server = http.createServer(async (req, res) => {
 			latest: latestSnapshot(),
 		});
 		return;
+	}
+
+	if (url.pathname === '/api/spsf/contribute/example' && req.method === 'POST') {
+		return proxySpsfExampleContribution(req, res);
 	}
 
 	// ── Mining control (pause / power rate) ──────────────────────────

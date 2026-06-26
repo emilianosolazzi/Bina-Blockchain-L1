@@ -1422,6 +1422,49 @@
       </div>
     </section>
 
+    <!-- ── SPSF-AI Contribution Lane ── -->
+    <section class="grid" style="margin-top:16px;">
+      <div class="panel" style="grid-column: span 12;">
+        <div class="solutions-header" style="margin-bottom:10px;">
+          <div>
+            <h3 class="section-title" style="display:inline;">Help Improve Answers</h3>
+            <p class="helper" style="margin:6px 0 0;max-width:760px;line-height:1.5;">Submit clean prompt-completion examples for SPSF-AI. Accepted examples become pending review; rewards should follow promotion, quorum validation, and anchoring.</p>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+            <span class="badge ok" id="spsfContributionBadge">Contribution Lane</span>
+            <button class="action-btn" id="spsfNextPromptBtn">New prompt</button>
+          </div>
+        </div>
+        <div class="cert-action-grid">
+          <div class="cert-action-field">
+            <label class="cert-action-label" for="spsfServerUrl">SPSF server</label>
+            <input class="cert-action-input" id="spsfServerUrl" placeholder="http://127.0.0.1:8000" />
+            <div class="cert-action-help">Used only to submit examples to <code>/contribute/example</code>. Saved locally in this browser.</div>
+          </div>
+          <div class="cert-action-field">
+            <label class="cert-action-label">Complete this clearly:</label>
+            <div class="cert-action-input" id="spsfPromptText" style="min-height:40px;display:flex;align-items:center;">Validators protect</div>
+            <div class="cert-action-help">Complete the sentence clearly. Keep it plain and useful.</div>
+          </div>
+          <div class="cert-action-field full">
+            <label class="cert-action-label" for="spsfCompletionText">Your completion</label>
+            <textarea class="cert-action-textarea" id="spsfCompletionText" maxlength="240" placeholder="the shared model from unsafe updates."></textarea>
+          </div>
+        </div>
+        <div class="cert-action-toolbar">
+          <button class="cert-action-build" id="spsfSubmitExampleBtn">Submit improvement</button>
+          <div class="cert-action-status" id="spsfContributionStatus">Accepted examples may be used in a future model round after review.</div>
+        </div>
+        <div class="cert-action-digests">
+          <div class="cert-digest-pill"><span>Accepted examples</span><span id="spsfAcceptedCount">0</span></div>
+          <div class="cert-digest-pill"><span>Rejected examples</span><span id="spsfRejectedCount">0</span></div>
+          <div class="cert-digest-pill"><span>Promoted examples</span><span id="spsfPromotedCount">—</span></div>
+          <div class="cert-digest-pill"><span>Anchored rounds</span><span id="spsfAnchoredCount">—</span></div>
+          <div class="cert-digest-pill"><span>Latest provenance</span><span id="spsfLatestProvenance">—</span></div>
+        </div>
+      </div>
+    </section>
+
     <!-- ── Bitcoin Provenance Network ── -->
     <section class="grid" style="margin-top:16px;">
       <div class="panel provenance-panel">
@@ -1438,7 +1481,7 @@
         <div class="provenance-flow">
           <div class="provenance-step"><strong>Choose artifact</strong><span>Paste canonical text or provide a SHA-256 document hash for the file, model update, legal record, or operational checkpoint.</span></div>
           <div class="provenance-step"><strong>Select Bitcoin anchor</strong><span>Use the latest verified dead UTXO anchor, or run a fresh live scan to bind the receipt to a public Bitcoin block.</span></div>
-          <div class="provenance-step"><strong>Issue receipt</strong><span>Generate the verifier registration and certificate mint payloads, with raw ABI inputs kept under Advanced.</span></div>
+          <div class="provenance-step"><strong>Generate receipt</strong><span>Create a downloadable trustless receipt first. IPFS upload and mint payloads are optional follow-up steps.</span></div>
         </div>
         <div class="provenance-cert-mount" id="provenanceCertificateMount"></div>
       </div>
@@ -4808,11 +4851,117 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
 
     // ── UTXO Live Scan ──────────────────────────────────────
     const RANDOMNESS_API = 'http://127.0.0.1:4271';
+    const SPSF_SERVER_KEY = 'tgbt-spsf-server-url';
+    const SPSF_STATS_KEY = 'tgbt-spsf-example-stats';
+    const SPSF_PROMPTS = [
+      'Validators protect',
+      'A clean completion should',
+      'Randomness miners help',
+      'A Bitcoin-backed proof shows',
+      'A rejected answer usually',
+      'Quorum validation means',
+    ];
+    const spsfState = {
+      promptIndex: 0,
+      stats: { accepted: 0, rejected: 0 },
+    };
     let utxoScanRunning = false;
     let utxoTotalAnchored = 0;
     let utxoLocalHistory = [];
     const UTXO_RESCAN_INTERVAL = 300000; // 5 minutes
     const UTXO_AUTO_SCAN_DELAY = 5000;   // 5 seconds after load
+
+    function loadSpsfStats() {
+      try {
+        const saved = JSON.parse(localStorage.getItem(SPSF_STATS_KEY) || '{}');
+        spsfState.stats.accepted = Math.max(0, Number(saved.accepted || 0));
+        spsfState.stats.rejected = Math.max(0, Number(saved.rejected || 0));
+      } catch {
+        spsfState.stats = { accepted: 0, rejected: 0 };
+      }
+    }
+
+    function saveSpsfStats() {
+      localStorage.setItem(SPSF_STATS_KEY, JSON.stringify(spsfState.stats));
+    }
+
+    function renderSpsfStats() {
+      if (els.spsfAcceptedCount) els.spsfAcceptedCount.textContent = spsfState.stats.accepted.toLocaleString();
+      if (els.spsfRejectedCount) els.spsfRejectedCount.textContent = spsfState.stats.rejected.toLocaleString();
+    }
+
+    function setSpsfStatus(message, kind = '') {
+      if (!els.spsfContributionStatus) return;
+      els.spsfContributionStatus.className = `cert-action-status ${kind}`.trim();
+      els.spsfContributionStatus.textContent = message;
+    }
+
+    function spsfCurrentPrompt() {
+      return SPSF_PROMPTS[spsfState.promptIndex % SPSF_PROMPTS.length];
+    }
+
+    function renderSpsfPrompt() {
+      if (els.spsfPromptText) els.spsfPromptText.textContent = spsfCurrentPrompt();
+    }
+
+    function nextSpsfPrompt() {
+      spsfState.promptIndex = (spsfState.promptIndex + 1) % SPSF_PROMPTS.length;
+      renderSpsfPrompt();
+      if (els.spsfCompletionText) els.spsfCompletionText.value = '';
+      setSpsfStatus('New prompt loaded. Complete it clearly, then submit improvement.');
+    }
+
+    async function submitSpsfImprovement() {
+      const prompt = spsfCurrentPrompt();
+      const completion = (els.spsfCompletionText?.value || '').trim();
+      const serverUrl = (els.spsfServerUrl?.value || '').trim();
+      if (completion.length < 8) {
+        spsfState.stats.rejected++;
+        saveSpsfStats();
+        renderSpsfStats();
+        setSpsfStatus('Rejected: completion is too short.', 'fail');
+        return;
+      }
+      if (serverUrl) localStorage.setItem(SPSF_SERVER_KEY, serverUrl);
+      if (els.spsfSubmitExampleBtn) els.spsfSubmitExampleBtn.disabled = true;
+      setSpsfStatus('Submitting improvement…', 'warn');
+      try {
+        const resp = await fetch('/api/spsf/contribute/example', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ prompt, completion, serverUrl }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        const accepted = data.accepted === true || data.ok === true || data.status === 'accepted';
+        if (!resp.ok || !accepted) {
+          const reason = data.reason || data.error || data.detail || `HTTP ${resp.status}`;
+          spsfState.stats.rejected++;
+          saveSpsfStats();
+          renderSpsfStats();
+          setSpsfStatus(`Rejected: ${reason}`, 'fail');
+          return;
+        }
+        spsfState.stats.accepted++;
+        saveSpsfStats();
+        renderSpsfStats();
+        if (els.spsfCompletionText) els.spsfCompletionText.value = '';
+        setSpsfStatus('Accepted. This may be used in the next model round.', 'ok');
+        showToast('SPSF improvement accepted.');
+      } catch (err) {
+        setSpsfStatus(`Could not submit improvement: ${err.message}`, 'fail');
+      } finally {
+        if (els.spsfSubmitExampleBtn) els.spsfSubmitExampleBtn.disabled = false;
+      }
+    }
+
+    function initSpsfContributionLane() {
+      loadSpsfStats();
+      if (els.spsfServerUrl) els.spsfServerUrl.value = localStorage.getItem(SPSF_SERVER_KEY) || 'http://127.0.0.1:8000';
+      renderSpsfPrompt();
+      renderSpsfStats();
+      if (els.spsfNextPromptBtn) els.spsfNextPromptBtn.addEventListener('click', nextSpsfPrompt);
+      if (els.spsfSubmitExampleBtn) els.spsfSubmitExampleBtn.addEventListener('click', submitSpsfImprovement);
+    }
 
     function utxoEsc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
@@ -5149,6 +5298,7 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
     let utxoReceiptArtifact = null;
     let utxoReceiptDocument = null;
     let utxoReceiptUpload = null;
+    let utxoReceiptUploadError = null;
     const UTXO_DEFAULT_RECIPIENT_KEY = 'tgbt-utxo-default-recipient';
     const UTXO_DEFAULT_ATTESTOR_KEY = 'tgbt-utxo-default-attestor';
 
@@ -5187,6 +5337,7 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
       utxoPayloadResponse = null;
       utxoReceiptDocument = null;
       utxoReceiptUpload = null;
+      utxoReceiptUploadError = null;
       if (els.utxoPayloadStatus) {
         els.utxoPayloadStatus.className = 'cert-action-status';
         els.utxoPayloadStatus.textContent = message;
@@ -5223,8 +5374,13 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
           ? 'Register Anchor -> Mint Certificate payloads are ready.'
           : data?.context?.registerAnchorAvailable
             ? 'Register Anchor payload is ready; add a wallet owner to prepare mint calldata.'
-            : 'Trustless API receipt ready; no wallet or attestor is required.';
-        els.utxoPayloadStatus.textContent = `Receipt JSON generated. Uploaded to IPFS. Metadata URI: ${metadataUri}. ${payloadState}`;
+            : 'Trustless API receipt ready; no wallet or attestor is required. Download receipt is available.';
+        const uploadState = utxoReceiptUpload?.metadataURI
+          ? `Uploaded to IPFS. Metadata URI: ${metadataUri}.`
+          : utxoReceiptUploadError
+            ? `IPFS upload skipped: ${utxoReceiptUploadError}.`
+            : 'IPFS upload not required for API receipt mode.';
+        els.utxoPayloadStatus.textContent = `Receipt JSON generated. ${uploadState} ${payloadState}`;
       }
       if (els.utxoPayloadDigests) {
         const digests = [
@@ -5509,6 +5665,7 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
         utxoPayloadResponse = null;
         utxoReceiptDocument = null;
         utxoReceiptUpload = null;
+        utxoReceiptUploadError = null;
         if (els.utxoPayloadMetadataUri) els.utxoPayloadMetadataUri.value = '';
         if (els.utxoPayloadDigests) els.utxoPayloadDigests.innerHTML = '';
         if (els.utxoVerifierPayloadBox) els.utxoVerifierPayloadBox.textContent = 'Build a payload to see the register-anchor args.';
@@ -5522,18 +5679,24 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
         if (!receipt) throw new Error('Could not build receipt JSON from the current anchor.');
         utxoReceiptDocument = receipt;
         utxoSyncReceiptActions();
-        if (els.utxoPayloadStatus) els.utxoPayloadStatus.textContent = 'Receipt JSON generated. Uploading to IPFS…';
+        if (els.utxoPayloadStatus) els.utxoPayloadStatus.textContent = 'Receipt JSON generated. Download is available. Trying IPFS upload…';
 
-        utxoReceiptUpload = await utxoUploadReceiptDocument(receipt);
-        if (els.utxoPayloadMetadataUri) els.utxoPayloadMetadataUri.value = utxoReceiptUpload.metadataURI || '';
-        if (els.utxoPayloadStatus) els.utxoPayloadStatus.textContent = `Receipt JSON generated. Uploaded to IPFS. Metadata URI: ${utxoReceiptUpload.metadataURI}. Building mint payload…`;
+        try {
+          utxoReceiptUpload = await utxoUploadReceiptDocument(receipt);
+          if (els.utxoPayloadMetadataUri) els.utxoPayloadMetadataUri.value = utxoReceiptUpload.metadataURI || '';
+          if (els.utxoPayloadStatus) els.utxoPayloadStatus.textContent = `Receipt JSON generated. Uploaded to IPFS. Metadata URI: ${utxoReceiptUpload.metadataURI}. Building payload context…`;
+        } catch (uploadErr) {
+          utxoReceiptUpload = null;
+          utxoReceiptUploadError = uploadErr.message || 'upload unavailable';
+          if (els.utxoPayloadStatus) els.utxoPayloadStatus.textContent = `Receipt JSON generated. Download is available. IPFS upload skipped: ${utxoReceiptUploadError}`;
+        }
 
         const body = {
           anchorId: scan.summary.anchorId,
           owner,
-          metadataURI: utxoReceiptUpload.metadataURI,
           certType,
         };
+        if (utxoReceiptUpload?.metadataURI) body.metadataURI = utxoReceiptUpload.metadataURI;
         if (recipient) body.recipient = recipient;
         if (attestor) body.attestor = attestor;
         if (artifactHash) body.documentHash = artifactHash;
@@ -5549,12 +5712,19 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
         utxoRenderPayloadResponse(data);
         showToast(data?.context?.mintCertificateAvailable
           ? 'Receipt generated, uploaded, and mint payload prepared.'
-          : 'Trustless Bitcoin-backed receipt generated and uploaded.');
+          : utxoReceiptUpload?.metadataURI
+            ? 'Trustless Bitcoin-backed receipt generated and uploaded.'
+            : 'Trustless Bitcoin-backed receipt generated. Download is available.');
       } catch (err) {
-        if (els.utxoPayloadStatus) els.utxoPayloadStatus.textContent = err.message || 'Failed to generate receipt.';
-        if (els.utxoPayloadStatus) els.utxoPayloadStatus.className = 'cert-action-status fail';
+        const hasReceipt = !!utxoReceiptDocument;
+        if (els.utxoPayloadStatus) {
+          els.utxoPayloadStatus.textContent = hasReceipt
+            ? `Receipt JSON generated and downloadable. Optional payload preparation failed: ${err.message || 'unknown error'}`
+            : (err.message || 'Failed to generate receipt.');
+          els.utxoPayloadStatus.className = `cert-action-status ${hasReceipt ? 'warn' : 'fail'}`;
+        }
         utxoSyncReceiptActions();
-        showToast('Receipt generation failed.');
+        showToast(hasReceipt ? 'Receipt generated. Optional payload preparation failed.' : 'Receipt generation failed.', !hasReceipt);
       } finally {
         if (btn) { btn.disabled = false; btn.textContent = 'Generate Receipt'; }
       }
@@ -5699,6 +5869,7 @@ print(proof["verifyOnChain"])  # ready to pass to your Solidity contract</code><
     // ── Event Listeners ──
 
     initProvenancePanel();
+    initSpsfContributionLane();
     els.utxoScanBtn.addEventListener('click', () => runUtxoScan());
     els.utxoScanClose.addEventListener('click', () => {
       els.utxoScanPanel.classList.add('hidden');
