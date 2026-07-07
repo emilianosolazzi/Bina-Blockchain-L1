@@ -16,3 +16,8 @@ ed25519-dalek    = { version = "2", features = ["rand_core"] }
 pqcrypto-falcon  = "0.3"
 pqcrypto-traits  = "0.3"
 rand             = "0.8"
+getrandom        = "0.2"
+zeroize          = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

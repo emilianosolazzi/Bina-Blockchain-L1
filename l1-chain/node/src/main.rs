@@ -22,6 +22,7 @@ use l1_core::randomness::{NullifierSet, RandomnessOutput};
 use l1_core::rewards::{
     block_reward, RewardLedger, HALVING_INTERVAL, HARD_CAP, INITIAL_BLOCK_REWARD,
 };
+use l1_core::secure_memory::SecureBuffer;
 use l1_core::transaction::{parse_address_hex, SignedTransaction, Transaction, ED25519_PUBLIC_KEY_BYTES};
 use peers::PeerList;
 use serde::{Deserialize, Serialize};
@@ -30,6 +31,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tower_http::cors::CorsLayer;
+use zeroize::{Zeroize, Zeroizing};
 
 const MAX_STORED: usize = 1_000; // keep last 1 000 blocks in memory
 const PORT: u16 = 8181;
@@ -1029,15 +1031,22 @@ fn load_miner_keypair() -> WalletKeypair {
             .join("wallet.json")
     };
 
+    #[derive(Deserialize)]
+    struct WalletFile {
+        secret_key: String,
+    }
+
     match std::fs::read_to_string(&wallet_path) {
         Ok(text) => {
-            let v: serde_json::Value =
+            let mut text = Zeroizing::new(text);
+            let mut wallet: WalletFile =
                 serde_json::from_str(&text).expect("wallet.json is not valid JSON");
-            let sk_hex = v["secret_key"]
-                .as_str()
-                .expect("wallet.json missing 'secret_key'");
-            let sk_bytes = hex::decode(sk_hex).expect("'secret_key' is not valid hex");
-            WalletKeypair::from_secret_bytes(&sk_bytes).expect("wallet.json secret key is corrupt")
+            let secret = SecureBuffer::from_hex(&wallet.secret_key)
+                .expect("wallet.json 'secret_key' is not valid hex");
+            wallet.secret_key.zeroize();
+            text.zeroize();
+            WalletKeypair::from_secret_bytes(secret.as_slice().expect("secure secret buffer is invalid"))
+                .expect("wallet.json secret key is corrupt")
         }
         Err(_) => {
             panic!(

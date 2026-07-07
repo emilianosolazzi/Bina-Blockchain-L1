@@ -25,9 +25,11 @@
 //!   }
 
 use l1_core::crypto::{HybridSignature, WalletKeypair, WalletPublicKey};
+use l1_core::secure_memory::SecureBuffer;
 use l1_core::transaction::{parse_address_hex, SignedTransaction, Transaction};
 use std::path::PathBuf;
 use std::{env, fs, process};
+use zeroize::{Zeroize, Zeroizing};
 
 // ─── Wallet file ─────────────────────────────────────────────────────────────
 
@@ -42,14 +44,24 @@ fn save_wallet(kp: &WalletKeypair, path: &PathBuf) {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).expect("cannot create wallet directory");
     }
-    let json = serde_json::json!({
-        "version":    1,
-        "address":    kp.address_hex(),
-        "public_key": hex::encode(kp.public_key().to_bytes()),
-        "secret_key": hex::encode(kp.to_secret_bytes()),
-    });
-    let text = serde_json::to_string_pretty(&json).unwrap();
-    fs::write(path, text).expect("cannot write wallet file");
+    let mut secret_bytes = kp.to_secret_bytes();
+    let mut secret_hex = hex::encode(&secret_bytes);
+    secret_bytes.zeroize();
+
+    let mut text = format!(
+        "{{\n  \"version\": 1,\n  \"address\": \"{}\",\n  \"public_key\": \"{}\",\n  \"secret_key\": \"{}\"\n}}",
+        kp.address_hex(),
+        hex::encode(kp.public_key().to_bytes()),
+        secret_hex,
+    );
+    fs::write(path, &text).expect("cannot write wallet file");
+    secret_hex.zeroize();
+    text.zeroize();
+}
+
+#[derive(serde::Deserialize)]
+struct WalletFile {
+    secret_key: String,
 }
 
 fn load_wallet(path: &PathBuf) -> WalletKeypair {
@@ -58,10 +70,13 @@ fn load_wallet(path: &PathBuf) -> WalletKeypair {
         eprintln!("  Run 'l1-wallet generate' to create one.");
         process::exit(1);
     });
-    let v: serde_json::Value = serde_json::from_str(&text).expect("wallet file is not valid JSON");
-    let sk_hex = v["secret_key"].as_str().expect("missing 'secret_key'");
-    let sk_bytes = hex::decode(sk_hex).expect("'secret_key' is not valid hex");
-    WalletKeypair::from_secret_bytes(&sk_bytes).unwrap_or_else(|e| {
+    let mut text = Zeroizing::new(text);
+    let mut wallet: WalletFile = serde_json::from_str(&text).expect("wallet file is not valid JSON");
+    let secret = SecureBuffer::from_hex(&wallet.secret_key).expect("'secret_key' is not valid hex");
+    wallet.secret_key.zeroize();
+    text.zeroize();
+
+    WalletKeypair::from_secret_bytes(secret.as_slice().expect("secure secret buffer is invalid")).unwrap_or_else(|e| {
         eprintln!("error: corrupt wallet file: {e}");
         process::exit(1);
     })

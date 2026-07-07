@@ -6,4 +6,5 @@ pub mod randomness;
 pub mod crypto;
 pub mod rewards;
 pub mod difficulty;
+pub mod secure_memory;
 pub mod transaction;

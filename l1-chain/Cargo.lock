@@ -663,7 +663,9 @@ dependencies = [
  "anyhow",
  "blake3",
  "ed25519-dalek",
+ "getrandom 0.2.17",
  "hex",
+ "libc",
  "pqcrypto-falcon",
  "pqcrypto-traits",
  "rand 0.8.6",
@@ -671,6 +673,7 @@ dependencies = [
  "serde_json",
  "sha3",
  "thiserror 1.0.69",
+ "zeroize",
 ]
 
 [[package]]
@@ -689,6 +692,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]
