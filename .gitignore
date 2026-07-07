@@ -87,5 +87,9 @@ l2-mining/docs/SERVER_VS_SELF_MINING.md
 
 # Bina L1 local runtime state
 l1-chain/target/
+l1-chain/Solidity/build/
+l1-chain/wallet.json
+l1-chain/**/wallet.json
+l1-chain/**/*.key
 l1-chain/data/ledger.csv
 l1-chain/logs/

@@ -2,507 +2,414 @@
 pragma solidity ^0.8.30;
 
 /**
- * @title BINAOracle
+ * @title BinaOracle
  * @author Emiliano Solazzi
- * @notice Decentralized Post-Quantum Randomness Oracle
- * @dev Any miner can submit Blake3 PoW outputs anchored to Bitcoin
- * Multiple consumers (AI, DeFi, gaming) can use the randomness
+ * @notice Utility oracle for using finalized BINA L1 randomness on EVM chains.
+ * @dev BINA L1 uses BLAKE3 PoW and Ed25519 + Falcon-512 wallet signatures.
+ *      Those proofs are verified by BINA nodes off-chain. This contract records
+ *      finalized BINA outputs relayed by authorized EVM publishers and exposes
+ *      consumer-friendly derivation helpers for DeFi, games, AI, validator
+ *      selection, and other utility use cases.
  */
-contract BINAOracle {
-    
-    // ======================== STRUCTS ========================
-    
-    struct RandomnessRecord {
-        uint256 height;
+contract BinaOracle {
+    // ======================== TYPES ========================
+
+    struct BinaOutput {
+        uint64 height;
         bytes32 blockHash;
         bytes32 randomnessOutput;
         bytes32 nullifier;
-        address minerAddress;
-        uint256 btcHeight;
+        bytes20 binaMiner;
+        uint64 btcHeight;
         bytes32 btcSeed;
-        uint256 minedTimestamp;
-        uint8 zeroBits;
-        bool powVerified;
-    }
-    
-    struct AIConsumerMetadata {
-        bytes32 purposeHash;
-        bytes32 packageHash;
-        bytes32 modelHash;
-        bytes32 datasetHash;
+        uint64 minedTimestamp;
+        uint8 workBits;
+        bytes32 claimDigest;
+        bytes32 electionScore;
     }
 
-    // Ultra-lean storage (Strictly 3 Slots to save ~40,000 gas per submission)
-    // Miner address and zeroBits are verified off-chain via logs
-    struct StoredRecord {
-        bytes32 randomnessOutput; // Slot 1
-        uint256 btcHeight;        // Slot 2
-        uint256 minedTimestamp;   // Slot 3
+    struct StoredOutput {
+        bytes32 randomnessOutput;
+        bytes32 nullifier;
+        bytes20 binaMiner;
+        uint64 height;
+        uint64 btcHeight;
+        uint64 minedTimestamp;
+        uint8 workBits;
+        address publisher;
+    }
+
+    struct UtilityRequest {
+        address requester;
+        bytes32 purpose;
+        bytes32 salt;
+        uint64 minHeight;
+        bool fulfilled;
     }
 
     // ======================== EVENTS ========================
-    
-    // Primary submission — anyone can submit
-    event RandomnessSubmitted(
+
+    event PublisherUpdated(address indexed publisher, bool authorized);
+    event BinaOutputSubmitted(
+        uint64 indexed height,
         bytes32 indexed blockHash,
-        bytes32 indexed purposeHash,
+        bytes32 indexed purpose,
         bytes32 randomnessOutput,
         bytes32 nullifier,
-        address indexed minerAddress,
-        uint8 zeroBits,
-        uint256 btcHeight,
-        uint256 minedTimestamp,
-        bytes falconSignature
+        bytes20 binaMiner,
+        address publisher
     );
-    
-    // Consumer-agnostic events
-    event RandomnessAvailable(
+    event BinaOutputMetadata(
         bytes32 indexed blockHash,
-        bytes32 randomnessOutput,
-        uint256 btcHeight,
-        address indexed minerAddress
+        uint64 btcHeight,
+        uint64 minedTimestamp,
+        uint8 workBits,
+        bytes32 claimDigest,
+        bytes32 electionScore,
+        bytes32 proofHash
     );
-    
-    // AI-specific (one of many consumers)
-    event AIRandomnessAnchored(
+    event BinaProofBundle(
         bytes32 indexed blockHash,
-        bytes32 indexed purposeHash,
-        bytes32 modelHash,
-        bytes32 randomnessOutput,
-        bytes32 packageHash,
-        bytes32 datasetHash
+        bytes proofBundle
     );
-    
-    // DeFi-specific (example)
-    event DeFiRandomnessUsed(
-        bytes32 indexed blockHash,
-        bytes32 randomnessOutput,
-        address indexed consumer,
-        string useCase
+    event PurposeSeedUpdated(bytes32 indexed purpose, bytes32 seed, uint64 height, bytes32 blockHash);
+    event UtilityRequested(
+        uint256 indexed requestId,
+        address indexed requester,
+        bytes32 indexed purpose,
+        bytes32 salt,
+        uint64 minHeight
     );
-    
-    // Gaming-specific (example)
-    event GamingRandomnessUsed(
-        bytes32 indexed blockHash,
-        bytes32 randomnessOutput,
-        address indexed consumer,
-        uint256 gameId
-    );
-    
-    // Slashing
-    event InvalidSignatureDetected(
-        bytes32 indexed blockHash,
-        address indexed submitter,
-        bytes32 nullifier,
-        string reason
+    event UtilityFulfilled(
+        uint256 indexed requestId,
+        bytes32 indexed purpose,
+        bytes32 seed,
+        bytes32 utilityWord,
+        uint64 height
     );
 
-    // Additional Core Tracking Events
-    event ValidatorSelectionUpdated(
-        uint256 indexed round,
-        bytes32 seed,
-        uint256 btcHeight
-    );
-    
-    event BatchSeedUpdated(
-        bytes32 indexed purposeHash,
-        bytes32 seed,
-        uint256 btcHeight
-    );
-    
-    event BlockAnchored(
-        uint256 indexed height,
-        bytes32 blockHash,
-        bytes32 parentEthBlockHash,
-        bytes32 randomnessOutput,
-        uint256 btcHeight
-    );
+    // ======================== ERRORS ========================
+
+    error NotOwner();
+    error NotPublisher();
+    error ZeroAddress();
+    error ZeroValue();
+    error InvalidTimestamp();
+    error InvalidWorkBits();
+    error AlreadySubmitted();
+    error NullifierAlreadyUsed();
+    error OutputNotFound();
+    error PurposeNotReady();
+    error RequestNotFound();
+    error RequestAlreadyFulfilled();
+    error InvalidUpperBound();
 
     // ======================== CONSTANTS ========================
-    
-    bytes32 private constant PURPOSE_VALIDATOR_SELECTION = keccak256(bytes("SPSF_VALIDATOR_SELECTION"));
-    bytes32 private constant PURPOSE_BATCH_SEED = keccak256(bytes("SPSF_VALIDATION_BATCH_SEED"));
-    
-    uint256 private constant MAX_TIMESTAMP_DRIFT = 3600;
-    uint256 private constant MAX_TIMESTAMP_AGE = 86400;
-    
-    // Minimum difficulty for submission (anyone can mine)
-    uint8 public constant MIN_ZERO_BITS = 22;
-    uint8 public constant MAX_ZERO_BITS = 45;
-    
-    // ======================== IMMUTABLE STATE ========================
-    
-    // No single trusted miner — anyone can submit
-    // But we keep a registry of known miners for reputation
-    mapping(address => bool) public registeredMiners;
-    mapping(address => uint256) public minerSubmissionCount;
-    mapping(address => uint256) public minerLastSubmission;
-    
+
+    bytes32 public constant PURPOSE_GENERIC = keccak256("BINA_GENERIC_UTILITY");
+    bytes32 public constant PURPOSE_VALIDATOR_SELECTION = keccak256("BINA_VALIDATOR_SELECTION");
+    bytes32 public constant PURPOSE_BATCH_SEED = keccak256("BINA_BATCH_SEED");
+    bytes32 public constant PURPOSE_DEFI = keccak256("BINA_DEFI");
+    bytes32 public constant PURPOSE_GAMING = keccak256("BINA_GAMING");
+    bytes32 public constant PURPOSE_AI = keccak256("BINA_AI");
+
+    uint8 public constant MIN_WORK_BITS = 22;
+    uint8 public constant MAX_WORK_BITS = 64;
+    uint256 public constant MAX_TIMESTAMP_DRIFT = 1 hours;
+    uint256 public constant MAX_TIMESTAMP_AGE = 7 days;
+
     // ======================== STORAGE ========================
-    
-    mapping(bytes32 => StoredRecord) public recordsByBlockHash;
-    mapping(bytes32 => bytes32) public latestSeedByPurpose;
-    mapping(bytes32 => uint256) public latestBTCHeightByPurpose;
+
+    address public owner;
+    mapping(address => bool) public publishers;
+
+    mapping(bytes32 => StoredOutput) public outputsByBlockHash;
     mapping(bytes32 => bool) public usedNullifiers;
-    mapping(uint256 => bytes32) public validatorSeedByRound;
-    uint256 public currentValidatorRound;
-    
-    // Track all submissions (any consumer)
-    bytes32[] public allBlockHashes;  // Limited to prevent bloat
-    uint256 public constant MAX_BLOCK_HISTORY = 10000;
-    
+    mapping(bytes32 => bytes32) public latestSeedByPurpose;
+    mapping(bytes32 => bytes32) public latestBlockByPurpose;
+    mapping(bytes32 => uint64) public latestHeightByPurpose;
+    mapping(bytes32 => uint64) public latestBTCHeightByPurpose;
+
+    bytes32[] public blockHashes;
+    mapping(uint256 => UtilityRequest) public requests;
+    uint256 public nextRequestId = 1;
+
+    // ======================== MODIFIERS ========================
+
+    modifier onlyOwner() {
+        if (msg.sender != owner) revert NotOwner();
+        _;
+    }
+
+    modifier onlyPublisher() {
+        if (!publishers[msg.sender]) revert NotPublisher();
+        _;
+    }
+
     // ======================== CONSTRUCTOR ========================
-    
-    constructor() {
-        currentValidatorRound = 0;
-    }
-    
-    // ======================== MINER REGISTRATION ========================
-    
-    /**
-     * @notice Register as a BINA miner (optional, for reputation)
-     */
-    function registerMiner() external {
-        registeredMiners[msg.sender] = true;
-    }
-    
-    /**
-     * @notice Check if an address is a registered miner
-     */
-    function isRegisteredMiner(address _miner) external view returns (bool) {
-        return registeredMiners[_miner];
+
+    constructor(address initialPublisher) {
+        owner = msg.sender;
+        publishers[msg.sender] = true;
+        emit PublisherUpdated(msg.sender, true);
+
+        if (initialPublisher != address(0) && initialPublisher != msg.sender) {
+            publishers[initialPublisher] = true;
+            emit PublisherUpdated(initialPublisher, true);
+        }
     }
 
-    // ======================== CORE FUNCTIONS ========================
+    // ======================== ADMIN ========================
+
+    function transferOwnership(address newOwner) external onlyOwner {
+        if (newOwner == address(0)) revert ZeroAddress();
+        owner = newOwner;
+    }
+
+    function setPublisher(address publisher, bool authorized) external onlyOwner {
+        if (publisher == address(0)) revert ZeroAddress();
+        publishers[publisher] = authorized;
+        emit PublisherUpdated(publisher, authorized);
+    }
+
+    // ======================== BINA OUTPUT INGESTION ========================
 
     /**
-     * @notice Submit randomness from ANY BINA miner
-     * @dev Anyone with a valid Blake3 PoW + Falcon signature can submit
-     * This is the decentralized entry point
+     * @notice Relay a finalized BINA L1 output into the EVM oracle.
+     * @param output Finalized BINA output from the L1 node/P2P network.
+     * @param purpose Utility namespace this output should update.
+     * @param proofBundle Opaque BINA proof material for off-chain audit
+     *        (for example public key, hybrid signature, serialized header, and
+     *        BINA peer/election metadata). EVM storage keeps compact facts only.
      */
-    function submitRandomness(
-        RandomnessRecord calldata _record,
-        bytes calldata _falconSignature,
-        string calldata _consumerTag  // "AI", "DeFi", "Gaming", "Generic"
-    ) external {
-        // 1. Anyone can submit — but we track who
-        require(_record.minerAddress == msg.sender, "BINAOracle: sender must match miner address");
-        
-        // 2. Basic validation
-        require(!usedNullifiers[_record.nullifier], "BINAOracle: nullifier already spent");
-        usedNullifiers[_record.nullifier] = true;
-        
-        require(_record.minedTimestamp <= block.timestamp + MAX_TIMESTAMP_DRIFT, 
-            "BINAOracle: timestamp too far in future");
-        require(_record.minedTimestamp >= block.timestamp - MAX_TIMESTAMP_AGE, 
-            "BINAOracle: timestamp too old");
-        require(_record.zeroBits >= MIN_ZERO_BITS && _record.zeroBits <= MAX_ZERO_BITS, 
-            "BINAOracle: zero bits out of range");
-        
-        // 3. Store minimized data (3 slots only)
-        recordsByBlockHash[_record.blockHash] = StoredRecord({
-            randomnessOutput: _record.randomnessOutput,
-            btcHeight: _record.btcHeight,
-            minedTimestamp: _record.minedTimestamp
+    function submitOutput(
+        BinaOutput calldata output,
+        bytes32 purpose,
+        bytes calldata proofBundle
+    ) external onlyPublisher {
+        _validateOutput(output);
+
+        if (outputsByBlockHash[output.blockHash].randomnessOutput != bytes32(0)) {
+            revert AlreadySubmitted();
+        }
+        if (usedNullifiers[output.nullifier]) revert NullifierAlreadyUsed();
+
+        outputsByBlockHash[output.blockHash] = StoredOutput({
+            randomnessOutput: output.randomnessOutput,
+            nullifier: output.nullifier,
+            binaMiner: output.binaMiner,
+            height: output.height,
+            btcHeight: output.btcHeight,
+            minedTimestamp: output.minedTimestamp,
+            workBits: output.workBits,
+            publisher: msg.sender
         });
-        
-        // 4. Track miner stats
-        minerSubmissionCount[msg.sender]++;
-        minerLastSubmission[msg.sender] = block.timestamp;
-        if (!registeredMiners[msg.sender]) {
-            registeredMiners[msg.sender] = true;  // Auto-register
-        }
-        
-        // 5. Limit history to prevent bloat
-        if (allBlockHashes.length < MAX_BLOCK_HISTORY) {
-            allBlockHashes.push(_record.blockHash);
-        }
-        
-        // 6. Generic randomness available event (any consumer can use)
-        emit RandomnessAvailable(
-            _record.blockHash,
-            _record.randomnessOutput,
-            _record.btcHeight,
-            msg.sender
-        );
-        
-        // 7. Consumer-specific handling
-        bytes32 purposeHash;
-        
-        // Try to parse purpose from _consumerTag (if it's a known purpose)
-        bytes32 tagHash = keccak256(bytes(_consumerTag));
-        
-        if (tagHash == keccak256(bytes("VALIDATOR_SELECTION"))) {
-            purposeHash = PURPOSE_VALIDATOR_SELECTION;
-            currentValidatorRound++;
-            validatorSeedByRound[currentValidatorRound] = _record.randomnessOutput;
-            
-            emit ValidatorSelectionUpdated(
-                currentValidatorRound,
-                _record.randomnessOutput,
-                _record.btcHeight
-            );
-        } else if (tagHash == keccak256(bytes("BATCH_SEED"))) {
-            purposeHash = PURPOSE_BATCH_SEED;
-            emit BatchSeedUpdated(
-                purposeHash,
-                _record.randomnessOutput,
-                _record.btcHeight
-            );
-        } else if (tagHash == keccak256(bytes("AI"))) {
-            // AI-specific handling — but we need metadata
-            // For AI, they should call submitAIRandomness separately
-            purposeHash = keccak256(bytes("SPSF_AI"));
-        } else if (tagHash == keccak256(bytes("DEFI"))) {
-            emit DeFiRandomnessUsed(
-                _record.blockHash,
-                _record.randomnessOutput,
-                msg.sender,
-                "generic_deFi"
-            );
-        } else if (tagHash == keccak256(bytes("GAMING"))) {
-            emit GamingRandomnessUsed(
-                _record.blockHash,
-                _record.randomnessOutput,
-                msg.sender,
-                0  // gameId can be set separately
-            );
-        } else {
-            // Generic purpose — derive from tag
-            purposeHash = keccak256(bytes(_consumerTag));
-        }
-        
-        // 8. Update latest seed for this purpose
-        latestSeedByPurpose[purposeHash] = _record.randomnessOutput;
-        latestBTCHeightByPurpose[purposeHash] = _record.btcHeight;
-        
-        // 9. Core event with Falcon signature (always emitted for verification)
-        emit RandomnessSubmitted(
-            _record.blockHash,
-            purposeHash,
-            _record.randomnessOutput,
-            _record.nullifier,
-            msg.sender,
-            _record.zeroBits,
-            _record.btcHeight,
-            _record.minedTimestamp,
-            _falconSignature
-        );
-        
-        emit BlockAnchored(
-            _record.height,
-            _record.blockHash,
-            blockhash(block.number - 1),
-            _record.randomnessOutput,
-            _record.btcHeight
-        );
+        usedNullifiers[output.nullifier] = true;
+        blockHashes.push(output.blockHash);
+
+        bytes32 effectivePurpose = purpose == bytes32(0) ? PURPOSE_GENERIC : purpose;
+        _updatePurposeSeed(effectivePurpose, output.randomnessOutput, output.height, output.btcHeight, output.blockHash);
+
+        _emitOutputEvents(output, effectivePurpose, proofBundle);
     }
-    
-    /**
-     * @notice AI-specific submission with full metadata
-     * @dev Separate function for AI consumers to attach metadata
-     */
-    function submitAIRandomness(
-        RandomnessRecord calldata _record,
-        AIConsumerMetadata calldata _aiMeta,
-        bytes calldata _falconSignature
-    ) external {
-        // Same validation as above
-        require(_record.minerAddress == msg.sender, "BINAOracle: sender must match miner address");
-        require(!usedNullifiers[_record.nullifier], "BINAOracle: nullifier already spent");
-        usedNullifiers[_record.nullifier] = true;
-        
-        require(_record.minedTimestamp <= block.timestamp + MAX_TIMESTAMP_DRIFT, 
-            "BINAOracle: timestamp too far in future");
-        require(_record.minedTimestamp >= block.timestamp - MAX_TIMESTAMP_AGE, 
-            "BINAOracle: timestamp too old");
-        require(_record.zeroBits >= MIN_ZERO_BITS && _record.zeroBits <= MAX_ZERO_BITS, 
-            "BINAOracle: zero bits out of range");
-        
-        // Store minimized data
-        recordsByBlockHash[_record.blockHash] = StoredRecord({
-            randomnessOutput: _record.randomnessOutput,
-            btcHeight: _record.btcHeight,
-            minedTimestamp: _record.minedTimestamp
+
+    function submitOutputForPurposes(
+        BinaOutput calldata output,
+        bytes32[] calldata purposes,
+        bytes calldata proofBundle
+    ) external onlyPublisher {
+        _validateOutput(output);
+
+        if (outputsByBlockHash[output.blockHash].randomnessOutput != bytes32(0)) {
+            revert AlreadySubmitted();
+        }
+        if (usedNullifiers[output.nullifier]) revert NullifierAlreadyUsed();
+        if (purposes.length == 0) revert ZeroValue();
+
+        outputsByBlockHash[output.blockHash] = StoredOutput({
+            randomnessOutput: output.randomnessOutput,
+            nullifier: output.nullifier,
+            binaMiner: output.binaMiner,
+            height: output.height,
+            btcHeight: output.btcHeight,
+            minedTimestamp: output.minedTimestamp,
+            workBits: output.workBits,
+            publisher: msg.sender
         });
-        
-        minerSubmissionCount[msg.sender]++;
-        minerLastSubmission[msg.sender] = block.timestamp;
-        
-        if (allBlockHashes.length < MAX_BLOCK_HISTORY) {
-            allBlockHashes.push(_record.blockHash);
+        usedNullifiers[output.nullifier] = true;
+        blockHashes.push(output.blockHash);
+
+        for (uint256 i = 0; i < purposes.length; i++) {
+            bytes32 purpose = purposes[i] == bytes32(0) ? PURPOSE_GENERIC : purposes[i];
+            _updatePurposeSeed(purpose, output.randomnessOutput, output.height, output.btcHeight, output.blockHash);
+            _emitOutputEvents(output, purpose, proofBundle);
         }
-        
-        bytes32 purposeHash = _aiMeta.purposeHash;
-        
-        // Check if it's validator selection
-        if (purposeHash == PURPOSE_VALIDATOR_SELECTION) {
-            currentValidatorRound++;
-            validatorSeedByRound[currentValidatorRound] = _record.randomnessOutput;
-            
-            emit ValidatorSelectionUpdated(
-                currentValidatorRound,
-                _record.randomnessOutput,
-                _record.btcHeight
-            );
-        } else if (purposeHash == PURPOSE_BATCH_SEED) {
-            emit BatchSeedUpdated(
-                purposeHash,
-                _record.randomnessOutput,
-                _record.btcHeight
-            );
-        }
-        
-        // Update latest seed
-        latestSeedByPurpose[purposeHash] = _record.randomnessOutput;
-        latestBTCHeightByPurpose[purposeHash] = _record.btcHeight;
-        
-        // AI-specific event with full metadata
-        emit AIRandomnessAnchored(
-            _record.blockHash,
-            purposeHash,
-            _aiMeta.modelHash,
-            _record.randomnessOutput,
-            _aiMeta.packageHash,
-            _aiMeta.datasetHash
-        );
-        
-        // Core event
-        emit RandomnessSubmitted(
-            _record.blockHash,
-            purposeHash,
-            _record.randomnessOutput,
-            _record.nullifier,
-            msg.sender,
-            _record.zeroBits,
-            _record.btcHeight,
-            _record.minedTimestamp,
-            _falconSignature
-        );
-        
-        emit BlockAnchored(
-            _record.height,
-            _record.blockHash,
-            blockhash(block.number - 1),
-            _record.randomnessOutput,
-            _record.btcHeight
-        );
     }
 
-    // ======================== VIEW FUNCTIONS ========================
-    
-    function getStoredRecordByBlock(bytes32 _blockHash) external view returns (
-        bytes32 randomnessOutput,
-        uint256 btcHeight,
-        uint256 timestamp
-    ) {
-        StoredRecord storage rec = recordsByBlockHash[_blockHash];
-        require(rec.randomnessOutput != bytes32(0), "BINAOracle: block not found");
-        return (rec.randomnessOutput, rec.btcHeight, rec.minedTimestamp);
-    }
-    
-    function getLatestSeed(string calldata _purpose) external view returns (
-        bytes32 seed,
-        uint256 btcHeight
-    ) {
-        bytes32 purposeHash = keccak256(bytes(_purpose));
-        return (latestSeedByPurpose[purposeHash], latestBTCHeightByPurpose[purposeHash]);
-    }
-    
-    function getLatestSeedByHash(bytes32 _purposeHash) external view returns (
-        bytes32 seed,
-        uint256 btcHeight
-    ) {
-        return (latestSeedByPurpose[_purposeHash], latestBTCHeightByPurpose[_purposeHash]);
-    }
-    
-    function getValidatorSeed(uint256 _round) external view returns (bytes32) {
-        require(_round <= currentValidatorRound, "BINAOracle: round not found");
-        return validatorSeedByRound[_round];
-    }
-    
-    function getLatestValidatorSeed() external view returns (bytes32, uint256) {
-        return (validatorSeedByRound[currentValidatorRound], currentValidatorRound);
-    }
-    
-    function isNullifierUsed(bytes32 _nullifier) external view returns (bool) {
-        return usedNullifiers[_nullifier];
-    }
-    
-    function getValidatorRoundCount() external view returns (uint256) {
-        return currentValidatorRound;
-    }
-    
-    function getMinerStats(address _miner) external view returns (
-        uint256 submissions,
-        uint256 lastSubmission,
-        bool registered
-    ) {
-        return (minerSubmissionCount[_miner], minerLastSubmission[_miner], registeredMiners[_miner]);
-    }
-    
-    function getBlockCount() external view returns (uint256) {
-        return allBlockHashes.length;
-    }
-    
-    function getBlockHash(uint256 _index) external view returns (bytes32) {
-        require(_index < allBlockHashes.length, "BINAOracle: index out of bounds");
-        return allBlockHashes[_index];
+    // ======================== UTILITY REQUESTS ========================
+
+    function requestUtility(bytes32 purpose, bytes32 salt, uint64 minHeight) external returns (uint256 requestId) {
+        requestId = nextRequestId++;
+        bytes32 effectivePurpose = purpose == bytes32(0) ? PURPOSE_GENERIC : purpose;
+        requests[requestId] = UtilityRequest({
+            requester: msg.sender,
+            purpose: effectivePurpose,
+            salt: salt,
+            minHeight: minHeight,
+            fulfilled: false
+        });
+        emit UtilityRequested(requestId, msg.sender, effectivePurpose, salt, minHeight);
     }
 
-    // ======================== UTILITY FUNCTIONS ========================
-    
-    function shuffleValidators(
-        bytes32 _seed,
-        address[] memory _validators
-    ) external pure returns (address[] memory) {
-        uint256 n = _validators.length;
-        if (n == 0) return _validators;
-        
+    function fulfillUtility(uint256 requestId) external returns (bytes32 utilityWord) {
+        UtilityRequest storage request = requests[requestId];
+        if (request.requester == address(0)) revert RequestNotFound();
+        if (request.fulfilled) revert RequestAlreadyFulfilled();
+
+        bytes32 seed = latestSeedByPurpose[request.purpose];
+        if (seed == bytes32(0) || latestHeightByPurpose[request.purpose] < request.minHeight) {
+            revert PurposeNotReady();
+        }
+
+        request.fulfilled = true;
+        utilityWord = _derive(seed, request.purpose, request.salt, request.requester, requestId);
+        emit UtilityFulfilled(requestId, request.purpose, seed, utilityWord, latestHeightByPurpose[request.purpose]);
+    }
+
+    // ======================== VIEW HELPERS ========================
+
+    function getOutput(bytes32 blockHash) external view returns (StoredOutput memory output) {
+        output = outputsByBlockHash[blockHash];
+        if (output.randomnessOutput == bytes32(0)) revert OutputNotFound();
+    }
+
+    function getLatestSeed(bytes32 purpose) public view returns (bytes32 seed, uint64 height, uint64 btcHeight, bytes32 blockHash) {
+        bytes32 effectivePurpose = purpose == bytes32(0) ? PURPOSE_GENERIC : purpose;
+        seed = latestSeedByPurpose[effectivePurpose];
+        if (seed == bytes32(0)) revert PurposeNotReady();
+        height = latestHeightByPurpose[effectivePurpose];
+        btcHeight = latestBTCHeightByPurpose[effectivePurpose];
+        blockHash = latestBlockByPurpose[effectivePurpose];
+    }
+
+    function deriveWord(bytes32 purpose, bytes32 salt, address consumer) public view returns (bytes32) {
+        (bytes32 seed,,,) = getLatestSeed(purpose);
+        bytes32 effectivePurpose = purpose == bytes32(0) ? PURPOSE_GENERIC : purpose;
+        return _derive(seed, effectivePurpose, salt, consumer, 0);
+    }
+
+    function randomUint(bytes32 purpose, bytes32 salt, uint256 upperBound) external view returns (uint256) {
+        if (upperBound == 0) revert InvalidUpperBound();
+        return uint256(deriveWord(purpose, salt, msg.sender)) % upperBound;
+    }
+
+    function blockCount() external view returns (uint256) {
+        return blockHashes.length;
+    }
+
+    function blockHashAt(uint256 index) external view returns (bytes32) {
+        return blockHashes[index];
+    }
+
+    // ======================== PURE UTILITY HELPERS ========================
+
+    function shuffleValidators(bytes32 seed, address[] memory validators) external pure returns (address[] memory) {
+        uint256 n = validators.length;
         address[] memory shuffled = new address[](n);
         for (uint256 i = 0; i < n; i++) {
-            shuffled[i] = _validators[i];
+            shuffled[i] = validators[i];
         }
-        
+        if (n < 2) return shuffled;
+
         for (uint256 i = n - 1; i > 0; i--) {
-            bytes32 hash = keccak256(abi.encodePacked(_seed, i));
-            uint256 j = uint256(hash) % (i + 1);
+            uint256 j = uint256(keccak256(abi.encodePacked("BINA_SHUFFLE", seed, i))) % (i + 1);
             (shuffled[i], shuffled[j]) = (shuffled[j], shuffled[i]);
         }
         return shuffled;
     }
-    
-    function generateBatchId(
-        bytes32 _seed,
-        bytes32 _txMerkleRoot
-    ) external pure returns (bytes32) {
-        return keccak256(abi.encodePacked(_seed, _txMerkleRoot));
-    }
-    
-    function generateValidatorSetId(
-        bytes32 _seed,
-        uint256 _validatorCount
-    ) external pure returns (bytes32) {
-        return keccak256(abi.encodePacked(_seed, _validatorCount));
+
+    function generateBatchId(bytes32 seed, bytes32 txMerkleRoot) external pure returns (bytes32) {
+        return keccak256(abi.encodePacked("BINA_BATCH", seed, txMerkleRoot));
     }
 
-    // ======================== SLASHING ========================
-    
-    function reportInvalidSignature(
-        bytes32 _blockHash,
-        bytes32 _nullifier,
-        string calldata _reason
-    ) external {
-        require(recordsByBlockHash[_blockHash].randomnessOutput != bytes32(0), 
-            "BINAOracle: block not found");
-        require(usedNullifiers[_nullifier], 
-            "BINAOracle: nullifier not used");
-        
-        emit InvalidSignatureDetected(
-            _blockHash,
-            msg.sender,
-            _nullifier,
-            _reason
+    function generateValidatorSetId(bytes32 seed, uint256 validatorCount) external pure returns (bytes32) {
+        return keccak256(abi.encodePacked("BINA_VALIDATOR_SET", seed, validatorCount));
+    }
+
+    // ======================== INTERNALS ========================
+
+    function _validateOutput(BinaOutput calldata output) internal view {
+        if (output.height == 0) revert ZeroValue();
+        if (output.blockHash == bytes32(0)) revert ZeroValue();
+        if (output.randomnessOutput == bytes32(0)) revert ZeroValue();
+        if (output.nullifier == bytes32(0)) revert ZeroValue();
+        if (output.binaMiner == bytes20(0)) revert ZeroValue();
+        if (output.btcSeed == bytes32(0)) revert ZeroValue();
+        if (output.claimDigest == bytes32(0)) revert ZeroValue();
+        if (output.workBits < MIN_WORK_BITS || output.workBits > MAX_WORK_BITS) revert InvalidWorkBits();
+        if (output.minedTimestamp > block.timestamp + MAX_TIMESTAMP_DRIFT) revert InvalidTimestamp();
+        if (output.minedTimestamp + MAX_TIMESTAMP_AGE < block.timestamp) revert InvalidTimestamp();
+    }
+
+    function _updatePurposeSeed(
+        bytes32 purpose,
+        bytes32 seed,
+        uint64 height,
+        uint64 btcHeight,
+        bytes32 blockHash
+    ) internal {
+        latestSeedByPurpose[purpose] = seed;
+        latestHeightByPurpose[purpose] = height;
+        latestBTCHeightByPurpose[purpose] = btcHeight;
+        latestBlockByPurpose[purpose] = blockHash;
+        emit PurposeSeedUpdated(purpose, seed, height, blockHash);
+    }
+
+    function _emitOutputEvents(
+        BinaOutput calldata output,
+        bytes32 purpose,
+        bytes calldata proofBundle
+    ) internal {
+        bytes32 proofHash = keccak256(proofBundle);
+        emit BinaOutputSubmitted(
+            output.height,
+            output.blockHash,
+            purpose,
+            output.randomnessOutput,
+            output.nullifier,
+            output.binaMiner,
+            msg.sender
+        );
+        emit BinaOutputMetadata(
+            output.blockHash,
+            output.btcHeight,
+            output.minedTimestamp,
+            output.workBits,
+            output.claimDigest,
+            output.electionScore,
+            proofHash
+        );
+        emit BinaProofBundle(output.blockHash, proofBundle);
+    }
+
+    function _derive(
+        bytes32 seed,
+        bytes32 purpose,
+        bytes32 salt,
+        address consumer,
+        uint256 requestId
+    ) internal view returns (bytes32) {
+        return keccak256(
+            abi.encodePacked(
+                "BINA_EVM_UTILITY_V1",
+                block.chainid,
+                address(this),
+                seed,
+                purpose,
+                salt,
+                consumer,
+                requestId
+            )
         );
     }
 }
