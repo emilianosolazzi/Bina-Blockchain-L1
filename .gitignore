@@ -91,5 +91,6 @@ l1-chain/Solidity/build/
 l1-chain/wallet.json
 l1-chain/**/wallet.json
 l1-chain/**/*.key
+l1-chain/data/chain-state.json
 l1-chain/data/ledger.csv
 l1-chain/logs/

@@ -340,6 +340,37 @@ mod tests {
     }
 
     #[test]
+    fn ledger_applies_ed25519_only_transaction_to_native_wallet() {
+        let tmp = std::env::temp_dir().join("bina_test_ed25519_tx_ledger.csv");
+        let _ = std::fs::remove_file(&tmp);
+
+        let sender = ed25519_dalek::SigningKey::from_bytes(&[11u8; 32]);
+        let recipient = crate::crypto::WalletKeypair::generate();
+        let sender_address = crate::transaction::ed25519_only_address(
+            sender.verifying_key().as_bytes(),
+        ).unwrap();
+        let sender_hex = hex::encode(sender_address);
+        let recipient_hex = recipient.address_hex();
+
+        let mut ledger = RewardLedger::open(&tmp).unwrap();
+        ledger.credit(1, &sender_hex, 100, 1_000_000).unwrap();
+        let tx = crate::transaction::Transaction::new(sender_address, recipient.address(), 40, 0, 1);
+        let signed = crate::transaction::SignedTransaction::sign_ed25519_only(tx, &sender).unwrap();
+        ledger.apply_transaction(2, &signed, "", 1_000_004).unwrap();
+
+        assert_eq!(ledger.balance(&sender_hex), 59);
+        assert_eq!(ledger.balance(&recipient_hex), 40);
+        assert_eq!(ledger.nonce(&sender_hex), 1);
+
+        let reloaded = RewardLedger::open(&tmp).unwrap();
+        assert_eq!(reloaded.balance(&sender_hex), 59);
+        assert_eq!(reloaded.balance(&recipient_hex), 40);
+        assert_eq!(reloaded.nonce(&sender_hex), 1);
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
     fn ledger_rejects_replayed_nonce() {
         let tmp = std::env::temp_dir().join("bina_test_tx_replay_ledger.csv");
         let _ = std::fs::remove_file(&tmp);

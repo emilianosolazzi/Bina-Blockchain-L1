@@ -22,11 +22,12 @@ use l1_core::randomness::{NullifierSet, RandomnessOutput};
 use l1_core::rewards::{
     block_reward, RewardLedger, HALVING_INTERVAL, HARD_CAP, INITIAL_BLOCK_REWARD,
 };
+use l1_core::transaction::{parse_address_hex, SignedTransaction, Transaction, ED25519_PUBLIC_KEY_BYTES};
 use peers::PeerList;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tower_http::cors::CorsLayer;
 
@@ -36,6 +37,7 @@ const NETWORK_ID: &str = "bina-l1";
 const DEFAULT_P2P_TTL: u8 = 8;
 const MAX_PEERS: usize = 128;
 const LEDGER_PATH: &str = "data/ledger.csv";
+const CHAIN_STATE_PATH: &str = "data/chain-state.json";
 const SUBMISSION_GRACE_MS: u64 = 1_500;
 const MAX_FUTURE_BLOCK_SECS: u64 = 30;
 
@@ -70,6 +72,7 @@ struct BlockRecord {
 struct NodeState {
     genesis_hash: [u8; 32],
     tip_hash: [u8; 32],
+    chain_height: u64,
     blocks: VecDeque<BlockRecord>,
     pending_claims: HashMap<u64, HashMap<String, SignedBlockClaim>>,
     nullifiers: NullifierSet,
@@ -90,6 +93,7 @@ struct NodeState {
 }
 
 type SharedState = Arc<RwLock<NodeState>>;
+type SharedLedger = Arc<Mutex<RewardLedger>>;
 
 #[derive(Clone)]
 struct AcceptedClaim {
@@ -105,6 +109,51 @@ struct ClaimReject {
     message: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ChainStateFile {
+    version: u32,
+    network: String,
+    genesis_hash: String,
+    tip_hash: String,
+    height: u64,
+    updated_at: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct SignedTransactionPayload {
+    from: String,
+    to: String,
+    amount: u64,
+    nonce: u64,
+    fee: u64,
+    public_key: String,
+    signature: String,
+}
+
+impl SignedTransactionPayload {
+    fn into_signed_transaction(self) -> anyhow::Result<SignedTransaction> {
+        let from = parse_address_hex(&self.from)?;
+        let to = parse_address_hex(&self.to)?;
+        let public_key = hex::decode(&self.public_key)
+            .map_err(|e| anyhow::anyhow!("public_key is not valid hex: {e}"))?;
+        let signature = hex::decode(&self.signature)
+            .map_err(|e| anyhow::anyhow!("signature is not valid hex: {e}"))?;
+        Ok(SignedTransaction {
+            tx: Transaction::new(from, to, self.amount, self.nonce, self.fee),
+            public_key,
+            signature,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LoadedChainState {
+    genesis_hash: [u8; 32],
+    tip_hash: [u8; 32],
+    height: u64,
+    created: bool,
+}
+
 impl ClaimReject {
     fn new(status: StatusCode, message: impl Into<String>) -> Self {
         Self {
@@ -118,7 +167,7 @@ impl ClaimReject {
 
 async fn handle_status(State(s): State<SharedState>) -> Json<serde_json::Value> {
     let s = s.read().unwrap();
-    let height = s.blocks.back().map(|b| b.height).unwrap_or(0);
+    let height = s.chain_height;
     let uptime = s.started_at.elapsed().as_secs();
     let avg_mhs = if s.total_time_ms > 0 {
         (s.total_hashes as f64 / 1e6) / (s.total_time_ms as f64 / 1e3)
@@ -145,6 +194,7 @@ async fn handle_status(State(s): State<SharedState>) -> Json<serde_json::Value> 
         "btc_fork_seen":      s.btc_fork,
         "nullifiers_spent":   s.nullifiers.len(),
         "genesis_hash":       hex::encode(s.genesis_hash),
+        "tip_hash":           hex::encode(s.tip_hash),
         "last_difficulty_adjustment": s.last_adjustment,
     }))
 }
@@ -253,6 +303,47 @@ async fn handle_submit_claim(
     })))
 }
 
+async fn handle_submit_transaction(
+    State(s): State<SharedState>,
+    Extension(ledger): Extension<SharedLedger>,
+    Json(payload): Json<SignedTransactionPayload>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let signed = payload
+        .into_signed_transaction()
+        .map_err(|e| json_error(StatusCode::BAD_REQUEST, format!("invalid transaction payload: {e}")))?;
+    let signature_mode = if signed.public_key.len() == ED25519_PUBLIC_KEY_BYTES {
+        "ed25519-only"
+    } else {
+        "hybrid"
+    };
+    let (height, miner_address) = {
+        let state = s.read().unwrap();
+        (state.chain_height, state.miner_address.clone())
+    };
+    let timestamp = unix_secs();
+
+    let mut ledger = ledger
+        .lock()
+        .map_err(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "ledger lock poisoned"))?;
+    ledger
+        .apply_transaction(height, &signed, &miner_address, timestamp)
+        .map_err(|e| json_error(StatusCode::BAD_REQUEST, format!("transaction rejected: {e}")))?;
+
+    Ok(Json(serde_json::json!({
+        "status": "accepted",
+        "tx_id": signed.tx_id_hex(),
+        "from": signed.from_hex(),
+        "to": signed.to_hex(),
+        "amount": signed.tx.amount,
+        "fee": signed.tx.fee,
+        "nonce": signed.tx.nonce,
+        "signature_mode": signature_mode,
+        "from_balance_bina": ledger.balance(&signed.from_hex()),
+        "to_balance_bina": ledger.balance(&signed.to_hex()),
+        "height": height,
+    })))
+}
+
 async fn handle_p2p_message(
     State(s): State<SharedState>,
     Extension(gossip): Extension<Arc<Gossip>>,
@@ -336,7 +427,7 @@ fn accept_signed_claim(state: &SharedState, claim: SignedBlockClaim) -> Result<A
         ));
     }
 
-    let next_height = state.blocks.back().map(|b| b.height + 1).unwrap_or(1);
+    let next_height = state.chain_height + 1;
     if height != next_height {
         return Err(ClaimReject::new(
             StatusCode::CONFLICT,
@@ -388,32 +479,27 @@ fn accept_signed_claim(state: &SharedState, claim: SignedBlockClaim) -> Result<A
 
 // GET /wallet/:address/balance
 async fn handle_wallet_balance(
-    State(s): State<SharedState>,
     Path(address): Path<String>,
-) -> Json<serde_json::Value> {
-    let state = s.read().unwrap();
-    // Sum from the in-memory block records (persistent totals come from ledger on disk)
-    let balance: u64 = state
-        .blocks
-        .iter()
-        .filter(|b| b.miner_address == address)
-        .map(|b| b.reward_bina)
-        .sum();
-    Json(serde_json::json!({
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let ledger = RewardLedger::open(LEDGER_PATH)
+        .map_err(|e| json_error(StatusCode::INTERNAL_SERVER_ERROR, format!("ledger unavailable: {e}")))?;
+    let balance = ledger.balance(&address);
+    let nonce = ledger.nonce(&address);
+    Ok(Json(serde_json::json!({
         "address":          address,
         "balance_bina":     balance,
-        "note":             "in-memory session balance — persistent total in data/ledger.csv",
-    }))
+        "next_nonce":       nonce,
+        "source":           LEDGER_PATH,
+        "note":             "persistent ledger balance",
+    })))
 }
 
 // GET /chain/supply
 async fn handle_supply(State(s): State<SharedState>) -> Json<serde_json::Value> {
     let state = s.read().unwrap();
     let era = state
-        .blocks
-        .back()
-        .map(|b| b.height / HALVING_INTERVAL)
-        .unwrap_or(0);
+        .chain_height
+        / HALVING_INTERVAL;
     Json(serde_json::json!({
         "total_mined_bina":     state.total_mined_bina,
         "supply_remaining":     HARD_CAP.saturating_sub(state.total_mined_bina),
@@ -446,29 +532,108 @@ fn unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
+fn hex_to_32(label: &str, value: &str) -> [u8; 32] {
+    let bytes = hex::decode(value).unwrap_or_else(|e| panic!("{label} is not valid hex: {e}"));
+    if bytes.len() != 32 {
+        panic!("{label} must be 32 bytes / 64 hex chars, got {} bytes", bytes.len());
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    out
+}
+
+fn chain_state_file(genesis_hash: [u8; 32], tip_hash: [u8; 32], height: u64) -> ChainStateFile {
+    ChainStateFile {
+        version: 1,
+        network: NETWORK_ID.to_string(),
+        genesis_hash: hex::encode(genesis_hash),
+        tip_hash: hex::encode(tip_hash),
+        height,
+        updated_at: unix_secs(),
+    }
+}
+
+fn save_chain_state(path: &str, genesis_hash: [u8; 32], tip_hash: [u8; 32], height: u64) -> std::io::Result<()> {
+    let path = std::path::Path::new(path);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = chain_state_file(genesis_hash, tip_hash, height);
+    let text = serde_json::to_string_pretty(&file).expect("chain state serialization cannot fail");
+    std::fs::write(path, text)
+}
+
+fn load_or_create_chain_state(path: &str, genesis_hash: [u8; 32]) -> LoadedChainState {
+    match std::fs::read_to_string(path) {
+        Ok(text) => {
+            let file: ChainStateFile = serde_json::from_str(&text)
+                .unwrap_or_else(|e| panic!("{path} is not valid chain state JSON: {e}"));
+            if file.version != 1 {
+                panic!("unsupported chain state version {} in {path}", file.version);
+            }
+            if file.network != NETWORK_ID {
+                panic!("chain state network mismatch: expected {NETWORK_ID}, found {}", file.network);
+            }
+            let stored_genesis = hex_to_32("chain_state.genesis_hash", &file.genesis_hash);
+            if stored_genesis != genesis_hash {
+                panic!(
+                    "chain state genesis mismatch: expected {}, found {}. Move {path} aside before joining a different chain.",
+                    hex::encode(genesis_hash),
+                    file.genesis_hash
+                );
+            }
+            LoadedChainState {
+                genesis_hash: stored_genesis,
+                tip_hash: hex_to_32("chain_state.tip_hash", &file.tip_hash),
+                height: file.height,
+                created: false,
+            }
+        }
+        Err(_) => {
+            save_chain_state(path, genesis_hash, genesis_hash, 0)
+                .unwrap_or_else(|e| panic!("failed to create {path}: {e}"));
+            LoadedChainState {
+                genesis_hash,
+                tip_hash: genesis_hash,
+                height: 0,
+                created: true,
+            }
+        }
+    }
+}
+
 // ─── Mining loop (runs forever) ────────────────────────────────────────────
 
-async fn mining_loop(state: SharedState, mut ledger: RewardLedger, gossip: Arc<Gossip>) {
+async fn mining_loop(state: SharedState, ledger: SharedLedger, gossip: Arc<Gossip>) {
     let threads = state.read().unwrap().threads;
     let miner_keypair = load_miner_keypair();
     let miner_address: [u8; 20] = miner_keypair.address();
     let miner_hex = hex::encode(miner_address);
 
-    let persisted_total = ledger.total_mined();
+    let persisted_total = ledger.lock().unwrap().total_mined();
 
     // Genesis
-    let genesis = genesis_block(miner_address);
+    let genesis = genesis_block();
     let genesis_hash = genesis.header.hash();
+    let chain_state = load_or_create_chain_state(CHAIN_STATE_PATH, genesis_hash);
     {
         let mut s = state.write().unwrap();
-        s.genesis_hash = genesis_hash;
-        s.tip_hash = genesis_hash;
+        s.genesis_hash = chain_state.genesis_hash;
+        s.tip_hash = chain_state.tip_hash;
+        s.chain_height = chain_state.height;
         s.miner_address = miner_hex.clone();
         s.total_mined_bina = persisted_total;
-        s.current_reward = block_reward(0, persisted_total);
+        s.current_reward = block_reward(chain_state.height + 1, persisted_total);
         s.difficulty_bits = l1_core::difficulty::MIN_BITS;
     }
     println!("[genesis]  hash={}…", hex::encode(&genesis_hash[..16]));
+    println!(
+        "[chain]    {} height={} tip={}… state={}",
+        if chain_state.created { "initialized" } else { "resumed" },
+        chain_state.height,
+        hex::encode(&chain_state.tip_hash[..16]),
+        CHAIN_STATE_PATH,
+    );
     println!("[wallet]   mining to: {miner_hex}");
     println!("[ledger]   persistent total mined: {persisted_total} BINA");
     println!(
@@ -477,8 +642,8 @@ async fn mining_loop(state: SharedState, mut ledger: RewardLedger, gossip: Arc<G
     );
     println!();
 
-    let mut prev_hash = genesis_hash;
-    let mut height: u64 = 0;
+    let mut prev_hash = chain_state.tip_hash;
+    let mut height: u64 = chain_state.height;
     let mut btc = fetch_btc().await;
     log_btc(&btc);
 
@@ -595,12 +760,17 @@ async fn mining_loop(state: SharedState, mut ledger: RewardLedger, gossip: Arc<G
         }
 
         // Persist credit to ledger CSV
+        let mut ledger = ledger.lock().unwrap();
         ledger
             .credit(height, &winner_miner_hex, reward, timestamp)
             .unwrap_or_else(|e| {
                 eprintln!("[ledger] write error: {e}");
                 0
             });
+
+        if let Err(e) = save_chain_state(CHAIN_STATE_PATH, genesis_hash, block_hash, height) {
+            eprintln!("[chain] state write error: {e}");
+        }
 
         let record = BlockRecord {
             height,
@@ -644,6 +814,7 @@ async fn mining_loop(state: SharedState, mut ledger: RewardLedger, gossip: Arc<G
                 .expect("nullifier collision — impossible on a valid chain");
             s.total_hashes += result.hashes_tried;
             s.total_time_ms += result.elapsed_ms;
+            s.chain_height = height;
             s.total_mined_bina = ledger.total_mined();
             s.current_reward = block_reward(height + 1, ledger.total_mined());
             s.difficulty_bits = adjuster.current_bits();
@@ -765,6 +936,7 @@ async fn main() {
     println!("    GET /chain/latest              — latest mined block");
     println!("    GET /chain/blocks              — last 20 blocks");
     println!("    POST /chain/submit             — submit a signed mined block claim");
+    println!("    POST /tx/submit                — submit a signed BINA transfer");
     println!("    POST /p2p/message              — receive signed gossip messages");
     println!("    POST /p2p/hello                — peer introduction");
     println!("    GET /p2p/peers                 — known peer list");
@@ -776,6 +948,7 @@ async fn main() {
     let state: SharedState = Arc::new(RwLock::new(NodeState {
         genesis_hash: [0u8; 32],
         tip_hash: [0u8; 32],
+        chain_height: 0,
         blocks: VecDeque::new(),
         pending_claims: HashMap::new(),
         nullifiers: NullifierSet::new(),
@@ -794,7 +967,9 @@ async fn main() {
         last_adjustment: None,
     }));
 
-    let ledger = RewardLedger::open(LEDGER_PATH).expect("failed to open reward ledger");
+    let ledger = Arc::new(Mutex::new(
+        RewardLedger::open(LEDGER_PATH).expect("failed to open reward ledger")
+    ));
     let peers = Arc::new(PeerList::new(MAX_PEERS));
     for seed in parse_seed_peers() {
         peers.add(seed);
@@ -814,6 +989,7 @@ async fn main() {
         .route("/chain/blocks", get(handle_blocks_recent))
         .route("/chain/submit", post(handle_submit_claim))
         .route("/chain/supply", get(handle_supply))
+        .route("/tx/submit", post(handle_submit_transaction))
         .route("/p2p/message", post(handle_p2p_message))
         .route("/p2p/hello", post(handle_peer_hello))
         .route("/p2p/peers", get(handle_get_peers))
@@ -822,6 +998,7 @@ async fn main() {
         .route("/randomness/{height}", get(handle_randomness_at))
         .route("/wallet/{address}/balance", get(handle_wallet_balance))
         .layer(CorsLayer::permissive())
+        .layer(Extension(ledger.clone()))
         .layer(Extension(gossip.clone()))
         .with_state(state.clone());
 

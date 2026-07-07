@@ -57,6 +57,8 @@ if ($Status) {
             Write-Host "  btc_height      : $($s.btc_height)"
             Write-Host "  nullifiers_spent: $($s.nullifiers_spent)"
             Write-Host "  total_hashes    : $($s.total_hashes)"
+            Write-Host "  genesis_hash    : $($s.genesis_hash)"
+            Write-Host "  tip_hash        : $($s.tip_hash)"
         } catch {
             Write-Host "  (API not responding yet — node may be starting up)"
         }

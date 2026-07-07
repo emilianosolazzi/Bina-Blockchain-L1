@@ -3,20 +3,22 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Bina Chain Wallet</title>
+  <title>BINA L1 Miner Dashboard</title>
   <style>
     :root {
-      --bg: #101014;
-      --surface: #f4f0e6;
-      --panel: #fffaf0;
-      --ink: #191816;
-      --muted: #756e62;
-      --line: rgba(25, 24, 22, 0.14);
-      --gold: #c1842d;
-      --green: #2f8f5b;
-      --red: #b44942;
-      --blue: #315d88;
-      --shadow: 0 18px 48px rgba(0, 0, 0, 0.16);
+      --bg: #07111f;
+      --panel: rgba(15, 23, 42, 0.82);
+      --panel-2: rgba(30, 41, 59, 0.8);
+      --panel-3: rgba(2, 6, 23, 0.58);
+      --text: #e5eefc;
+      --muted: #8ba3c7;
+      --accent: #38bdf8;
+      --accent-2: #22c55e;
+      --gold: #fbbf24;
+      --warn: #f59e0b;
+      --danger: #ef4444;
+      --border: rgba(148, 163, 184, 0.2);
+      --shadow: 0 20px 50px rgba(0, 0, 0, 0.25);
     }
 
     * { box-sizing: border-box; }
@@ -24,84 +26,109 @@
     body {
       margin: 0;
       min-height: 100vh;
-      font-family: Georgia, "Times New Roman", serif;
-      color: var(--ink);
+      color: var(--text);
+      font-family: Inter, Segoe UI, Arial, sans-serif;
       background:
-        linear-gradient(135deg, rgba(193, 132, 45, 0.12), transparent 32%),
-        linear-gradient(225deg, rgba(47, 143, 91, 0.10), transparent 34%),
-        repeating-linear-gradient(90deg, rgba(25,24,22,.035) 0 1px, transparent 1px 28px),
-        var(--surface);
+        radial-gradient(circle at top right, rgba(56, 189, 248, 0.15), transparent 30%),
+        radial-gradient(circle at top left, rgba(34, 197, 94, 0.12), transparent 25%),
+        linear-gradient(180deg, #020617 0%, #07111f 100%);
     }
 
     button, input { font: inherit; }
 
-    .shell {
-      max-width: 1240px;
+    .wrap {
+      width: min(1360px, calc(100% - 32px));
       margin: 0 auto;
-      padding: 24px;
+      padding: 24px 0 32px;
     }
 
-    .topbar {
-      display: grid;
-      grid-template-columns: 1fr auto;
-      gap: 18px;
-      align-items: center;
-      padding: 22px 0 24px;
-    }
-
-    .brand {
-      display: flex;
-      align-items: center;
-      gap: 14px;
-      min-width: 0;
-    }
-
-    .mark {
-      width: 54px;
-      height: 54px;
-      display: grid;
-      place-items: center;
-      border-radius: 6px;
-      color: #fffaf0;
-      font-weight: 800;
-      font-size: 22px;
-      background: linear-gradient(135deg, #191816, #4d3920 58%, #c1842d);
+    .hero, .panel, .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 18px;
       box-shadow: var(--shadow);
+      backdrop-filter: blur(14px);
+    }
+
+    .hero {
+      padding: 24px;
+      margin-bottom: 16px;
+    }
+
+    .hero-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: flex-start;
+      flex-wrap: wrap;
     }
 
     h1 {
-      margin: 0;
-      font-size: clamp(30px, 4vw, 48px);
-      line-height: 1;
+      margin: 0 0 5px;
+      font-size: clamp(28px, 4vw, 42px);
       letter-spacing: 0;
     }
 
-    .subtitle {
-      margin: 6px 0 0;
-      color: var(--muted);
-      font-family: "Segoe UI", sans-serif;
-      font-size: 14px;
+    h1 span {
+      margin-left: 10px;
+      font-size: 16px;
+      font-weight: 800;
+      color: var(--gold);
+      vertical-align: middle;
     }
 
-    .actions {
+    .sub {
+      margin: 0;
+      color: var(--muted);
+      max-width: 760px;
+      line-height: 1.5;
+    }
+
+    .actions, .status-row, .tools {
       display: flex;
       gap: 10px;
       flex-wrap: wrap;
-      justify-content: flex-end;
+      align-items: center;
     }
+
+    .status-row { margin-top: 16px; }
 
     .btn {
-      border: 1px solid var(--line);
-      border-radius: 6px;
-      background: var(--panel);
-      color: var(--ink);
-      padding: 10px 14px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: rgba(15, 23, 42, 0.82);
+      color: var(--text);
+      padding: 9px 13px;
       cursor: pointer;
-      transition: transform .15s ease, border-color .15s ease, background .15s ease;
+      transition: border-color .2s ease, color .2s ease, transform .2s ease;
     }
 
-    .btn:hover { transform: translateY(-1px); border-color: rgba(193,132,45,.45); }
-    .btn.primary { background: #191816; color: #fffaf0; border-color: #191816; }
+    .btn:hover { border-color: var(--accent); color: var(--accent); transform: translateY(-1px); }
+    .btn.primary { border-color: rgba(56, 189, 248, 0.45); background: rgba(56, 189, 248, 0.13); color: var(--accent); }
+    .btn.gold { border-color: rgba(251, 191, 36, 0.36); background: rgba(251, 191, 36, 0.12); color: var(--gold); }
+
+    .pill, .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: rgba(15, 23, 42, 0.75);
+      color: var(--muted);
+      white-space: nowrap;
+    }
+
+    .pill { padding: 10px 14px; font-size: 14px; }
+    .pill strong { color: var(--text); }
+    .badge { padding: 5px 10px; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .05em; }
+
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+    .ok .dot, .badge.ok .dot { background: var(--accent-2); }
+    .warn .dot, .badge.warn .dot { background: var(--warn); }
+    .fail .dot, .badge.fail .dot { background: var(--danger); }
+    .badge.ok { color: var(--accent-2); border-color: rgba(34, 197, 94, 0.28); background: rgba(34, 197, 94, 0.1); }
+    .badge.warn { color: var(--warn); border-color: rgba(245, 158, 11, 0.28); background: rgba(245, 158, 11, 0.1); }
+    .badge.fail { color: var(--danger); border-color: rgba(239, 68, 68, 0.28); background: rgba(239, 68, 68, 0.1); }
 
     .grid {
       display: grid;
@@ -109,150 +136,114 @@
       gap: 16px;
     }
 
-    .card {
-      background: rgba(255, 250, 240, 0.86);
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      box-shadow: var(--shadow);
-      padding: 18px;
-      min-width: 0;
-    }
+    .card, .panel { padding: 18px; }
+    .panel { overflow-x: auto; }
+    .card { grid-column: span 3; background: var(--panel-2); }
+    .span-4 { grid-column: span 4; }
+    .span-5 { grid-column: span 5; }
+    .span-6 { grid-column: span 6; }
+    .span-7 { grid-column: span 7; }
+    .span-8 { grid-column: span 8; }
+    .span-12 { grid-column: span 12; }
 
-    .hero-card { grid-column: span 7; }
-    .supply-card { grid-column: span 5; }
-    .metric-card { grid-column: span 3; }
-    .wide { grid-column: span 12; }
-    .half { grid-column: span 6; }
-
-    .card-head {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      margin-bottom: 14px;
-    }
-
-    .eyebrow {
-      color: var(--muted);
-      font-family: "Segoe UI", sans-serif;
-      font-size: 12px;
-      text-transform: uppercase;
-      letter-spacing: .08em;
-      font-weight: 700;
-    }
-
-    .badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 7px;
-      border-radius: 999px;
-      border: 1px solid var(--line);
-      padding: 6px 10px;
-      font-family: "Segoe UI", sans-serif;
-      font-size: 12px;
-      color: var(--muted);
-      background: rgba(255,255,255,.42);
-    }
-
-    .dot {
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      background: var(--muted);
-    }
-
-    .ok .dot { background: var(--green); }
-    .warn .dot { background: var(--gold); }
-    .bad .dot { background: var(--red); }
-
-    .balance {
-      margin: 6px 0;
-      font-size: clamp(44px, 8vw, 84px);
-      line-height: .95;
-      font-weight: 800;
-      color: #1e1a13;
-    }
-
-    .unit { font-size: .32em; color: var(--gold); }
-
-    .address-row {
-      display: grid;
-      grid-template-columns: 1fr auto;
-      gap: 10px;
-      align-items: center;
-      margin-top: 18px;
-    }
-
-    .mono {
-      font-family: "Cascadia Mono", Consolas, monospace;
-      word-break: break-all;
+    .card h2, .panel h2 {
+      margin: 0;
+      font-size: 18px;
       letter-spacing: 0;
     }
 
-    .hashbox {
-      padding: 12px;
-      border-radius: 6px;
-      border: 1px solid var(--line);
-      background: rgba(25, 24, 22, 0.045);
-      color: #2a2825;
-      font-size: 13px;
+    .card h3, .eyebrow {
+      margin: 0 0 10px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: .08em;
     }
 
-    .stat {
+    .section-head {
       display: flex;
-      flex-direction: column;
-      gap: 8px;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
+      margin-bottom: 14px;
+      flex-wrap: wrap;
     }
 
-    .stat-value {
-      font-size: 30px;
+    .metric {
+      margin: 0;
+      font-size: clamp(28px, 5vw, 44px);
       font-weight: 800;
       line-height: 1;
     }
 
-    .stat-note {
+    .metric .unit { font-size: 18px; color: var(--muted); font-weight: 700; }
+    .metric.gold { color: var(--gold); }
+    .metric.cyan { color: var(--accent); }
+    .metric.green { color: var(--accent-2); }
+
+    .small, .note {
       color: var(--muted);
-      font-family: "Segoe UI", sans-serif;
       font-size: 13px;
-    }
-
-    .progress {
-      height: 14px;
-      overflow: hidden;
-      border-radius: 999px;
-      border: 1px solid var(--line);
-      background: rgba(25,24,22,.08);
-      margin: 12px 0;
-    }
-
-    .progress > div {
-      height: 100%;
-      width: 0%;
-      background: linear-gradient(90deg, var(--green), var(--gold));
-      transition: width .4s ease;
+      line-height: 1.45;
     }
 
     .kv {
       display: grid;
       grid-template-columns: minmax(130px, auto) 1fr;
-      gap: 10px 12px;
-      font-family: "Segoe UI", sans-serif;
+      gap: 9px 12px;
       font-size: 14px;
     }
 
     .kv span:nth-child(odd) { color: var(--muted); }
+    .kv strong { color: var(--text); font-weight: 700; }
+
+    .hash, .mono {
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      word-break: break-all;
+      letter-spacing: 0;
+    }
+
+    .hash {
+      color: #cfe6ff;
+      background: rgba(2, 6, 23, 0.65);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 10px 12px;
+      min-height: 42px;
+    }
+
+    .hash.compact { min-height: 0; font-size: 12px; }
+
+    .progress {
+      height: 15px;
+      overflow: hidden;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: rgba(2, 6, 23, 0.75);
+      margin: 12px 0 8px;
+    }
+
+    .progress > div {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, var(--accent), var(--accent-2));
+      transition: width .35s ease;
+    }
+
+    .progress.gold > div { background: linear-gradient(90deg, var(--gold), var(--warn)); }
 
     table {
       width: 100%;
+      min-width: 860px;
       border-collapse: collapse;
-      font-family: "Segoe UI", sans-serif;
       font-size: 13px;
     }
 
     th, td {
       text-align: left;
       padding: 11px 10px;
-      border-bottom: 1px solid var(--line);
+      border-bottom: 1px solid rgba(148, 163, 184, 0.13);
       vertical-align: top;
     }
 
@@ -261,140 +252,251 @@
       font-size: 11px;
       text-transform: uppercase;
       letter-spacing: .08em;
+      background: rgba(2, 6, 23, 0.44);
     }
 
-    .random-grid {
+    tbody tr:hover td { background: rgba(56, 189, 248, 0.04); }
+
+    .two-col {
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 12px;
     }
 
-    .random-grid .hashbox { min-height: 86px; }
+    .mini-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .mini {
+      padding: 14px;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: var(--panel-3);
+    }
+
+    .mini .label { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+    .mini .value { font-size: 20px; font-weight: 800; }
 
     .footer {
-      margin: 18px 0 4px;
+      margin: 18px 0 0;
       color: var(--muted);
-      font-family: "Segoe UI", sans-serif;
       font-size: 12px;
       text-align: center;
     }
 
-    .hidden { display: none; }
+    .offline .requires-node { opacity: .55; }
 
-    @media (max-width: 900px) {
-      .topbar { grid-template-columns: 1fr; }
-      .actions { justify-content: flex-start; }
-      .hero-card, .supply-card, .metric-card, .half { grid-column: span 12; }
-      .random-grid { grid-template-columns: 1fr; }
-      .address-row { grid-template-columns: 1fr; }
+    @media (max-width: 1100px) {
+      .span-4, .span-5, .span-6, .span-7, .span-8, .card { grid-column: span 12; }
+      .mini-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+
+    @media (max-width: 680px) {
+      .wrap { width: min(100% - 20px, 1360px); padding-top: 16px; }
+      .hero, .panel, .card { border-radius: 14px; padding: 14px; }
+      .two-col, .mini-grid { grid-template-columns: 1fr; }
+      .kv { grid-template-columns: 1fr; }
+      .actions { width: 100%; }
+      .btn { flex: 1; }
     }
   </style>
 </head>
 <body>
-  <main class="shell">
-    <header class="topbar">
-      <div class="brand">
-        <div class="mark">B</div>
+  <main class="wrap" id="appShell">
+    <section class="hero">
+      <div class="hero-top">
         <div>
-          <h1>Bina Chain</h1>
-          <p class="subtitle">$BINA local wallet, miner, randomness output, and supply monitor</p>
+          <h1>BINA L1 Miner <span>$BINA</span></h1>
+          <p class="sub">Local proof-of-work chain dashboard for wallet balance, block rewards, signed claims, BLAKE3 randomness, Bitcoin entropy anchors, difficulty, and P2P status.</p>
         </div>
-      </div>
-      <div class="actions">
-        <button class="btn" id="refreshBtn">Refresh</button>
-        <button class="btn primary" id="copyOutputBtn">Copy Random Output</button>
-      </div>
-    </header>
-
-    <section class="grid">
-      <article class="card hero-card">
-        <div class="card-head">
-          <div class="eyebrow">Wallet Balance</div>
-          <div class="badge" id="nodeBadge"><span class="dot"></span><span>Connecting</span></div>
-        </div>
-        <div class="balance"><span id="balance">0</span> <span class="unit">BINA</span></div>
-        <div class="address-row">
-          <div class="hashbox mono" id="walletAddress">Waiting for node...</div>
+        <div class="actions">
+          <button class="btn primary" id="refreshBtn">Refresh</button>
           <button class="btn" id="copyAddressBtn">Copy Address</button>
+          <button class="btn gold" id="copyOutputBtn">Copy Output</button>
+        </div>
+      </div>
+      <div class="status-row">
+        <div class="pill" id="nodePill"><span class="dot"></span><span>Node</span> <strong>Connecting</strong></div>
+        <div class="pill"><span>API</span> <strong class="mono">127.0.0.1:8181</strong></div>
+        <div class="pill"><span>Network</span> <strong>bina-l1</strong></div>
+        <div class="pill"><span>Updated</span> <strong id="lastUpdate">never</strong></div>
+      </div>
+    </section>
+
+    <section class="grid requires-node">
+      <article class="card span-4">
+        <h3>Wallet Balance</h3>
+        <p class="metric gold"><span id="balance">0</span> <span class="unit">BINA</span></p>
+        <p class="small">Mining wallet loaded by the node</p>
+        <div class="hash compact" id="walletAddress">Waiting for node...</div>
+      </article>
+
+      <article class="card span-4">
+        <h3>Chain Height</h3>
+        <p class="metric cyan" id="height">0</p>
+        <div class="kv">
+          <span>Uptime</span><strong id="uptime">0s</strong>
+          <span>Threads</span><strong id="threads">0</strong>
         </div>
       </article>
 
-      <article class="card supply-card">
-        <div class="card-head">
-          <div class="eyebrow">Supply</div>
-          <div class="badge"><span class="dot"></span><span>1B hard cap</span></div>
+      <article class="card span-4">
+        <h3>Mining Rate</h3>
+        <p class="metric green"><span id="hashrate">0.00</span> <span class="unit">MH/s</span></p>
+        <div class="kv">
+          <span>Total hashes</span><strong id="totalHashes">0</strong>
+          <span>Difficulty</span><strong><span id="difficulty">0</span> bits</strong>
+        </div>
+      </article>
+
+      <article class="panel span-12">
+        <div class="section-head">
+          <div>
+            <h2>Emission And Supply</h2>
+            <p class="note">Hard cap, reward era, halving schedule, and current block reward.</p>
+          </div>
+          <div class="badge ok"><span class="dot"></span><span>1B hard cap</span></div>
+        </div>
+        <div class="mini-grid">
+          <div class="mini"><div class="label">Total mined</div><div class="value"><span id="totalMined">0</span> BINA</div></div>
+          <div class="mini"><div class="label">Remaining</div><div class="value"><span id="remaining">0</span> BINA</div></div>
+          <div class="mini"><div class="label">Reward</div><div class="value"><span id="reward">0</span> BINA</div></div>
+          <div class="mini"><div class="label">Current era</div><div class="value" id="era">0</div></div>
+        </div>
+        <div class="progress gold"><div id="supplyProgress"></div></div>
+        <div class="kv">
+          <span>Initial reward</span><strong><span id="initialReward">0</span> BINA</strong>
+          <span>Halving interval</span><strong><span id="halvingInterval">0</span> blocks</strong>
+          <span>Next halving</span><strong>block <span id="nextHalving">0</span></strong>
+          <span>Difficulty adjustment</span><strong id="adjustment">No adjustment yet</strong>
+        </div>
+      </article>
+
+      <article class="panel span-7">
+        <div class="section-head">
+          <div>
+            <h2>Latest Randomness</h2>
+            <p class="note">BINA output and nullifier derived from block hash plus Bitcoin entropy seed.</p>
+          </div>
+          <div class="badge ok"><span class="dot"></span><span id="randomVerified">Verified</span></div>
+        </div>
+        <div class="two-col">
+          <div>
+            <h3>Output</h3>
+            <div class="hash" id="randomOutput">Waiting...</div>
+          </div>
+          <div>
+            <h3>Nullifier</h3>
+            <div class="hash" id="nullifier">Waiting...</div>
+          </div>
+        </div>
+        <div class="kv" style="margin-top: 14px;">
+          <span>Nullifiers spent</span><strong id="nullifiersSpent">0</strong>
+          <span>Randomness height</span><strong id="randomHeight">0</strong>
+          <span>Randomness block</span><strong class="mono" id="randomBlock">Waiting...</strong>
+        </div>
+      </article>
+
+      <article class="panel span-5">
+        <div class="section-head">
+          <div>
+            <h2>Bitcoin Entropy Anchor</h2>
+            <p class="note">The node folds Bitcoin tip entropy into each mined output.</p>
+          </div>
+          <div class="badge" id="btcForkBadge"><span class="dot"></span><span>No fork</span></div>
         </div>
         <div class="kv">
-          <span>Total mined</span><strong><span id="totalMined">0</span> BINA</strong>
-          <span>Remaining</span><strong><span id="remaining">1,000,000,000</span> BINA</strong>
-          <span>Reward</span><strong><span id="reward">50</span> BINA/block</strong>
-          <span>Next halving</span><strong>block <span id="nextHalving">17,280,000</span></strong>
+          <span>BTC height</span><strong id="btcHeight">0</strong>
+          <span>BTC tip prefix</span><strong class="mono" id="btcTip">Waiting...</strong>
+          <span>Latest block BTC height</span><strong id="latestBtcHeight">0</strong>
+          <span>BTC seed</span><div class="hash compact" id="btcSeed">Waiting...</div>
         </div>
-        <div class="progress"><div id="supplyProgress"></div></div>
-        <div class="stat-note">Halving every 17,280,000 blocks, tuned for a 3.65s target block time.</div>
       </article>
 
-      <article class="card metric-card stat">
-        <div class="eyebrow">Height</div>
-        <div class="stat-value" id="height">0</div>
-        <div class="stat-note">Latest local block</div>
-      </article>
-
-      <article class="card metric-card stat">
-        <div class="eyebrow">Difficulty</div>
-        <div class="stat-value"><span id="difficulty">25</span> bits</div>
-        <div class="stat-note">Dynamic range 25-45</div>
-      </article>
-
-      <article class="card metric-card stat">
-        <div class="eyebrow">Hashrate</div>
-        <div class="stat-value"><span id="hashrate">0.00</span></div>
-        <div class="stat-note">MH/s average</div>
-      </article>
-
-      <article class="card metric-card stat">
-        <div class="eyebrow">Bitcoin Tip</div>
-        <div class="stat-value" id="btcHeight">0</div>
-        <div class="stat-note" id="btcFork">No fork seen</div>
-      </article>
-
-      <article class="card half">
-        <div class="card-head">
-          <div class="eyebrow">Latest Randomness</div>
-          <div class="badge ok"><span class="dot"></span><span>Non-reusable nullifier</span></div>
-        </div>
-        <div class="random-grid">
+      <article class="panel span-12">
+        <div class="section-head">
           <div>
-            <div class="stat-note">Output</div>
-            <div class="hashbox mono" id="randomOutput">Waiting...</div>
+            <h2>Latest Mined Block</h2>
+            <p class="note">PoW result, signed miner claim, deterministic election score, and reward.</p>
           </div>
-          <div>
-            <div class="stat-note">Nullifier</div>
-            <div class="hashbox mono" id="nullifier">Waiting...</div>
-          </div>
+          <div class="badge ok"><span class="dot"></span><span id="blockReward">+0 BINA</span></div>
+        </div>
+        <div class="mini-grid">
+          <div class="mini"><div class="label">Nonce</div><div class="value" id="nonce">0</div></div>
+          <div class="mini"><div class="label">Zero bits</div><div class="value" id="zeroBits">0</div></div>
+          <div class="mini"><div class="label">Elapsed</div><div class="value"><span id="blockMs">0</span> ms</div></div>
+          <div class="mini"><div class="label">Source</div><div class="value" id="source">-</div></div>
+        </div>
+        <div class="two-col" style="margin-top: 14px;">
+          <div><h3>Block Hash</h3><div class="hash" id="blockHash">Waiting...</div></div>
+          <div><h3>Miner Address</h3><div class="hash" id="latestMiner">Waiting...</div></div>
+          <div><h3>Claim Digest</h3><div class="hash" id="claimDigest">Waiting...</div></div>
+          <div><h3>Election Score</h3><div class="hash" id="electionScore">Waiting...</div></div>
+          <div><h3>Miner Public Key</h3><div class="hash" id="minerPublicKey">Waiting...</div></div>
+          <div><h3>Miner Signature</h3><div class="hash" id="minerSignature">Waiting...</div></div>
         </div>
       </article>
 
-      <article class="card half">
-        <div class="card-head">
-          <div class="eyebrow">Latest Block</div>
-          <div class="badge"><span class="dot"></span><span id="blockReward">+0 BINA</span></div>
+      <article class="panel span-6">
+        <div class="section-head">
+          <div>
+            <h2>P2P And Claim Relay</h2>
+            <p class="note">Signed block claims are accepted through `/chain/submit` and relayed through `/p2p/message`.</p>
+          </div>
+          <div class="badge" id="peerBadge"><span class="dot"></span><span>Peers</span></div>
         </div>
         <div class="kv">
-          <span>Hash</span><div class="mono" id="blockHash">Waiting...</div>
-          <span>Nonce</span><strong id="nonce">0</strong>
-          <span>Zero bits</span><strong id="zeroBits">0</strong>
-          <span>Block time</span><strong><span id="blockMs">0</span> ms</strong>
+          <span>Connected peers</span><strong id="peerCount">0</strong>
+          <span>Candidate grace</span><strong>1,500 ms</strong>
+          <span>Claim endpoint</span><strong class="mono">POST /chain/submit</strong>
+          <span>P2P endpoint</span><strong class="mono">POST /p2p/message</strong>
+        </div>
+        <h3 style="margin-top: 14px;">Peer List</h3>
+        <div class="hash compact" id="peerList">No peers reported</div>
+      </article>
+
+      <article class="panel span-6">
+        <div class="section-head">
+          <div>
+            <h2>Consensus Identity</h2>
+            <p class="note">Genesis is fixed for the BINA L1 network; the persisted tip advances as blocks are accepted.</p>
+          </div>
+          <div class="badge ok"><span class="dot"></span><span>Genesis fixed</span></div>
+        </div>
+        <div class="kv">
+          <span>Genesis hash</span><div class="hash compact" id="genesisHash">Waiting...</div>
+          <span>Current tip</span><div class="hash compact" id="tipHash">Waiting...</div>
+          <span>State file</span><strong class="mono">data/chain-state.json</strong>
+          <span>Network</span><strong class="mono">bina-l1</strong>
         </div>
       </article>
 
-      <article class="card wide">
-        <div class="card-head">
+      <article class="panel span-6">
+        <div class="section-head">
           <div>
-            <div class="eyebrow">Recent Blocks</div>
-            <div class="stat-note">Last 20 blocks from the local node</div>
+            <h2>Transactions</h2>
+            <p class="note">Wallet transaction signing is implemented; node mempool/block inclusion is the next ledger API layer.</p>
           </div>
-          <div class="badge"><span class="dot"></span><span id="adjustment">No adjustment yet</span></div>
+          <div class="badge warn"><span class="dot"></span><span>Signing ready</span></div>
+        </div>
+        <div class="kv">
+          <span>Digest domain</span><strong class="mono">BINA-TX-v1</strong>
+          <span>Replay protection</span><strong>sender nonce</strong>
+          <span>CLI sign</span><strong class="mono">l1-wallet sign-tx</strong>
+          <span>CLI verify</span><strong class="mono">l1-wallet verify-tx</strong>
+        </div>
+        <div class="hash compact" style="margin-top: 14px;">Next UI/API target: POST /tx/submit, pending transaction pool, Merkle root inclusion, and ledger apply during block acceptance.</div>
+      </article>
+
+      <article class="panel span-12">
+        <div class="section-head">
+          <div>
+            <h2>Recent Blocks</h2>
+            <p class="note">The local node keeps the latest 20 block records available to the dashboard.</p>
+          </div>
+          <div class="tools"><button class="btn" id="copyBlockBtn">Copy Block Hash</button><button class="btn" id="copyClaimBtn">Copy Claim Digest</button></div>
         </div>
         <table>
           <thead>
@@ -402,94 +504,169 @@
               <th>Height</th>
               <th>Reward</th>
               <th>Diff</th>
+              <th>Zero</th>
               <th>Time</th>
+              <th>Source</th>
               <th>Hash</th>
               <th>Random</th>
             </tr>
           </thead>
           <tbody id="blocksBody">
-            <tr><td colspan="6">Waiting for blocks...</td></tr>
+            <tr><td colspan="8">Waiting for blocks...</td></tr>
           </tbody>
         </table>
       </article>
     </section>
 
-    <p class="footer">Bina Chain local node API: <span class="mono">http://127.0.0.1:8181</span></p>
+    <p class="footer">BINA L1 local dashboard. Start the node with <span class="mono">.\node-start.ps1 start</span> or run <span class="mono">cargo run -p l1-node --bin l1-node</span>.</p>
   </main>
 
   <script>
     const API = 'http://127.0.0.1:8181';
     const els = Object.fromEntries([...document.querySelectorAll('[id]')].map(el => [el.id, el]));
+    const appShell = document.getElementById('appShell');
     let latestOutput = '';
+    let latestBlockHash = '';
+    let latestClaimDigest = '';
     let walletAddress = '';
 
     const fmt = (value) => Number(value || 0).toLocaleString();
+    const pct = (value, total) => total > 0 ? Math.min(100, Math.max(0, (Number(value || 0) / Number(total)) * 100)) : 0;
     const short = (hex, left = 12, right = 8) => {
       if (!hex) return 'Waiting...';
       return hex.length > left + right + 3 ? `${hex.slice(0, left)}...${hex.slice(-right)}` : hex;
     };
+    const prettyUptime = (secs) => {
+      secs = Number(secs || 0);
+      const h = Math.floor(secs / 3600);
+      const m = Math.floor((secs % 3600) / 60);
+      const s = Math.floor(secs % 60);
+      if (h) return `${h}h ${m}m`;
+      if (m) return `${m}m ${s}s`;
+      return `${s}s`;
+    };
 
-    function setNodeStatus(ok, text) {
-      els.nodeBadge.className = `badge ${ok ? 'ok' : 'bad'}`;
-      els.nodeBadge.querySelector('span:last-child').textContent = text;
+    function setPill(el, ok, text, warn = false) {
+      el.className = `pill ${ok ? 'ok' : warn ? 'warn' : 'fail'}`;
+      const strong = el.querySelector('strong');
+      if (strong) strong.textContent = text;
     }
 
-    async function getJson(path) {
+    function setBadge(el, state, text) {
+      el.className = `badge ${state}`;
+      const label = el.querySelector('span:last-child');
+      if (label) label.textContent = text;
+    }
+
+    async function getJson(path, fallback = null) {
       const res = await fetch(`${API}${path}`, { cache: 'no-store' });
-      if (!res.ok) throw new Error(`${path} -> HTTP ${res.status}`);
+      if (!res.ok) {
+        if (fallback !== null && res.status === 404) return fallback;
+        throw new Error(`${path} -> HTTP ${res.status}`);
+      }
       return res.json();
+    }
+
+    function renderLatest(status, supply, latest, randomLatest, balance) {
+      walletAddress = status.miner_address || latest.miner_address || '';
+      latestOutput = latest.randomness_output || randomLatest.output || '';
+      latestBlockHash = latest.block_hash || randomLatest.block_hash || '';
+      latestClaimDigest = latest.claim_digest || '';
+
+      els.walletAddress.textContent = walletAddress || 'No wallet loaded';
+      els.balance.textContent = fmt(balance.balance_bina);
+      els.height.textContent = fmt(status.height);
+      els.uptime.textContent = prettyUptime(status.uptime_secs);
+      els.threads.textContent = fmt(status.threads);
+      els.hashrate.textContent = status.avg_hashrate_mhs || '0.00';
+      els.totalHashes.textContent = fmt(status.total_hashes);
+      els.difficulty.textContent = status.difficulty_bits ?? supply.difficulty_bits ?? 0;
+      els.genesisHash.textContent = status.genesis_hash || 'Waiting...';
+      els.tipHash.textContent = status.tip_hash || 'Waiting...';
+
+      els.totalMined.textContent = fmt(supply.total_mined_bina);
+      els.remaining.textContent = fmt(supply.supply_remaining);
+      els.reward.textContent = fmt(supply.current_reward_bina);
+      els.era.textContent = fmt(supply.current_era);
+      els.initialReward.textContent = fmt(supply.initial_reward);
+      els.halvingInterval.textContent = fmt(supply.halving_interval);
+      els.nextHalving.textContent = fmt(supply.next_halving_at);
+      els.supplyProgress.style.width = `${pct(supply.total_mined_bina, supply.hard_cap)}%`;
+      els.adjustment.textContent = supply.last_adjustment || status.last_difficulty_adjustment || 'No adjustment yet';
+
+      els.randomOutput.textContent = latestOutput || 'Waiting...';
+      els.nullifier.textContent = latest.nullifier || randomLatest.nullifier || 'Waiting...';
+      els.nullifiersSpent.textContent = fmt(status.nullifiers_spent);
+      els.randomHeight.textContent = fmt(randomLatest.height || latest.height || status.height);
+      els.randomBlock.textContent = randomLatest.block_hash || latestBlockHash || 'Waiting...';
+      els.randomVerified.textContent = randomLatest.verified === false ? 'Unverified' : 'Verified';
+
+      els.btcHeight.textContent = fmt(status.btc_height);
+      els.btcTip.textContent = status.btc_tip || 'Waiting...';
+      els.latestBtcHeight.textContent = fmt(latest.btc_height || randomLatest.btc_height);
+      els.btcSeed.textContent = latest.btc_seed || randomLatest.btc_seed || 'Waiting...';
+      setBadge(els.btcForkBadge, status.btc_fork_seen ? 'warn' : 'ok', status.btc_fork_seen ? 'Fork seen' : 'No fork');
+
+      els.blockReward.textContent = `+${fmt(latest.reward_bina)} BINA`;
+      els.nonce.textContent = fmt(latest.nonce);
+      els.zeroBits.textContent = fmt(latest.zero_bits);
+      els.blockMs.textContent = fmt(latest.elapsed_ms);
+      els.source.textContent = latest.source || '-';
+      els.blockHash.textContent = latestBlockHash || 'Waiting...';
+      els.latestMiner.textContent = latest.miner_address || walletAddress || 'Waiting...';
+      els.claimDigest.textContent = latest.claim_digest || 'Waiting...';
+      els.electionScore.textContent = latest.election_score || 'Waiting...';
+      els.minerPublicKey.textContent = latest.miner_public_key || 'Waiting...';
+      els.minerSignature.textContent = latest.miner_signature || 'Waiting...';
+    }
+
+    function renderPeers(peers) {
+      const list = Array.isArray(peers) ? peers : [];
+      els.peerCount.textContent = fmt(list.length);
+      els.peerList.textContent = list.length ? list.join('\n') : 'No peers reported';
+      setBadge(els.peerBadge, list.length ? 'ok' : 'warn', `${list.length} peers`);
+    }
+
+    function renderBlocks(blocks) {
+      const rows = Array.isArray(blocks) ? blocks : [];
+      els.blocksBody.innerHTML = rows.map(block => `
+        <tr>
+          <td>${fmt(block.height)}</td>
+          <td class="mono">+${fmt(block.reward_bina)}</td>
+          <td>${block.difficulty_bits}</td>
+          <td>${block.zero_bits}</td>
+          <td>${fmt(block.elapsed_ms)} ms</td>
+          <td>${block.source || '-'}</td>
+          <td class="mono">${short(block.block_hash)}</td>
+          <td class="mono">${short(block.randomness_output)}</td>
+        </tr>
+      `).join('') || '<tr><td colspan="8">No blocks yet</td></tr>';
     }
 
     async function refresh() {
       try {
-        const [status, supply, latest, blocks] = await Promise.all([
-          getJson('/'),
+        const [status, supply, latest, blocks, randomLatest, peers] = await Promise.all([
+          getJson('/chain/status'),
           getJson('/chain/supply'),
-          getJson('/chain/latest'),
-          getJson('/chain/blocks'),
+          getJson('/chain/latest', {}),
+          getJson('/chain/blocks', []),
+          getJson('/randomness/latest', {}),
+          getJson('/p2p/peers', []),
         ]);
+        const miner = status.miner_address || latest.miner_address || '';
+        const balance = miner ? await getJson(`/wallet/${miner}/balance`, { balance_bina: 0 }) : { balance_bina: 0 };
 
-        walletAddress = status.miner_address || latest.miner_address || '';
-        const balance = walletAddress ? await getJson(`/wallet/${walletAddress}/balance`) : { balance_bina: 0 };
-
-        setNodeStatus(true, 'Node online');
-        els.walletAddress.textContent = walletAddress || 'No wallet loaded';
-        els.balance.textContent = fmt(balance.balance_bina);
-        els.height.textContent = fmt(status.height);
-        els.difficulty.textContent = status.difficulty_bits ?? supply.difficulty_bits ?? 0;
-        els.hashrate.textContent = status.avg_hashrate_mhs || '0.00';
-        els.btcHeight.textContent = fmt(status.btc_height);
-        els.btcFork.textContent = status.btc_fork_seen ? 'Fork signal seen' : 'No fork seen';
-
-        els.totalMined.textContent = fmt(supply.total_mined_bina);
-        els.remaining.textContent = fmt(supply.supply_remaining);
-        els.reward.textContent = fmt(supply.current_reward_bina);
-        els.nextHalving.textContent = fmt(supply.next_halving_at);
-        els.supplyProgress.style.width = `${Math.min(100, (supply.total_mined_bina / supply.hard_cap) * 100)}%`;
-        els.adjustment.textContent = supply.last_adjustment || status.last_difficulty_adjustment || 'No adjustment yet';
-
-        latestOutput = latest.randomness_output || '';
-        els.randomOutput.textContent = latestOutput;
-        els.nullifier.textContent = latest.nullifier || 'Waiting...';
-        els.blockReward.textContent = `+${fmt(latest.reward_bina)} BINA`;
-        els.blockHash.textContent = latest.block_hash || 'Waiting...';
-        els.nonce.textContent = fmt(latest.nonce);
-        els.zeroBits.textContent = latest.zero_bits ?? 0;
-        els.blockMs.textContent = fmt(latest.elapsed_ms);
-
-        els.blocksBody.innerHTML = blocks.map(block => `
-          <tr>
-            <td>${fmt(block.height)}</td>
-            <td>+${fmt(block.reward_bina)} BINA</td>
-            <td>${block.difficulty_bits}</td>
-            <td>${fmt(block.elapsed_ms)} ms</td>
-            <td class="mono">${short(block.block_hash)}</td>
-            <td class="mono">${short(block.randomness_output)}</td>
-          </tr>
-        `).join('') || '<tr><td colspan="6">No blocks yet</td></tr>';
+        appShell.classList.remove('offline');
+        setPill(els.nodePill, true, 'Online');
+        renderLatest(status, supply, latest, randomLatest, balance);
+        renderPeers(peers);
+        renderBlocks(blocks);
+        els.lastUpdate.textContent = new Date().toLocaleTimeString();
       } catch (err) {
-        setNodeStatus(false, 'Node offline');
-        els.walletAddress.textContent = 'Start the node with .\\node-start.ps1';
+        appShell.classList.add('offline');
+        setPill(els.nodePill, false, 'Offline');
+        els.walletAddress.textContent = 'Start the node with .\\node-start.ps1 start';
+        els.lastUpdate.textContent = new Date().toLocaleTimeString();
         console.error(err);
       }
     }
@@ -500,8 +677,10 @@
     }
 
     els.refreshBtn.addEventListener('click', refresh);
-    els.copyOutputBtn.addEventListener('click', () => copyText(latestOutput));
     els.copyAddressBtn.addEventListener('click', () => copyText(walletAddress));
+    els.copyOutputBtn.addEventListener('click', () => copyText(latestOutput));
+    els.copyBlockBtn.addEventListener('click', () => copyText(latestBlockHash));
+    els.copyClaimBtn.addEventListener('click', () => copyText(latestClaimDigest));
 
     refresh();
     setInterval(refresh, 3500);

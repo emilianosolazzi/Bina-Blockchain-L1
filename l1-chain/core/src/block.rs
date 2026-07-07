@@ -6,6 +6,13 @@ pub const DOMAIN_TAG: &[u8] = b"BINA-L1-v1";
 /// Genesis block's previous-hash sentinel.
 pub const GENESIS_PREV_HASH: [u8; 32] = [0u8; 32];
 
+/// Fixed genesis miner sentinel.
+///
+/// The genesis block is a consensus constant. It must not depend on whichever
+/// wallet happens to start a local node first, otherwise every miner would be
+/// on a different chain.
+pub const GENESIS_MINER_ADDRESS: [u8; 20] = [0u8; 20];
+
 /// The 80-ish byte block header whose BLAKE3 hash is the PoW target.
 ///
 /// `bitcoin_seed_hash` = blake3("BINA-BTC-v1" || btc_tip_hash || stale_xor_pool).
@@ -86,8 +93,8 @@ pub fn leading_zero_bits(hash: &[u8; 32]) -> u32 {
     count
 }
 
-/// Returns a hardcoded genesis block (height 0, no real PoW).
-pub fn genesis_block(miner_address: [u8; 20]) -> L1Block {
+/// Returns the hardcoded genesis block (height 0, no real PoW).
+pub fn genesis_block() -> L1Block {
     let header = L1BlockHeader {
         version:           1,
         height:            0,
@@ -95,7 +102,7 @@ pub fn genesis_block(miner_address: [u8; 20]) -> L1Block {
         merkle_root:       [0u8; 32],
         timestamp:         1751241600, // 2025-06-30 00:00:00 UTC
         nonce:             0,
-        miner_address,
+        miner_address:     GENESIS_MINER_ADDRESS,
         difficulty_bits:   0,
         bitcoin_seed_hash: [0u8; 32],
     };
@@ -108,9 +115,8 @@ mod tests {
 
     #[test]
     fn genesis_hash_is_deterministic() {
-        let addr = [0xABu8; 20];
-        let a = genesis_block(addr).header.hash();
-        let b = genesis_block(addr).header.hash();
+        let a = genesis_block().header.hash();
+        let b = genesis_block().header.hash();
         assert_eq!(a, b);
     }
 
