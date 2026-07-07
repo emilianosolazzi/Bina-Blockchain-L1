@@ -4,7 +4,9 @@
 //! ─────────────────────────────────────────────────────────────────────────
 //!   Hard cap             : 1,000,000,000 BINA  (1 billion, absolute ceiling)
 //!   Initial block reward : 50 BINA
-//!   Halving interval     : 17,280,000 blocks   (≈ 2 years at 3.65 s/block)
+//!   Halving interval     : 17,280,000 blocks   (current dev/testnet schedule)
+//!                          ≈ 2 years at 3.65 s/block would be 17,279,342 blocks;
+//!                          a 40 ms mainnet target would require 1,576,800,000 blocks.
 //!   Halving schedule     :
 //!     Era 0  blocks      0 – 17,280,000  reward 50   BINA   total ≈  864 M
 //!     Era 1  blocks 17.28 M – 34.56 M   reward 25   BINA   total ≈  864 + 432 M
@@ -29,7 +31,7 @@ use std::path::{Path, PathBuf};
 pub const HARD_CAP:             u64 = 1_000_000_000;
 /// Block reward in era 0.
 pub const INITIAL_BLOCK_REWARD: u64 = 50;
-/// Number of blocks between halvings (≈ 2 years at 3.65 s/block).
+/// Number of blocks between halvings for the current dev/testnet schedule.
 pub const HALVING_INTERVAL:     u64 = 17_280_000;
 
 /// Compute the block reward for a given height, capped by remaining supply.
@@ -67,10 +69,32 @@ impl RewardLedger {
 
     /// Create or load from `csv_path`.  Missing file → empty ledger.
     pub fn open(csv_path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_inner(csv_path, None)
+    }
+
+    /// Create or load the ledger scoped to the active chain height.
+    ///
+    /// Historical development runs can leave duplicate reward rows for the same
+    /// block heights in the append-only CSV. For a resumed chain, only the latest
+    /// reward row for each height up to `active_height` belongs to the active tip.
+    pub fn open_scoped(csv_path: impl AsRef<Path>, active_height: u64) -> Result<Self> {
+        Self::open_inner(csv_path, Some(active_height))
+    }
+
+    fn open_inner(csv_path: impl AsRef<Path>, active_height: Option<u64>) -> Result<Self> {
         let csv_path = csv_path.as_ref().to_path_buf();
         let mut balances: HashMap<String, u64> = HashMap::new();
         let mut nonces: HashMap<String, u64> = HashMap::new();
         let mut total_mined: u64 = 0;
+        let scoped = active_height.is_some();
+
+        enum ReplayRow {
+            Reward { index: usize, height: u64, addr: String, reward: u64 },
+            Tx { from: String, to: String, amount: u64, fee: u64, nonce: u64, miner: String },
+        }
+
+        let mut replay_rows: Vec<ReplayRow> = Vec::new();
+        let mut latest_reward_index: HashMap<u64, usize> = HashMap::new();
 
         if csv_path.exists() {
             let file   = File::open(&csv_path)
@@ -84,29 +108,66 @@ impl RewardLedger {
                 if cols.first().copied() == Some("tx") {
                     // tx,height,tx_id,from,to,amount,fee,nonce,miner_address,total_mined_bina,timestamp_unix
                     if cols.len() < 11 { continue; }
+                    let height = cols[1].trim().parse::<u64>().unwrap_or(0);
+                    if active_height.is_some_and(|max_height| height > max_height) { continue; }
                     let from = cols[3].trim().to_string();
                     let to = cols[4].trim().to_string();
                     let amount = cols[5].trim().parse::<u64>().unwrap_or(0);
                     let fee = cols[6].trim().parse::<u64>().unwrap_or(0);
                     let nonce = cols[7].trim().parse::<u64>().unwrap_or(0);
                     let miner = cols[8].trim().to_string();
-                    debit(&mut balances, &from, amount.saturating_add(fee));
-                    credit_balance(&mut balances, &to, amount);
-                    if fee > 0 && !miner.is_empty() {
-                        credit_balance(&mut balances, &miner, fee);
+                    if scoped {
+                        replay_rows.push(ReplayRow::Tx { from, to, amount, fee, nonce, miner });
+                    } else {
+                        debit(&mut balances, &from, amount.saturating_add(fee));
+                        credit_balance(&mut balances, &to, amount);
+                        if fee > 0 && !miner.is_empty() {
+                            credit_balance(&mut balances, &miner, fee);
+                        }
+                        let next_nonce = nonce.saturating_add(1);
+                        let entry = nonces.entry(from).or_insert(0);
+                        if next_nonce > *entry { *entry = next_nonce; }
+                        total_mined = cols[9].trim().parse::<u64>().unwrap_or(total_mined);
                     }
-                    let next_nonce = nonce.saturating_add(1);
-                    let entry = nonces.entry(from).or_insert(0);
-                    if next_nonce > *entry { *entry = next_nonce; }
-                    total_mined = cols[9].trim().parse::<u64>().unwrap_or(total_mined);
                 } else {
                     if cols.len() < 4 { continue; }
                     // Legacy reward row: height, miner_address, reward_bina, total_mined_bina [, timestamp]
+                    let height = cols[0].trim().parse::<u64>().unwrap_or(0);
+                    if active_height.is_some_and(|max_height| height > max_height) { continue; }
                     let addr = cols[1].trim().to_string();
                     let reward = cols[2].trim().parse::<u64>().unwrap_or(0);
                     let total = cols[3].trim().parse::<u64>().unwrap_or(0);
-                    credit_balance(&mut balances, &addr, reward);
-                    total_mined = total;
+                    if scoped {
+                        let index = replay_rows.len();
+                        latest_reward_index.insert(height, index);
+                        replay_rows.push(ReplayRow::Reward { index, height, addr, reward });
+                    } else {
+                        credit_balance(&mut balances, &addr, reward);
+                        total_mined = total;
+                    }
+                }
+            }
+
+            if scoped {
+                for row in replay_rows {
+                    match row {
+                        ReplayRow::Reward { index, height, addr, reward } => {
+                            if latest_reward_index.get(&height).copied() == Some(index) {
+                                credit_balance(&mut balances, &addr, reward);
+                                total_mined = total_mined.saturating_add(reward);
+                            }
+                        }
+                        ReplayRow::Tx { from, to, amount, fee, nonce, miner } => {
+                            debit(&mut balances, &from, amount.saturating_add(fee));
+                            credit_balance(&mut balances, &to, amount);
+                            if fee > 0 && !miner.is_empty() {
+                                credit_balance(&mut balances, &miner, fee);
+                            }
+                            let next_nonce = nonce.saturating_add(1);
+                            let entry = nonces.entry(from).or_insert(0);
+                            if next_nonce > *entry { *entry = next_nonce; }
+                        }
+                    }
                 }
             }
         } else {

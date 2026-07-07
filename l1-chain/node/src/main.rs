@@ -83,6 +83,7 @@ struct NodeState {
     btc_height: u64,
     btc_tip: String,
     btc_seed_hash: [u8; 32],
+    btc_seed_changed_at: u64,
     btc_fork: bool,
     difficulty_bits: u32,
     miner_address: String,
@@ -146,6 +147,19 @@ impl SignedTransactionPayload {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct LocalSendRequest {
+    to: String,
+    amount: u64,
+    fee: Option<u64>,
+    nonce: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PeerConnectRequest {
+    address: String,
+}
+
 #[derive(Debug, Clone)]
 struct LoadedChainState {
     genesis_hash: [u8; 32],
@@ -169,6 +183,8 @@ async fn handle_status(State(s): State<SharedState>) -> Json<serde_json::Value> 
     let s = s.read().unwrap();
     let height = s.chain_height;
     let uptime = s.started_at.elapsed().as_secs();
+    let (block_time_avg_ms, block_time_stddev_ms) = rolling_block_time_stats(&s.blocks, 20);
+    let btc_seed_age_secs = unix_secs().saturating_sub(s.btc_seed_changed_at);
     let avg_mhs = if s.total_time_ms > 0 {
         (s.total_hashes as f64 / 1e6) / (s.total_time_ms as f64 / 1e3)
     } else {
@@ -191,7 +207,11 @@ async fn handle_status(State(s): State<SharedState>) -> Json<serde_json::Value> 
         "miner_address":      s.miner_address,
         "btc_height":         s.btc_height,
         "btc_tip":            s.btc_tip,
+        "btc_seed_age_secs":  btc_seed_age_secs,
+        "btc_seed_changed_at": s.btc_seed_changed_at,
         "btc_fork_seen":      s.btc_fork,
+        "block_time_avg_ms":  block_time_avg_ms,
+        "block_time_stddev_ms": block_time_stddev_ms,
         "nullifiers_spent":   s.nullifiers.len(),
         "genesis_hash":       hex::encode(s.genesis_hash),
         "tip_hash":           hex::encode(s.tip_hash),
@@ -344,6 +364,52 @@ async fn handle_submit_transaction(
     })))
 }
 
+async fn handle_wallet_send(
+    State(s): State<SharedState>,
+    Extension(ledger): Extension<SharedLedger>,
+    Json(payload): Json<LocalSendRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let to = parse_address_hex(&payload.to)
+        .map_err(|e| json_error(StatusCode::BAD_REQUEST, format!("bad recipient address: {e}")))?;
+    let fee = payload.fee.unwrap_or(0);
+    let miner_keypair = load_miner_keypair();
+    let from = miner_keypair.address();
+    let from_hex = hex::encode(from);
+    let (height, miner_address) = {
+        let state = s.read().unwrap();
+        (state.chain_height, state.miner_address.clone())
+    };
+    let timestamp = unix_secs();
+
+    let mut ledger = ledger
+        .lock()
+        .map_err(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "ledger lock poisoned"))?;
+    let nonce = payload.nonce.unwrap_or_else(|| ledger.nonce(&from_hex));
+    let tx = Transaction::new(from, to, payload.amount, nonce, fee);
+    let signed = SignedTransaction::sign(tx, &miner_keypair)
+        .map_err(|e| json_error(StatusCode::BAD_REQUEST, format!("transaction signing failed: {e}")))?;
+    ledger
+        .apply_transaction(height, &signed, &miner_address, timestamp)
+        .map_err(|e| json_error(StatusCode::BAD_REQUEST, format!("transaction rejected: {e}")))?;
+
+    Ok(Json(serde_json::json!({
+        "status": "accepted",
+        "tx_id": signed.tx_id_hex(),
+        "from": signed.from_hex(),
+        "to": signed.to_hex(),
+        "amount": signed.tx.amount,
+        "fee": signed.tx.fee,
+        "nonce": signed.tx.nonce,
+        "tx_digest": signed.tx.digest_hex(),
+        "public_key": signed.public_key_hex(),
+        "signature": signed.signature_hex(),
+        "signature_mode": "hybrid",
+        "from_balance_bina": ledger.balance(&signed.from_hex()),
+        "to_balance_bina": ledger.balance(&signed.to_hex()),
+        "height": height,
+    })))
+}
+
 async fn handle_p2p_message(
     State(s): State<SharedState>,
     Extension(gossip): Extension<Arc<Gossip>>,
@@ -403,6 +469,64 @@ async fn handle_peer_hello(
         }
         Err(_) => StatusCode::BAD_REQUEST,
     }
+}
+
+async fn handle_peer_connect(
+    State(s): State<SharedState>,
+    Extension(gossip): Extension<Arc<Gossip>>,
+    Json(payload): Json<PeerConnectRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let addr: SocketAddr = payload
+        .address
+        .trim()
+        .parse()
+        .map_err(|e| json_error(StatusCode::BAD_REQUEST, format!("invalid peer address: {e}")))?;
+    let (best_height, best_hash) = {
+        let state = s.read().unwrap();
+        (state.chain_height, hex::encode(state.tip_hash))
+    };
+    let listen_addr = std::env::var("BINA_P2P_LISTEN_ADDR")
+        .unwrap_or_else(|_| format!("127.0.0.1:{PORT}"));
+    let hello = PeerHelloEnvelope {
+        network: gossip.network().to_string(),
+        version: 1,
+        best_height,
+        best_hash,
+        listen_addr,
+    };
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(1_200))
+        .build()
+        .map_err(|e| json_error(StatusCode::INTERNAL_SERVER_ERROR, format!("HTTP client error: {e}")))?;
+    let hello_url = format!("http://{addr}/p2p/hello");
+    let response = client
+        .post(&hello_url)
+        .json(&hello)
+        .send()
+        .await
+        .map_err(|e| json_error(StatusCode::BAD_GATEWAY, format!("peer hello failed: {e}")))?;
+    if !response.status().is_success() {
+        return Err(json_error(
+            StatusCode::BAD_GATEWAY,
+            format!("peer rejected hello with HTTP {}", response.status()),
+        ));
+    }
+
+    gossip.peers().add(addr);
+    let peers_url = format!("http://{addr}/p2p/peers");
+    if let Ok(response) = client.get(&peers_url).send().await {
+        if let Ok(peers) = response.json::<Vec<String>>().await {
+            for peer in peers.into_iter().filter_map(|peer| peer.parse().ok()) {
+                gossip.peers().add(peer);
+            }
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "status": "connected",
+        "peer": addr.to_string(),
+        "known_peers": gossip.peers().count(),
+    })))
 }
 
 fn accept_signed_claim(state: &SharedState, claim: SignedBlockClaim) -> Result<AcceptedClaim, ClaimReject> {
@@ -479,10 +603,12 @@ fn accept_signed_claim(state: &SharedState, claim: SignedBlockClaim) -> Result<A
 
 // GET /wallet/:address/balance
 async fn handle_wallet_balance(
+    Extension(ledger): Extension<SharedLedger>,
     Path(address): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let ledger = RewardLedger::open(LEDGER_PATH)
-        .map_err(|e| json_error(StatusCode::INTERNAL_SERVER_ERROR, format!("ledger unavailable: {e}")))?;
+    let ledger = ledger
+        .lock()
+        .map_err(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "ledger lock poisoned"))?;
     let balance = ledger.balance(&address);
     let nonce = ledger.nonce(&address);
     Ok(Json(serde_json::json!({
@@ -530,6 +656,28 @@ fn unix_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+fn rolling_block_time_stats(blocks: &VecDeque<BlockRecord>, window: usize) -> (u64, u64) {
+    let values: Vec<f64> = blocks
+        .iter()
+        .rev()
+        .take(window)
+        .filter_map(|block| (block.elapsed_ms > 0).then_some(block.elapsed_ms as f64))
+        .collect();
+    if values.is_empty() {
+        return (0, 0);
+    }
+    let mean = values.iter().sum::<f64>() / values.len() as f64;
+    let variance = values
+        .iter()
+        .map(|value| {
+            let delta = value - mean;
+            delta * delta
+        })
+        .sum::<f64>()
+        / values.len() as f64;
+    (mean.round() as u64, variance.sqrt().round() as u64)
 }
 
 fn hex_to_32(label: &str, value: &str) -> [u8; 32] {
@@ -610,12 +758,17 @@ async fn mining_loop(state: SharedState, ledger: SharedLedger, gossip: Arc<Gossi
     let miner_address: [u8; 20] = miner_keypair.address();
     let miner_hex = hex::encode(miner_address);
 
-    let persisted_total = ledger.lock().unwrap().total_mined();
-
     // Genesis
     let genesis = genesis_block();
     let genesis_hash = genesis.header.hash();
     let chain_state = load_or_create_chain_state(CHAIN_STATE_PATH, genesis_hash);
+    let persisted_total = {
+        let scoped_ledger = RewardLedger::open_scoped(LEDGER_PATH, chain_state.height)
+            .unwrap_or_else(|e| panic!("failed to open scoped reward ledger: {e}"));
+        let total = scoped_ledger.total_mined();
+        *ledger.lock().unwrap() = scoped_ledger;
+        total
+    };
     {
         let mut s = state.write().unwrap();
         s.genesis_hash = chain_state.genesis_hash;
@@ -644,7 +797,8 @@ async fn mining_loop(state: SharedState, ledger: SharedLedger, gossip: Arc<Gossi
 
     let mut prev_hash = chain_state.tip_hash;
     let mut height: u64 = chain_state.height;
-    let mut btc = fetch_btc().await;
+    let mut btc = fetch_btc(None).await;
+    let mut btc_seed_changed_at = unix_secs();
     log_btc(&btc);
 
     let now_ms = || {
@@ -659,18 +813,18 @@ async fn mining_loop(state: SharedState, ledger: SharedLedger, gossip: Arc<Gossi
     loop {
         height += 1;
 
-        // Refresh BTC every epoch (coincides with difficulty check)
-        if height % l1_core::difficulty::EPOCH_SIZE == 0 {
-            let fresh = fetch_btc().await;
-            if fresh.tip_hash != btc.tip_hash {
-                println!(
-                    "[btc] ⬆  new tip at height {}  (was {})",
-                    fresh.tip_height, btc.tip_height
-                );
-                log_btc(&fresh);
-            }
-            btc = fresh;
+        let previous_btc_seed = btc.bitcoin_seed_hash();
+        let fresh = fetch_btc(Some(&btc)).await;
+        let fresh_seed = fresh.bitcoin_seed_hash();
+        if fresh_seed != previous_btc_seed {
+            btc_seed_changed_at = unix_secs();
+            println!(
+                "[btc] new seed at height {}  (was {})",
+                fresh.tip_height, btc.tip_height
+            );
+            log_btc(&fresh);
         }
+        btc = fresh;
 
         let current_bits = adjuster.current_bits();
         let btc_seed = btc.bitcoin_seed_hash();
@@ -682,6 +836,7 @@ async fn mining_loop(state: SharedState, ledger: SharedLedger, gossip: Arc<Gossi
             s.btc_height = btc_height_now;
             s.btc_tip = hex::encode(&btc.tip_hash[..8]);
             s.btc_seed_hash = btc_seed;
+            s.btc_seed_changed_at = btc_seed_changed_at;
             s.btc_fork = s.btc_fork || btc_fork_now;
         }
 
@@ -822,6 +977,7 @@ async fn mining_loop(state: SharedState, ledger: SharedLedger, gossip: Arc<Gossi
             s.btc_height = btc_height_now;
             s.btc_tip = hex::encode(&btc.tip_hash[..8]);
             s.btc_seed_hash = btc_seed;
+            s.btc_seed_changed_at = btc_seed_changed_at;
             s.btc_fork = s.btc_fork || btc_fork_now;
             if s.blocks.len() >= MAX_STORED {
                 s.blocks.pop_front();
@@ -835,12 +991,17 @@ async fn mining_loop(state: SharedState, ledger: SharedLedger, gossip: Arc<Gossi
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
-async fn fetch_btc() -> BtcEntropyState {
+async fn fetch_btc(previous: Option<&BtcEntropyState>) -> BtcEntropyState {
     match bitcoin_entropy::fetch_live_entropy().await {
         Ok(e) => e,
         Err(e) => {
-            eprintln!("[btc] fetch error: {e} — using mock");
-            BtcEntropyState::mock()
+            if let Some(previous) = previous {
+                eprintln!("[btc] fetch error: {e} — keeping previous Bitcoin tip");
+                previous.clone()
+            } else {
+                eprintln!("[btc] fetch error: {e} — using mock");
+                BtcEntropyState::mock()
+            }
         }
     }
 }
@@ -937,8 +1098,10 @@ async fn main() {
     println!("    GET /chain/blocks              — last 20 blocks");
     println!("    POST /chain/submit             — submit a signed mined block claim");
     println!("    POST /tx/submit                — submit a signed BINA transfer");
+    println!("    POST /wallet/send              — sign and submit from local node wallet");
     println!("    POST /p2p/message              — receive signed gossip messages");
     println!("    POST /p2p/hello                — peer introduction");
+    println!("    POST /p2p/connect              — connect to a BINA HTTP peer");
     println!("    GET /p2p/peers                 — known peer list");
     println!("    GET /block/:height             — block by height");
     println!("    GET /randomness/latest         — latest randomness output");
@@ -959,6 +1122,7 @@ async fn main() {
         btc_height: 0,
         btc_tip: String::new(),
         btc_seed_hash: [0u8; 32],
+        btc_seed_changed_at: unix_secs(),
         btc_fork: false,
         difficulty_bits: l1_core::difficulty::MIN_BITS,
         miner_address: String::new(),
@@ -990,8 +1154,10 @@ async fn main() {
         .route("/chain/submit", post(handle_submit_claim))
         .route("/chain/supply", get(handle_supply))
         .route("/tx/submit", post(handle_submit_transaction))
+        .route("/wallet/send", post(handle_wallet_send))
         .route("/p2p/message", post(handle_p2p_message))
         .route("/p2p/hello", post(handle_peer_hello))
+        .route("/p2p/connect", post(handle_peer_connect))
         .route("/p2p/peers", get(handle_get_peers))
         .route("/block/{height}", get(handle_block))
         .route("/randomness/latest", get(handle_randomness_latest))

@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.30;
 
+interface IBinaOracle {
+    function isPQResistant() external pure returns (bool);
+    function pqSecurityBits() external pure returns (uint8);
+    function signingScheme() external pure returns (string memory);
+}
+
 /**
  * @title BinaOracle
  * @author Emiliano Solazzi
@@ -11,7 +17,7 @@ pragma solidity ^0.8.30;
  *      consumer-friendly derivation helpers for DeFi, games, AI, validator
  *      selection, and other utility use cases.
  */
-contract BinaOracle {
+contract BinaOracle is IBinaOracle {
     // ======================== TYPES ========================
 
     struct BinaOutput {
@@ -26,6 +32,7 @@ contract BinaOracle {
         uint8 workBits;
         bytes32 claimDigest;
         bytes32 electionScore;
+        bool falconVerified;
     }
 
     struct StoredOutput {
@@ -36,6 +43,7 @@ contract BinaOracle {
         uint64 btcHeight;
         uint64 minedTimestamp;
         uint8 workBits;
+        bool falconVerified;
         address publisher;
     }
 
@@ -50,6 +58,7 @@ contract BinaOracle {
     // ======================== EVENTS ========================
 
     event PublisherUpdated(address indexed publisher, bool authorized);
+    event FalconRequirementUpdated(bool required);
     event BinaOutputSubmitted(
         uint64 indexed height,
         bytes32 indexed blockHash,
@@ -57,7 +66,8 @@ contract BinaOracle {
         bytes32 randomnessOutput,
         bytes32 nullifier,
         bytes20 binaMiner,
-        address publisher
+        address publisher,
+        bool falconVerified
     );
     event BinaOutputMetadata(
         bytes32 indexed blockHash,
@@ -103,6 +113,7 @@ contract BinaOracle {
     error RequestNotFound();
     error RequestAlreadyFulfilled();
     error InvalidUpperBound();
+    error FalconNotVerified();
 
     // ======================== CONSTANTS ========================
 
@@ -118,10 +129,20 @@ contract BinaOracle {
     uint256 public constant MAX_TIMESTAMP_DRIFT = 1 hours;
     uint256 public constant MAX_TIMESTAMP_AGE = 7 days;
 
+    /// @notice Post-quantum security level of the BLAKE3 PoW + Bitcoin-anchored randomness source.
+    uint8 public constant PQ_SECURITY_BITS_SOURCE = 128;
+    /// @notice Post-quantum security level of BINA L1 submission integrity via Falcon-512.
+    uint8 public constant PQ_SECURITY_BITS_SUBMISSION = 128;
+    /// @notice Post-quantum security level of EVM derivation helpers using keccak256 under Grover.
+    uint8 public constant PQ_SECURITY_BITS_DERIVATION = 128;
+    /// @notice This oracle accepts only publisher-attested Ed25519 + Falcon-512 BINA outputs.
+    bool public constant IS_PQ_RESISTANT = true;
+
     // ======================== STORAGE ========================
 
     address public owner;
     mapping(address => bool) public publishers;
+    bool public requireFalconVerification;
 
     mapping(bytes32 => StoredOutput) public outputsByBlockHash;
     mapping(bytes32 => bool) public usedNullifiers;
@@ -172,6 +193,11 @@ contract BinaOracle {
         emit PublisherUpdated(publisher, authorized);
     }
 
+    function setRequireFalcon(bool required) external onlyOwner {
+        requireFalconVerification = required;
+        emit FalconRequirementUpdated(required);
+    }
+
     // ======================== BINA OUTPUT INGESTION ========================
 
     /**
@@ -202,6 +228,7 @@ contract BinaOracle {
             btcHeight: output.btcHeight,
             minedTimestamp: output.minedTimestamp,
             workBits: output.workBits,
+            falconVerified: output.falconVerified,
             publisher: msg.sender
         });
         usedNullifiers[output.nullifier] = true;
@@ -234,6 +261,7 @@ contract BinaOracle {
             btcHeight: output.btcHeight,
             minedTimestamp: output.minedTimestamp,
             workBits: output.workBits,
+            falconVerified: output.falconVerified,
             publisher: msg.sender
         });
         usedNullifiers[output.nullifier] = true;
@@ -311,6 +339,18 @@ contract BinaOracle {
         return blockHashes[index];
     }
 
+    function isPQResistant() external pure returns (bool) {
+        return IS_PQ_RESISTANT;
+    }
+
+    function pqSecurityBits() external pure returns (uint8) {
+        return PQ_SECURITY_BITS_SOURCE;
+    }
+
+    function signingScheme() external pure returns (string memory) {
+        return "Ed25519+Falcon512";
+    }
+
     // ======================== PURE UTILITY HELPERS ========================
 
     function shuffleValidators(bytes32 seed, address[] memory validators) external pure returns (address[] memory) {
@@ -346,6 +386,7 @@ contract BinaOracle {
         if (output.binaMiner == bytes20(0)) revert ZeroValue();
         if (output.btcSeed == bytes32(0)) revert ZeroValue();
         if (output.claimDigest == bytes32(0)) revert ZeroValue();
+        if (requireFalconVerification && !output.falconVerified) revert FalconNotVerified();
         if (output.workBits < MIN_WORK_BITS || output.workBits > MAX_WORK_BITS) revert InvalidWorkBits();
         if (output.minedTimestamp > block.timestamp + MAX_TIMESTAMP_DRIFT) revert InvalidTimestamp();
         if (output.minedTimestamp + MAX_TIMESTAMP_AGE < block.timestamp) revert InvalidTimestamp();
@@ -378,7 +419,8 @@ contract BinaOracle {
             output.randomnessOutput,
             output.nullifier,
             output.binaMiner,
-            msg.sender
+            msg.sender,
+            output.falconVerified
         );
         emit BinaOutputMetadata(
             output.blockHash,

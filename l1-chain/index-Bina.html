@@ -36,6 +36,18 @@
 
     button, input { font: inherit; }
 
+    input {
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: rgba(2, 6, 23, 0.72);
+      color: var(--text);
+      padding: 10px 12px;
+      outline: none;
+    }
+
+    input:focus { border-color: rgba(56, 189, 248, 0.65); }
+
     .wrap {
       width: min(1360px, calc(100% - 32px));
       margin: 0 auto;
@@ -214,6 +226,25 @@
     }
 
     .hash.compact { min-height: 0; font-size: 12px; }
+    .hash.sensitive { color: var(--gold); }
+
+    .form-grid {
+      display: grid;
+      grid-template-columns: 1fr 130px 100px auto;
+      gap: 10px;
+      align-items: end;
+      margin-top: 14px;
+    }
+
+    .field label {
+      display: block;
+      margin-bottom: 6px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+    }
 
     .progress {
       height: 15px;
@@ -297,6 +328,7 @@
       .wrap { width: min(100% - 20px, 1360px); padding-top: 16px; }
       .hero, .panel, .card { border-radius: 14px; padding: 14px; }
       .two-col, .mini-grid { grid-template-columns: 1fr; }
+      .form-grid { grid-template-columns: 1fr !important; }
       .kv { grid-template-columns: 1fr; }
       .actions { width: 100%; }
       .btn { flex: 1; }
@@ -357,7 +389,7 @@
             <h2>Emission And Supply</h2>
             <p class="note">Hard cap, reward era, halving schedule, and current block reward.</p>
           </div>
-          <div class="badge ok"><span class="dot"></span><span>1B hard cap</span></div>
+          <div class="badge ok"><span class="dot"></span><span id="supplyCapBadge">Hard cap</span></div>
         </div>
         <div class="mini-grid">
           <div class="mini"><div class="label">Total mined</div><div class="value"><span id="totalMined">0</span> BINA</div></div>
@@ -368,6 +400,7 @@
         <div class="progress gold"><div id="supplyProgress"></div></div>
         <div class="kv">
           <span>Initial reward</span><strong><span id="initialReward">0</span> BINA</strong>
+          <span>Hard cap</span><strong><span id="hardCap">0</span> BINA</strong>
           <span>Halving interval</span><strong><span id="halvingInterval">0</span> blocks</strong>
           <span>Next halving</span><strong>block <span id="nextHalving">0</span></strong>
           <span>Difficulty adjustment</span><strong id="adjustment">No adjustment yet</strong>
@@ -411,6 +444,8 @@
           <span>BTC height</span><strong id="btcHeight">0</strong>
           <span>BTC tip prefix</span><strong class="mono" id="btcTip">Waiting...</strong>
           <span>Latest block BTC height</span><strong id="latestBtcHeight">0</strong>
+          <span>Seed freshness</span><strong id="btcFreshness">Waiting...</strong>
+          <span>Seed age</span><strong id="btcSeedAge">0s</strong>
           <span>BTC seed</span><div class="hash compact" id="btcSeed">Waiting...</div>
         </div>
       </article>
@@ -428,14 +463,16 @@
           <div class="mini"><div class="label">Zero bits</div><div class="value" id="zeroBits">0</div></div>
           <div class="mini"><div class="label">Elapsed</div><div class="value"><span id="blockMs">0</span> ms</div></div>
           <div class="mini"><div class="label">Source</div><div class="value" id="source">-</div></div>
+          <div class="mini"><div class="label">Avg 20</div><div class="value"><span id="blockAvgMs">0</span> ms</div></div>
+          <div class="mini"><div class="label">Std dev</div><div class="value"><span id="blockStdMs">0</span> ms</div></div>
         </div>
         <div class="two-col" style="margin-top: 14px;">
           <div><h3>Block Hash</h3><div class="hash" id="blockHash">Waiting...</div></div>
           <div><h3>Miner Address</h3><div class="hash" id="latestMiner">Waiting...</div></div>
           <div><h3>Claim Digest</h3><div class="hash" id="claimDigest">Waiting...</div></div>
           <div><h3>Election Score</h3><div class="hash" id="electionScore">Waiting...</div></div>
-          <div><h3>Miner Public Key</h3><div class="hash" id="minerPublicKey">Waiting...</div></div>
-          <div><h3>Miner Signature</h3><div class="hash" id="minerSignature">Waiting...</div></div>
+          <div><h3>Miner Public Key</h3><div class="hash sensitive" id="minerPublicKey">Waiting...</div></div>
+          <div><h3>Miner Signature</h3><div class="hash sensitive" id="minerSignature">Waiting...</div></div>
         </div>
       </article>
 
@@ -454,6 +491,11 @@
           <span>P2P endpoint</span><strong class="mono">POST /p2p/message</strong>
         </div>
         <h3 style="margin-top: 14px;">Peer List</h3>
+        <div class="form-grid" style="grid-template-columns: 1fr auto;">
+          <div class="field"><label for="peerAddress">Add Peer</label><input id="peerAddress" placeholder="127.0.0.1:8181" /></div>
+          <button class="btn primary" id="connectPeerBtn">Connect</button>
+        </div>
+        <div class="small" id="peerConnectStatus" style="margin-top: 8px;">Ready to connect to BINA HTTP peers.</div>
         <div class="hash compact" id="peerList">No peers reported</div>
       </article>
 
@@ -477,17 +519,23 @@
         <div class="section-head">
           <div>
             <h2>Transactions</h2>
-            <p class="note">Wallet transaction signing is implemented; node mempool/block inclusion is the next ledger API layer.</p>
+            <p class="note">Wallet transaction signing and direct node submission are implemented; mempool display and transaction history are the next ledger UI layer.</p>
           </div>
-          <div class="badge warn"><span class="dot"></span><span>Signing ready</span></div>
+          <div class="badge ok"><span class="dot"></span><span>Submit ready</span></div>
         </div>
         <div class="kv">
           <span>Digest domain</span><strong class="mono">BINA-TX-v1</strong>
           <span>Replay protection</span><strong>sender nonce</strong>
-          <span>CLI sign</span><strong class="mono">l1-wallet sign-tx</strong>
-          <span>CLI verify</span><strong class="mono">l1-wallet verify-tx</strong>
+          <span>Local signer</span><strong>node wallet only</strong>
+          <span>Submit endpoint</span><strong class="mono">POST /tx/submit</strong>
         </div>
-        <div class="hash compact" style="margin-top: 14px;">Next UI/API target: POST /tx/submit, pending transaction pool, Merkle root inclusion, and ledger apply during block acceptance.</div>
+        <div class="form-grid">
+          <div class="field"><label for="txTo">To address</label><input id="txTo" placeholder="40 hex chars or 0x..." /></div>
+          <div class="field"><label for="txAmount">Amount</label><input id="txAmount" type="number" min="1" step="1" placeholder="0" /></div>
+          <div class="field"><label for="txFee">Fee</label><input id="txFee" type="number" min="0" step="1" value="0" /></div>
+          <button class="btn gold" id="sendTxBtn">Send</button>
+        </div>
+        <div class="hash compact" id="txStatus" style="margin-top: 14px;">No transaction submitted.</div>
       </article>
 
       <article class="panel span-12">
@@ -496,7 +544,7 @@
             <h2>Recent Blocks</h2>
             <p class="note">The local node keeps the latest 20 block records available to the dashboard.</p>
           </div>
-          <div class="tools"><button class="btn" id="copyBlockBtn">Copy Block Hash</button><button class="btn" id="copyClaimBtn">Copy Claim Digest</button></div>
+          <div class="tools"><button class="btn" id="copyBlockBtn">Copy Block Hash</button><button class="btn" id="copyClaimBtn">Copy Claim Digest</button><button class="btn" id="copyMinerPublicKeyBtn">Copy Miner Key</button><button class="btn" id="copyMinerSignatureBtn">Copy Signature</button></div>
         </div>
         <table>
           <thead>
@@ -528,13 +576,21 @@
     let latestOutput = '';
     let latestBlockHash = '';
     let latestClaimDigest = '';
+    let latestMinerPublicKey = '';
+    let latestMinerSignature = '';
     let walletAddress = '';
 
     const fmt = (value) => Number(value || 0).toLocaleString();
+    const fmtSeconds = (value) => `${fmt(value)}s`;
     const pct = (value, total) => total > 0 ? Math.min(100, Math.max(0, (Number(value || 0) / Number(total)) * 100)) : 0;
     const short = (hex, left = 12, right = 8) => {
       if (!hex) return 'Waiting...';
       return hex.length > left + right + 3 ? `${hex.slice(0, left)}...${hex.slice(-right)}` : hex;
+    };
+    const fingerprint = (hex, label) => {
+      if (!hex) return 'Waiting...';
+      const bytes = Math.floor(hex.replace(/^0x/, '').length / 2);
+      return `${label}: ${short(hex, 16, 12)} (${fmt(bytes)} bytes hidden)`;
     };
     const prettyUptime = (secs) => {
       secs = Number(secs || 0);
@@ -572,6 +628,8 @@
       latestOutput = latest.randomness_output || randomLatest.output || '';
       latestBlockHash = latest.block_hash || randomLatest.block_hash || '';
       latestClaimDigest = latest.claim_digest || '';
+      latestMinerPublicKey = latest.miner_public_key || '';
+      latestMinerSignature = latest.miner_signature || '';
 
       els.walletAddress.textContent = walletAddress || 'No wallet loaded';
       els.balance.textContent = fmt(balance.balance_bina);
@@ -589,6 +647,8 @@
       els.reward.textContent = fmt(supply.current_reward_bina);
       els.era.textContent = fmt(supply.current_era);
       els.initialReward.textContent = fmt(supply.initial_reward);
+      els.hardCap.textContent = fmt(supply.hard_cap);
+      els.supplyCapBadge.textContent = `${fmt(Math.round((supply.hard_cap || 0) / 1_000_000_000))}B hard cap`;
       els.halvingInterval.textContent = fmt(supply.halving_interval);
       els.nextHalving.textContent = fmt(supply.next_halving_at);
       els.supplyProgress.style.width = `${pct(supply.total_mined_bina, supply.hard_cap)}%`;
@@ -604,6 +664,8 @@
       els.btcHeight.textContent = fmt(status.btc_height);
       els.btcTip.textContent = status.btc_tip || 'Waiting...';
       els.latestBtcHeight.textContent = fmt(latest.btc_height || randomLatest.btc_height);
+      els.btcSeedAge.textContent = fmtSeconds(status.btc_seed_age_secs);
+      els.btcFreshness.textContent = Number(status.btc_seed_age_secs || 0) <= 1200 ? 'Fresh' : 'Stale';
       els.btcSeed.textContent = latest.btc_seed || randomLatest.btc_seed || 'Waiting...';
       setBadge(els.btcForkBadge, status.btc_fork_seen ? 'warn' : 'ok', status.btc_fork_seen ? 'Fork seen' : 'No fork');
 
@@ -611,13 +673,15 @@
       els.nonce.textContent = fmt(latest.nonce);
       els.zeroBits.textContent = fmt(latest.zero_bits);
       els.blockMs.textContent = fmt(latest.elapsed_ms);
+      els.blockAvgMs.textContent = fmt(status.block_time_avg_ms);
+      els.blockStdMs.textContent = fmt(status.block_time_stddev_ms);
       els.source.textContent = latest.source || '-';
       els.blockHash.textContent = latestBlockHash || 'Waiting...';
       els.latestMiner.textContent = latest.miner_address || walletAddress || 'Waiting...';
       els.claimDigest.textContent = latest.claim_digest || 'Waiting...';
       els.electionScore.textContent = latest.election_score || 'Waiting...';
-      els.minerPublicKey.textContent = latest.miner_public_key || 'Waiting...';
-      els.minerSignature.textContent = latest.miner_signature || 'Waiting...';
+      els.minerPublicKey.textContent = fingerprint(latestMinerPublicKey, 'fingerprint');
+      els.minerSignature.textContent = fingerprint(latestMinerSignature, 'signature proof');
     }
 
     function renderPeers(peers) {
@@ -676,11 +740,58 @@
       await navigator.clipboard.writeText(text);
     }
 
+    async function postJson(path, body) {
+      const res = await fetch(`${API}${path}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `${path} -> HTTP ${res.status}`);
+      return data;
+    }
+
+    async function connectPeer() {
+      const address = els.peerAddress.value.trim();
+      if (!address) return;
+      els.peerConnectStatus.textContent = 'Connecting...';
+      try {
+        const result = await postJson('/p2p/connect', { address });
+        els.peerConnectStatus.textContent = `Connected ${result.peer}; ${result.known_peers} known peers.`;
+        await refresh();
+      } catch (err) {
+        els.peerConnectStatus.textContent = `Connect failed: ${err.message}`;
+      }
+    }
+
+    async function sendTransaction() {
+      const to = els.txTo.value.trim();
+      const amount = Number(els.txAmount.value || 0);
+      const fee = Number(els.txFee.value || 0);
+      if (!to || !Number.isInteger(amount) || amount <= 0 || !Number.isInteger(fee) || fee < 0) {
+        els.txStatus.textContent = 'Enter a recipient, whole-number amount, and non-negative fee.';
+        return;
+      }
+      els.txStatus.textContent = 'Signing locally and submitting...';
+      try {
+        const result = await postJson('/wallet/send', { to, amount, fee });
+        els.txStatus.textContent = `Accepted tx ${short(result.tx_id, 18, 12)} | nonce ${result.nonce} | balance ${fmt(result.from_balance_bina)} BINA`;
+        els.txAmount.value = '';
+        await refresh();
+      } catch (err) {
+        els.txStatus.textContent = `Transaction failed: ${err.message}`;
+      }
+    }
+
     els.refreshBtn.addEventListener('click', refresh);
     els.copyAddressBtn.addEventListener('click', () => copyText(walletAddress));
     els.copyOutputBtn.addEventListener('click', () => copyText(latestOutput));
     els.copyBlockBtn.addEventListener('click', () => copyText(latestBlockHash));
     els.copyClaimBtn.addEventListener('click', () => copyText(latestClaimDigest));
+    els.copyMinerPublicKeyBtn.addEventListener('click', () => copyText(latestMinerPublicKey));
+    els.copyMinerSignatureBtn.addEventListener('click', () => copyText(latestMinerSignature));
+    els.connectPeerBtn.addEventListener('click', connectPeer);
+    els.sendTxBtn.addEventListener('click', sendTransaction);
 
     refresh();
     setInterval(refresh, 3500);

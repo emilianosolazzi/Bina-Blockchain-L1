@@ -32,6 +32,16 @@ function Get-NodePid {
     return $null
 }
 
+function Test-BuildNeeded {
+    if (-not (Test-Path $binPath)) { return $true }
+    $binTime = (Get-Item $binPath).LastWriteTimeUtc
+    $latestSource = Get-ChildItem -Path (Join-Path $root "core\src"), (Join-Path $root "node\src") -Recurse -File -Include *.rs |
+        Sort-Object LastWriteTimeUtc -Descending |
+        Select-Object -First 1
+    if ($null -eq $latestSource) { return $false }
+    return $latestSource.LastWriteTimeUtc -gt $binTime
+}
+
 # ── STOP ─────────────────────────────────────────────────────────────────────
 if ($Stop) {
     $nodeId = Get-NodePid
@@ -55,6 +65,9 @@ if ($Status) {
             Write-Host "  avg_hashrate_mhs: $($s.avg_hashrate_mhs)"
             Write-Host "  uptime_secs     : $($s.uptime_secs)"
             Write-Host "  btc_height      : $($s.btc_height)"
+            Write-Host "  btc_seed_age    : $($s.btc_seed_age_secs)s"
+            Write-Host "  block_avg_ms    : $($s.block_time_avg_ms)"
+            Write-Host "  block_stddev_ms : $($s.block_time_stddev_ms)"
             Write-Host "  nullifiers_spent: $($s.nullifiers_spent)"
             Write-Host "  total_hashes    : $($s.total_hashes)"
             Write-Host "  genesis_hash    : $($s.genesis_hash)"
@@ -82,10 +95,15 @@ if ($null -ne $existing) {
     exit 0
 }
 
-if (-not (Test-Path $binPath)) {
-    Write-Host "Binary not found at $binPath — building..."
+if (Test-BuildNeeded) {
+    Write-Host "Building l1-node from current Rust sources..."
     Push-Location $root
     cargo build -p l1-node
+    if ($LASTEXITCODE -ne 0) {
+        Pop-Location
+        Write-Error "cargo build failed"
+        exit $LASTEXITCODE
+    }
     Pop-Location
 }
 
@@ -108,8 +126,11 @@ Write-Host "    GET /randomness/latest — latest random output + nullifier"
 Write-Host "    GET /chain/latest      — latest mined block"
 Write-Host "    GET /chain/blocks      — last 20 blocks"
 Write-Host "    POST /chain/submit     — submit a signed mined block claim"
+Write-Host "    POST /tx/submit        — submit a signed BINA transfer"
+Write-Host "    POST /wallet/send      — sign and submit from local node wallet"
 Write-Host "    POST /p2p/message      — receive signed gossip messages"
 Write-Host "    POST /p2p/hello        — peer introduction"
+Write-Host "    POST /p2p/connect      — connect to a BINA HTTP peer"
 Write-Host "    GET /p2p/peers         — known peer list"
 Write-Host "    GET /block/:height     — block at height N"
 Write-Host ""
