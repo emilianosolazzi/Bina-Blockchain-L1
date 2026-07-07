@@ -1,8 +1,0 @@
-{
-  "manifestVersion": "3.2",
-  "proxies": [],
-  "impls": {},
-  "dependencies": {
-    "@openzeppelin/contracts-upgradeable": "5.2.0"
-  }
-}

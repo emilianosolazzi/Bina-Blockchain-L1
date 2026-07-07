@@ -75,3 +75,16 @@ l2-mining/rust/miner-run.log.err
 
 # Local planning notes
 l2-mining/docs/SERVER_VS_SELF_MINING.md
+
+# Bina L1 repository scope
+# Keep the larger local workspace on disk, but only track Bina L1 material here.
+/*
+!/.gitignore
+!/README.md
+!/LICENSE
+!/l1-chain/
+!/l1-chain/**
+
+# Bina L1 local runtime state
+l1-chain/data/ledger.csv
+l1-chain/logs/
