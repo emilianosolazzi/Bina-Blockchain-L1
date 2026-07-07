@@ -1,0 +1,510 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Bina Chain Wallet</title>
+  <style>
+    :root {
+      --bg: #101014;
+      --surface: #f4f0e6;
+      --panel: #fffaf0;
+      --ink: #191816;
+      --muted: #756e62;
+      --line: rgba(25, 24, 22, 0.14);
+      --gold: #c1842d;
+      --green: #2f8f5b;
+      --red: #b44942;
+      --blue: #315d88;
+      --shadow: 0 18px 48px rgba(0, 0, 0, 0.16);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: Georgia, "Times New Roman", serif;
+      color: var(--ink);
+      background:
+        linear-gradient(135deg, rgba(193, 132, 45, 0.12), transparent 32%),
+        linear-gradient(225deg, rgba(47, 143, 91, 0.10), transparent 34%),
+        repeating-linear-gradient(90deg, rgba(25,24,22,.035) 0 1px, transparent 1px 28px),
+        var(--surface);
+    }
+
+    button, input { font: inherit; }
+
+    .shell {
+      max-width: 1240px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+
+    .topbar {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 18px;
+      align-items: center;
+      padding: 22px 0 24px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      min-width: 0;
+    }
+
+    .mark {
+      width: 54px;
+      height: 54px;
+      display: grid;
+      place-items: center;
+      border-radius: 6px;
+      color: #fffaf0;
+      font-weight: 800;
+      font-size: 22px;
+      background: linear-gradient(135deg, #191816, #4d3920 58%, #c1842d);
+      box-shadow: var(--shadow);
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(30px, 4vw, 48px);
+      line-height: 1;
+      letter-spacing: 0;
+    }
+
+    .subtitle {
+      margin: 6px 0 0;
+      color: var(--muted);
+      font-family: "Segoe UI", sans-serif;
+      font-size: 14px;
+    }
+
+    .actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .btn {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--panel);
+      color: var(--ink);
+      padding: 10px 14px;
+      cursor: pointer;
+      transition: transform .15s ease, border-color .15s ease, background .15s ease;
+    }
+
+    .btn:hover { transform: translateY(-1px); border-color: rgba(193,132,45,.45); }
+    .btn.primary { background: #191816; color: #fffaf0; border-color: #191816; }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(12, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .card {
+      background: rgba(255, 250, 240, 0.86);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+      padding: 18px;
+      min-width: 0;
+    }
+
+    .hero-card { grid-column: span 7; }
+    .supply-card { grid-column: span 5; }
+    .metric-card { grid-column: span 3; }
+    .wide { grid-column: span 12; }
+    .half { grid-column: span 6; }
+
+    .card-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+
+    .eyebrow {
+      color: var(--muted);
+      font-family: "Segoe UI", sans-serif;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+      font-weight: 700;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      padding: 6px 10px;
+      font-family: "Segoe UI", sans-serif;
+      font-size: 12px;
+      color: var(--muted);
+      background: rgba(255,255,255,.42);
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--muted);
+    }
+
+    .ok .dot { background: var(--green); }
+    .warn .dot { background: var(--gold); }
+    .bad .dot { background: var(--red); }
+
+    .balance {
+      margin: 6px 0;
+      font-size: clamp(44px, 8vw, 84px);
+      line-height: .95;
+      font-weight: 800;
+      color: #1e1a13;
+    }
+
+    .unit { font-size: .32em; color: var(--gold); }
+
+    .address-row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 10px;
+      align-items: center;
+      margin-top: 18px;
+    }
+
+    .mono {
+      font-family: "Cascadia Mono", Consolas, monospace;
+      word-break: break-all;
+      letter-spacing: 0;
+    }
+
+    .hashbox {
+      padding: 12px;
+      border-radius: 6px;
+      border: 1px solid var(--line);
+      background: rgba(25, 24, 22, 0.045);
+      color: #2a2825;
+      font-size: 13px;
+    }
+
+    .stat {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .stat-value {
+      font-size: 30px;
+      font-weight: 800;
+      line-height: 1;
+    }
+
+    .stat-note {
+      color: var(--muted);
+      font-family: "Segoe UI", sans-serif;
+      font-size: 13px;
+    }
+
+    .progress {
+      height: 14px;
+      overflow: hidden;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: rgba(25,24,22,.08);
+      margin: 12px 0;
+    }
+
+    .progress > div {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, var(--green), var(--gold));
+      transition: width .4s ease;
+    }
+
+    .kv {
+      display: grid;
+      grid-template-columns: minmax(130px, auto) 1fr;
+      gap: 10px 12px;
+      font-family: "Segoe UI", sans-serif;
+      font-size: 14px;
+    }
+
+    .kv span:nth-child(odd) { color: var(--muted); }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-family: "Segoe UI", sans-serif;
+      font-size: 13px;
+    }
+
+    th, td {
+      text-align: left;
+      padding: 11px 10px;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+    }
+
+    th {
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+    }
+
+    .random-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+
+    .random-grid .hashbox { min-height: 86px; }
+
+    .footer {
+      margin: 18px 0 4px;
+      color: var(--muted);
+      font-family: "Segoe UI", sans-serif;
+      font-size: 12px;
+      text-align: center;
+    }
+
+    .hidden { display: none; }
+
+    @media (max-width: 900px) {
+      .topbar { grid-template-columns: 1fr; }
+      .actions { justify-content: flex-start; }
+      .hero-card, .supply-card, .metric-card, .half { grid-column: span 12; }
+      .random-grid { grid-template-columns: 1fr; }
+      .address-row { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="mark">B</div>
+        <div>
+          <h1>Bina Chain</h1>
+          <p class="subtitle">$BINA local wallet, miner, randomness output, and supply monitor</p>
+        </div>
+      </div>
+      <div class="actions">
+        <button class="btn" id="refreshBtn">Refresh</button>
+        <button class="btn primary" id="copyOutputBtn">Copy Random Output</button>
+      </div>
+    </header>
+
+    <section class="grid">
+      <article class="card hero-card">
+        <div class="card-head">
+          <div class="eyebrow">Wallet Balance</div>
+          <div class="badge" id="nodeBadge"><span class="dot"></span><span>Connecting</span></div>
+        </div>
+        <div class="balance"><span id="balance">0</span> <span class="unit">BINA</span></div>
+        <div class="address-row">
+          <div class="hashbox mono" id="walletAddress">Waiting for node...</div>
+          <button class="btn" id="copyAddressBtn">Copy Address</button>
+        </div>
+      </article>
+
+      <article class="card supply-card">
+        <div class="card-head">
+          <div class="eyebrow">Supply</div>
+          <div class="badge"><span class="dot"></span><span>1B hard cap</span></div>
+        </div>
+        <div class="kv">
+          <span>Total mined</span><strong><span id="totalMined">0</span> BINA</strong>
+          <span>Remaining</span><strong><span id="remaining">1,000,000,000</span> BINA</strong>
+          <span>Reward</span><strong><span id="reward">50</span> BINA/block</strong>
+          <span>Next halving</span><strong>block <span id="nextHalving">17,280,000</span></strong>
+        </div>
+        <div class="progress"><div id="supplyProgress"></div></div>
+        <div class="stat-note">Halving every 17,280,000 blocks, tuned for a 3.65s target block time.</div>
+      </article>
+
+      <article class="card metric-card stat">
+        <div class="eyebrow">Height</div>
+        <div class="stat-value" id="height">0</div>
+        <div class="stat-note">Latest local block</div>
+      </article>
+
+      <article class="card metric-card stat">
+        <div class="eyebrow">Difficulty</div>
+        <div class="stat-value"><span id="difficulty">25</span> bits</div>
+        <div class="stat-note">Dynamic range 25-45</div>
+      </article>
+
+      <article class="card metric-card stat">
+        <div class="eyebrow">Hashrate</div>
+        <div class="stat-value"><span id="hashrate">0.00</span></div>
+        <div class="stat-note">MH/s average</div>
+      </article>
+
+      <article class="card metric-card stat">
+        <div class="eyebrow">Bitcoin Tip</div>
+        <div class="stat-value" id="btcHeight">0</div>
+        <div class="stat-note" id="btcFork">No fork seen</div>
+      </article>
+
+      <article class="card half">
+        <div class="card-head">
+          <div class="eyebrow">Latest Randomness</div>
+          <div class="badge ok"><span class="dot"></span><span>Non-reusable nullifier</span></div>
+        </div>
+        <div class="random-grid">
+          <div>
+            <div class="stat-note">Output</div>
+            <div class="hashbox mono" id="randomOutput">Waiting...</div>
+          </div>
+          <div>
+            <div class="stat-note">Nullifier</div>
+            <div class="hashbox mono" id="nullifier">Waiting...</div>
+          </div>
+        </div>
+      </article>
+
+      <article class="card half">
+        <div class="card-head">
+          <div class="eyebrow">Latest Block</div>
+          <div class="badge"><span class="dot"></span><span id="blockReward">+0 BINA</span></div>
+        </div>
+        <div class="kv">
+          <span>Hash</span><div class="mono" id="blockHash">Waiting...</div>
+          <span>Nonce</span><strong id="nonce">0</strong>
+          <span>Zero bits</span><strong id="zeroBits">0</strong>
+          <span>Block time</span><strong><span id="blockMs">0</span> ms</strong>
+        </div>
+      </article>
+
+      <article class="card wide">
+        <div class="card-head">
+          <div>
+            <div class="eyebrow">Recent Blocks</div>
+            <div class="stat-note">Last 20 blocks from the local node</div>
+          </div>
+          <div class="badge"><span class="dot"></span><span id="adjustment">No adjustment yet</span></div>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>Height</th>
+              <th>Reward</th>
+              <th>Diff</th>
+              <th>Time</th>
+              <th>Hash</th>
+              <th>Random</th>
+            </tr>
+          </thead>
+          <tbody id="blocksBody">
+            <tr><td colspan="6">Waiting for blocks...</td></tr>
+          </tbody>
+        </table>
+      </article>
+    </section>
+
+    <p class="footer">Bina Chain local node API: <span class="mono">http://127.0.0.1:8181</span></p>
+  </main>
+
+  <script>
+    const API = 'http://127.0.0.1:8181';
+    const els = Object.fromEntries([...document.querySelectorAll('[id]')].map(el => [el.id, el]));
+    let latestOutput = '';
+    let walletAddress = '';
+
+    const fmt = (value) => Number(value || 0).toLocaleString();
+    const short = (hex, left = 12, right = 8) => {
+      if (!hex) return 'Waiting...';
+      return hex.length > left + right + 3 ? `${hex.slice(0, left)}...${hex.slice(-right)}` : hex;
+    };
+
+    function setNodeStatus(ok, text) {
+      els.nodeBadge.className = `badge ${ok ? 'ok' : 'bad'}`;
+      els.nodeBadge.querySelector('span:last-child').textContent = text;
+    }
+
+    async function getJson(path) {
+      const res = await fetch(`${API}${path}`, { cache: 'no-store' });
+      if (!res.ok) throw new Error(`${path} -> HTTP ${res.status}`);
+      return res.json();
+    }
+
+    async function refresh() {
+      try {
+        const [status, supply, latest, blocks] = await Promise.all([
+          getJson('/'),
+          getJson('/chain/supply'),
+          getJson('/chain/latest'),
+          getJson('/chain/blocks'),
+        ]);
+
+        walletAddress = status.miner_address || latest.miner_address || '';
+        const balance = walletAddress ? await getJson(`/wallet/${walletAddress}/balance`) : { balance_bina: 0 };
+
+        setNodeStatus(true, 'Node online');
+        els.walletAddress.textContent = walletAddress || 'No wallet loaded';
+        els.balance.textContent = fmt(balance.balance_bina);
+        els.height.textContent = fmt(status.height);
+        els.difficulty.textContent = status.difficulty_bits ?? supply.difficulty_bits ?? 0;
+        els.hashrate.textContent = status.avg_hashrate_mhs || '0.00';
+        els.btcHeight.textContent = fmt(status.btc_height);
+        els.btcFork.textContent = status.btc_fork_seen ? 'Fork signal seen' : 'No fork seen';
+
+        els.totalMined.textContent = fmt(supply.total_mined_bina);
+        els.remaining.textContent = fmt(supply.supply_remaining);
+        els.reward.textContent = fmt(supply.current_reward_bina);
+        els.nextHalving.textContent = fmt(supply.next_halving_at);
+        els.supplyProgress.style.width = `${Math.min(100, (supply.total_mined_bina / supply.hard_cap) * 100)}%`;
+        els.adjustment.textContent = supply.last_adjustment || status.last_difficulty_adjustment || 'No adjustment yet';
+
+        latestOutput = latest.randomness_output || '';
+        els.randomOutput.textContent = latestOutput;
+        els.nullifier.textContent = latest.nullifier || 'Waiting...';
+        els.blockReward.textContent = `+${fmt(latest.reward_bina)} BINA`;
+        els.blockHash.textContent = latest.block_hash || 'Waiting...';
+        els.nonce.textContent = fmt(latest.nonce);
+        els.zeroBits.textContent = latest.zero_bits ?? 0;
+        els.blockMs.textContent = fmt(latest.elapsed_ms);
+
+        els.blocksBody.innerHTML = blocks.map(block => `
+          <tr>
+            <td>${fmt(block.height)}</td>
+            <td>+${fmt(block.reward_bina)} BINA</td>
+            <td>${block.difficulty_bits}</td>
+            <td>${fmt(block.elapsed_ms)} ms</td>
+            <td class="mono">${short(block.block_hash)}</td>
+            <td class="mono">${short(block.randomness_output)}</td>
+          </tr>
+        `).join('') || '<tr><td colspan="6">No blocks yet</td></tr>';
+      } catch (err) {
+        setNodeStatus(false, 'Node offline');
+        els.walletAddress.textContent = 'Start the node with .\\node-start.ps1';
+        console.error(err);
+      }
+    }
+
+    async function copyText(text) {
+      if (!text) return;
+      await navigator.clipboard.writeText(text);
+    }
+
+    els.refreshBtn.addEventListener('click', refresh);
+    els.copyOutputBtn.addEventListener('click', () => copyText(latestOutput));
+    els.copyAddressBtn.addEventListener('click', () => copyText(walletAddress));
+
+    refresh();
+    setInterval(refresh, 3500);
+  </script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+[package]
+name = "l1-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+blake3    = "1"
+serde     = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex       = "0.4"
+anyhow    = "1"
+thiserror = "1"
+# Hybrid wallet signatures: classical + post-quantum
+ed25519-dalek    = { version = "2", features = ["rand_core"] }
+pqcrypto-falcon  = "0.3"
+pqcrypto-traits  = "0.3"
+rand             = "0.8"
