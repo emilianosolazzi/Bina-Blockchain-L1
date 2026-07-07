@@ -464,7 +464,7 @@
           <div class="mini"><div class="label">Elapsed</div><div class="value"><span id="blockMs">0</span> ms</div></div>
           <div class="mini"><div class="label">Source</div><div class="value" id="source">-</div></div>
           <div class="mini"><div class="label">Avg 20</div><div class="value"><span id="blockAvgMs">0</span> ms</div></div>
-          <div class="mini"><div class="label">Std dev</div><div class="value"><span id="blockStdMs">0</span> ms</div></div>
+          <div class="mini"><div class="label">Std dev</div><div class="value"><span id="blockStdMs">0</span> ms <span class="small" id="blockVarianceNote"></span></div></div>
         </div>
         <div class="two-col" style="margin-top: 14px;">
           <div><h3>Block Hash</h3><div class="hash" id="blockHash">Waiting...</div></div>
@@ -485,17 +485,17 @@
           <div class="badge" id="peerBadge"><span class="dot"></span><span>Peers</span></div>
         </div>
         <div class="kv">
-          <span>Connected peers</span><strong id="peerCount">0</strong>
+          <span>Known peers</span><strong id="peerCount">0</strong>
           <span>Candidate grace</span><strong>1,500 ms</strong>
           <span>Claim endpoint</span><strong class="mono">POST /chain/submit</strong>
           <span>P2P endpoint</span><strong class="mono">POST /p2p/message</strong>
         </div>
         <h3 style="margin-top: 14px;">Peer List</h3>
         <div class="form-grid" style="grid-template-columns: 1fr auto;">
-          <div class="field"><label for="peerAddress">Add Peer</label><input id="peerAddress" placeholder="144.126.157.197:8181" /></div>
+          <div class="field"><label for="peerAddress">Add Peer</label><input id="peerAddress" value="144.126.157.197:8181" placeholder="144.126.157.197:8181" /></div>
           <button class="btn primary" id="connectPeerBtn">Connect</button>
         </div>
-        <div class="small" id="peerConnectStatus" style="margin-top: 8px;">Ready to connect to BINA HTTP peers.</div>
+        <div class="small" id="peerConnectStatus" style="margin-top: 8px;">Ready to contact BINA HTTP peers over /p2p/hello.</div>
         <div class="hash compact" id="peerList">No peers reported</div>
       </article>
 
@@ -571,6 +571,7 @@
 
   <script>
     const API = 'http://127.0.0.1:8181';
+    const DEFAULT_PEER = '144.126.157.197:8181';
     const els = Object.fromEntries([...document.querySelectorAll('[id]')].map(el => [el.id, el]));
     const appShell = document.getElementById('appShell');
     let latestOutput = '';
@@ -667,10 +668,11 @@
       els.btcSeedAge.textContent = fmtSeconds(status.btc_seed_age_secs);
       els.btcFreshness.textContent = Number(status.btc_seed_age_secs || 0) <= 1200 ? 'Fresh' : 'Stale';
       els.btcSeed.textContent = latest.btc_seed || randomLatest.btc_seed || 'Waiting...';
+      const divergenceHeight = status.btc_tip_divergence_height || status.btc_height || latest.btc_height || randomLatest.btc_height || 0;
       els.btcForkBadge.title = status.btc_fork_seen
-        ? 'Bitcoin entropy sources disagreed on the BTC tip; this is not a BINA chain fork.'
+        ? `mempool.space and blockstream.info returned different Bitcoin tip hashes near height ${fmt(divergenceHeight)}. This can be a real Bitcoin fork or provider lag; it is not a BINA chain fork and clears when providers agree.`
         : 'Bitcoin entropy sources agree on the current BTC tip.';
-      setBadge(els.btcForkBadge, status.btc_fork_seen ? 'warn' : 'ok', status.btc_fork_seen ? 'BTC tip divergence' : 'BTC tips aligned');
+      setBadge(els.btcForkBadge, status.btc_fork_seen ? 'warn' : 'ok', status.btc_fork_seen ? `BTC divergence @ ${fmt(divergenceHeight)}` : 'BTC tips aligned');
 
       els.blockReward.textContent = `+${fmt(latest.reward_bina)} BINA`;
       els.nonce.textContent = fmt(latest.nonce);
@@ -678,6 +680,10 @@
       els.blockMs.textContent = fmt(latest.elapsed_ms);
       els.blockAvgMs.textContent = fmt(status.block_time_avg_ms);
       els.blockStdMs.textContent = fmt(status.block_time_stddev_ms);
+      const avgMs = Number(status.block_time_avg_ms || 0);
+      const stdMs = Number(status.block_time_stddev_ms || 0);
+      els.blockVarianceNote.textContent = avgMs > 0 && stdMs > avgMs ? '· high variance' : '';
+      els.blockVarianceNote.title = 'Solo PoW block times are bursty; a single slow block can push standard deviation above the average.';
       els.source.textContent = latest.source || '-';
       els.blockHash.textContent = latestBlockHash || 'Waiting...';
       els.latestMiner.textContent = latest.miner_address || walletAddress || 'Waiting...';
@@ -691,7 +697,7 @@
       const list = Array.isArray(peers) ? peers : [];
       els.peerCount.textContent = fmt(list.length);
       els.peerList.textContent = list.length ? list.join('\n') : 'No peers reported';
-      setBadge(els.peerBadge, list.length ? 'ok' : 'warn', `${list.length} peers`);
+      setBadge(els.peerBadge, list.length ? 'ok' : 'warn', `${list.length} known`);
     }
 
     function renderBlocks(blocks) {
@@ -755,15 +761,18 @@
     }
 
     async function connectPeer() {
-      const address = els.peerAddress.value.trim();
-      if (!address) return;
-      els.peerConnectStatus.textContent = 'Connecting...';
+      const address = els.peerAddress.value.trim() || DEFAULT_PEER;
+      els.peerAddress.value = address;
+      els.peerConnectStatus.textContent = `Connecting to ${address}...`;
       try {
         const result = await postJson('/p2p/connect', { address });
         els.peerConnectStatus.textContent = `Connected ${result.peer}; ${result.known_peers} known peers.`;
         await refresh();
       } catch (err) {
-        els.peerConnectStatus.textContent = `Connect failed: ${err.message}`;
+        const detail = String(err.message || err);
+        els.peerConnectStatus.textContent = detail.includes('peer hello failed')
+          ? `Connect failed: ${address} did not answer /p2p/hello. Deploy or open port 8181 on the seed node.`
+          : `Connect failed: ${detail}`;
       }
     }
 

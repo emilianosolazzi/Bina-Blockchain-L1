@@ -88,6 +88,7 @@ struct NodeState {
     btc_seed_hash: [u8; 32],
     btc_seed_changed_at: u64,
     btc_fork: bool,
+    btc_tip_divergence_height: Option<u64>,
     difficulty_bits: u32,
     miner_address: String,
     // Economics
@@ -213,6 +214,7 @@ async fn handle_status(State(s): State<SharedState>) -> Json<serde_json::Value> 
         "btc_seed_age_secs":  btc_seed_age_secs,
         "btc_seed_changed_at": s.btc_seed_changed_at,
         "btc_fork_seen":      s.btc_fork,
+        "btc_tip_divergence_height": s.btc_tip_divergence_height,
         "block_time_avg_ms":  block_time_avg_ms,
         "block_time_stddev_ms": block_time_stddev_ms,
         "nullifiers_spent":   s.nullifiers.len(),
@@ -840,7 +842,8 @@ async fn mining_loop(state: SharedState, ledger: SharedLedger, gossip: Arc<Gossi
             s.btc_tip = hex::encode(&btc.tip_hash[..8]);
             s.btc_seed_hash = btc_seed;
             s.btc_seed_changed_at = btc_seed_changed_at;
-            s.btc_fork = s.btc_fork || btc_fork_now;
+            s.btc_fork = btc_fork_now;
+            s.btc_tip_divergence_height = btc_fork_now.then_some(btc_height_now);
         }
 
         let total_mined = state.read().unwrap().total_mined_bina;
@@ -981,7 +984,8 @@ async fn mining_loop(state: SharedState, ledger: SharedLedger, gossip: Arc<Gossi
             s.btc_tip = hex::encode(&btc.tip_hash[..8]);
             s.btc_seed_hash = btc_seed;
             s.btc_seed_changed_at = btc_seed_changed_at;
-            s.btc_fork = s.btc_fork || btc_fork_now;
+            s.btc_fork = btc_fork_now;
+            s.btc_tip_divergence_height = btc_fork_now.then_some(btc_height_now);
             if s.blocks.len() >= MAX_STORED {
                 s.blocks.pop_front();
             }
@@ -1142,6 +1146,7 @@ async fn main() {
         btc_seed_hash: [0u8; 32],
         btc_seed_changed_at: unix_secs(),
         btc_fork: false,
+        btc_tip_divergence_height: None,
         difficulty_bits: l1_core::difficulty::MIN_BITS,
         miner_address: String::new(),
         total_mined_bina: 0,

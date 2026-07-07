@@ -7,7 +7,7 @@ use anyhow::{bail, Result};
 /// Sources:
 ///   tip_hash       — current canonical chain tip (changes ~every 10 min)
 ///   utxo_entropy   — coinbase script of the tip block (commits to all txs in that block)
-///   stale_xor_pool — XOR of competing tips from two independent APIs; non-zero when a fork is live
+///   stale_xor_pool — XOR/mix of independent API tips; non-zero when providers diverge
 #[derive(Debug, Clone)]
 pub struct BtcEntropyState {
     pub tip_hash:       [u8; 32],
@@ -15,7 +15,8 @@ pub struct BtcEntropyState {
     pub stale_xor_pool: [u8; 32],
     pub seed_timestamp: u64,
     pub tip_height:     u64,
-    /// True if mempool.space and blockstream.info disagreed on the tip (live fork).
+    /// True if mempool.space and blockstream.info disagreed on the tip.
+    /// This can be a real Bitcoin fork or provider lag; label it as tip divergence.
     pub fork_detected:  bool,
 }
 

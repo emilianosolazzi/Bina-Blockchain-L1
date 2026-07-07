@@ -89,8 +89,8 @@ pub async fn fetch_live_entropy() -> Result<BtcEntropyState> {
 
     // ── Step 4: Stale-block entropy — compare tips from two providers ─────────
     //
-    // If mempool.space and blockstream.info return different tip hashes, a fork
-    // is live right now.  XOR the two hashes to make the stale_xor_pool non-zero.
+    // If mempool.space and blockstream.info return different tip hashes, the
+    // providers disagree on the current Bitcoin tip. XOR the two hashes to make the stale_xor_pool non-zero.
     // If they agree, mix block nonce + timestamp so the pool is never all-zero.
     let (stale_xor_pool, fork_detected) =
         build_stale_pool(&client, &tip_hex, tip_hash, block.nonce, block.timestamp).await;
@@ -176,7 +176,7 @@ async fn build_stale_pool(
                 // Real competing tip — XOR the two hashes
                 match hex_to_32(bs_hex) {
                     Ok(bs_hash) => {
-                        eprintln!("[btc-entropy] ⚡ FORK DETECTED: mempool={} blockstream={}",
+                        eprintln!("[btc-entropy] BTC tip divergence: mempool={} blockstream={}",
                             &mempool_tip[..12], &bs_hex[..12]);
                         (xor32(tip_hash, bs_hash), true)
                     }
