@@ -1,5 +1,6 @@
 pub mod bitcoin_entropy;
 pub mod block;
+pub mod claims;
 pub mod pow;
 pub mod randomness;
 pub mod crypto;
