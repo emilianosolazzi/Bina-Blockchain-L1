@@ -86,5 +86,6 @@ l2-mining/docs/SERVER_VS_SELF_MINING.md
 !/l1-chain/**
 
 # Bina L1 local runtime state
+l1-chain/target/
 l1-chain/data/ledger.csv
 l1-chain/logs/
