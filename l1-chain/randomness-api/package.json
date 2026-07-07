@@ -1,0 +1,16 @@
+{
+  "name": "@bina/randomness-api-stack",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Non-wired stack prep for a future REST API in front of BinaOracle.",
+  "scripts": {
+    "check:json": "node -e \"JSON.parse(require('fs').readFileSync('openapi.json','utf8')); JSON.parse(require('fs').readFileSync('package.json','utf8')); console.log('json ok')\""
+  },
+  "dependencies": {
+    "ethers": "^6.15.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3"
+  }
+}

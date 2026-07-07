@@ -1,0 +1,101 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "BINA Randomness REST API",
+    "version": "0.1.0",
+    "description": "Future non-Web3 REST API contract for Bitcoin-anchored BINA randomness. This file is a spec only; endpoints are not wired yet."
+  },
+  "servers": [
+    {
+      "url": "https://randomness.nativebtc.org"
+    }
+  ],
+  "paths": {
+    "/randomness/latest": {
+      "get": {
+        "summary": "Read latest BINA randomness seed",
+        "parameters": [
+          {
+            "name": "purpose",
+            "in": "query",
+            "schema": { "type": "string", "default": "BINA_GENERIC_UTILITY" }
+          }
+        ],
+        "responses": {
+          "200": { "description": "Latest randomness seed and verification metadata" },
+          "503": { "description": "Randomness not available yet" }
+        }
+      }
+    },
+    "/randomness/number": {
+      "get": {
+        "summary": "Derive a bounded random number",
+        "parameters": [
+          { "name": "max", "in": "query", "required": true, "schema": { "type": "integer", "minimum": 1 } },
+          { "name": "salt", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "consumer", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "purpose", "in": "query", "schema": { "type": "string", "default": "BINA_GENERIC_UTILITY" } }
+        ],
+        "responses": {
+          "200": { "description": "Bounded random number plus reproducibility proof" },
+          "400": { "description": "Invalid max, salt, or consumer" },
+          "503": { "description": "Randomness not available yet" }
+        }
+      }
+    },
+    "/randomness/pick": {
+      "get": {
+        "summary": "Pick one item from a comma-separated list",
+        "parameters": [
+          { "name": "items", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "salt", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "consumer", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "purpose", "in": "query", "schema": { "type": "string", "default": "BINA_GENERIC_UTILITY" } }
+        ],
+        "responses": {
+          "200": { "description": "Selected item plus reproducibility proof" },
+          "400": { "description": "No items or invalid query" },
+          "503": { "description": "Randomness not available yet" }
+        }
+      }
+    },
+    "/randomness/shuffle": {
+      "get": {
+        "summary": "Shuffle a comma-separated list deterministically",
+        "parameters": [
+          { "name": "items", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "salt", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "consumer", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "purpose", "in": "query", "schema": { "type": "string", "default": "BINA_GENERIC_UTILITY" } }
+        ],
+        "responses": {
+          "200": { "description": "Shuffled items plus reproducibility proof" },
+          "400": { "description": "No items or invalid query" },
+          "503": { "description": "Randomness not available yet" }
+        }
+      }
+    },
+    "/randomness/commit": {
+      "post": {
+        "summary": "Create a future-height randomness commitment",
+        "responses": {
+          "200": { "description": "Commitment ID and minHeight" },
+          "400": { "description": "Invalid commitment payload" }
+        }
+      }
+    },
+    "/randomness/fulfill/{id}": {
+      "get": {
+        "summary": "Fulfill a previously created future-height commitment",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "Fulfillment status or random word" },
+          "404": { "description": "Commitment not found" },
+          "503": { "description": "Randomness not available yet" }
+        }
+      }
+    }
+  }
+}

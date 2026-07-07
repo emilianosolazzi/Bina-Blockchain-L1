@@ -86,6 +86,8 @@ contract BinaOracleRequestSimulation {
 
         uint256 boundedRandom = consumer.randomUint(purpose, salt, 1000);
         require(boundedRandom < 1000, "bounded random out of range");
+        uint256 explicitConsumerRandom = oracle.randomUintFor(purpose, salt, address(consumer), 1000);
+        require(explicitConsumerRandom == boundedRandom, "explicit consumer random mismatch");
 
         emit SimulatedRandomnessRequest(
             address(consumer),

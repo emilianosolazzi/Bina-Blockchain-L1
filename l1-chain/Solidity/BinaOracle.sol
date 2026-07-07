@@ -331,6 +331,16 @@ contract BinaOracle is IBinaOracle {
         return uint256(deriveWord(purpose, salt, msg.sender)) % upperBound;
     }
 
+    function randomUintFor(
+        bytes32 purpose,
+        bytes32 salt,
+        address consumer,
+        uint256 upperBound
+    ) external view returns (uint256) {
+        if (upperBound == 0) revert InvalidUpperBound();
+        return uint256(deriveWord(purpose, salt, consumer)) % upperBound;
+    }
+
     function blockCount() external view returns (uint256) {
         return blockHashes.length;
     }
