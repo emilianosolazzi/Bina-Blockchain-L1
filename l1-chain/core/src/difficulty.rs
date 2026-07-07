@@ -2,8 +2,8 @@
 //!
 //! Parameters
 //! ─────────────────────────────────────────────────────────────────────────
-//!   Target block time  : 3,650 ms  (3.65 seconds)
-//!   Acceptable window  : 3,300 – 4,000 ms  (tolerance before adjusting)
+//!   Target block time  : 40 ms
+//!   Acceptable window  : derived by the epoch ratio before adjusting
 //!   Epoch size         : 20 blocks         (adjust every 20 blocks)
 //!   Difficulty range   : 25 – 45 leading zero bits
 //!   Initial difficulty : 25 bits           (safe cold-start)
@@ -12,7 +12,7 @@
 //! ─────────────────────────────────────────────────────────────────────────
 //!   At the end of each 20-block epoch:
 //!     actual_ms  = wall-clock time for the last 20 blocks
-//!     target_ms  = 20 × 3,650 = 73,000 ms
+//!     target_ms  = 20 × 40 = 800 ms
 //!     ratio      = actual_ms / target_ms
 //!     delta_bits = −round(log2(ratio))   [negative = too fast → harder]
 //!     delta is capped to [−3, +3] per epoch to prevent oscillation
@@ -27,7 +27,7 @@ pub const MIN_BITS: u32 = 25;
 /// Maximum allowed difficulty (45 leading zero bits ≈ 35 T hashes expected).
 pub const MAX_BITS: u32 = 45;
 /// Target milliseconds per block.
-pub const TARGET_BLOCK_MS: u64 = 3_650;
+pub const TARGET_BLOCK_MS: u64 = 40;
 /// Number of blocks between difficulty adjustments.
 pub const EPOCH_SIZE: u64 = 20;
 /// Maximum bits to change in a single epoch (prevents wild swings).

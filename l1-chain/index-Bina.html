@@ -438,7 +438,7 @@
             <h2>Bitcoin Entropy Anchor</h2>
             <p class="note">The node folds Bitcoin tip entropy into each mined output.</p>
           </div>
-          <div class="badge" id="btcForkBadge"><span class="dot"></span><span>No fork</span></div>
+          <div class="badge" id="btcForkBadge" title="Bitcoin entropy sources disagreed on the BTC tip; this is not a BINA chain fork."><span class="dot"></span><span>BTC tips aligned</span></div>
         </div>
         <div class="kv">
           <span>BTC height</span><strong id="btcHeight">0</strong>
@@ -492,7 +492,7 @@
         </div>
         <h3 style="margin-top: 14px;">Peer List</h3>
         <div class="form-grid" style="grid-template-columns: 1fr auto;">
-          <div class="field"><label for="peerAddress">Add Peer</label><input id="peerAddress" placeholder="127.0.0.1:8181" /></div>
+          <div class="field"><label for="peerAddress">Add Peer</label><input id="peerAddress" placeholder="144.126.157.197:8181" /></div>
           <button class="btn primary" id="connectPeerBtn">Connect</button>
         </div>
         <div class="small" id="peerConnectStatus" style="margin-top: 8px;">Ready to connect to BINA HTTP peers.</div>
@@ -667,7 +667,10 @@
       els.btcSeedAge.textContent = fmtSeconds(status.btc_seed_age_secs);
       els.btcFreshness.textContent = Number(status.btc_seed_age_secs || 0) <= 1200 ? 'Fresh' : 'Stale';
       els.btcSeed.textContent = latest.btc_seed || randomLatest.btc_seed || 'Waiting...';
-      setBadge(els.btcForkBadge, status.btc_fork_seen ? 'warn' : 'ok', status.btc_fork_seen ? 'Fork seen' : 'No fork');
+      els.btcForkBadge.title = status.btc_fork_seen
+        ? 'Bitcoin entropy sources disagreed on the BTC tip; this is not a BINA chain fork.'
+        : 'Bitcoin entropy sources agree on the current BTC tip.';
+      setBadge(els.btcForkBadge, status.btc_fork_seen ? 'warn' : 'ok', status.btc_fork_seen ? 'BTC tip divergence' : 'BTC tips aligned');
 
       els.blockReward.textContent = `+${fmt(latest.reward_bina)} BINA`;
       els.nonce.textContent = fmt(latest.nonce);

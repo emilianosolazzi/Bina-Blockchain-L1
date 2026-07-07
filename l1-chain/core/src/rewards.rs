@@ -2,16 +2,12 @@
 //!
 //! Supply parameters
 //! ─────────────────────────────────────────────────────────────────────────
-//!   Hard cap             : 1,000,000,000 BINA  (1 billion, absolute ceiling)
+//!   Hard cap             : 2,000,000,000 BINA  (2 billion, absolute ceiling)
 //!   Initial block reward : 50 BINA
-//!   Halving interval     : 17,280,000 blocks   (current dev/testnet schedule)
-//!                          ≈ 2 years at 3.65 s/block would be 17,279,342 blocks;
-//!                          a 40 ms mainnet target would require 1,576,800,000 blocks.
+//!   Halving interval     : 1,576,800,000 blocks (≈ 2 years at 40 ms/block)
 //!   Halving schedule     :
-//!     Era 0  blocks      0 – 17,280,000  reward 50   BINA   total ≈  864 M
-//!     Era 1  blocks 17.28 M – 34.56 M   reward 25   BINA   total ≈  864 + 432 M
-//!                                         ↑ hard cap 1 B hit ≈ 136 M into era 1
-//!     (emission stops when total_mined == HARD_CAP)
+//!     Era 0  blocks      0 – 1,576,800,000  reward 50 BINA
+//!     (emission stops immediately when total_mined == HARD_CAP)
 //!
 //! Ledger persistence
 //! ─────────────────────────────────────────────────────────────────────────
@@ -27,12 +23,12 @@ use std::path::{Path, PathBuf};
 
 // ─── Emission constants ──────────────────────────────────────────────────────
 
-/// Hard cap on total $BINA supply (1 billion).
-pub const HARD_CAP:             u64 = 1_000_000_000;
+/// Hard cap on total $BINA supply (2 billion).
+pub const HARD_CAP:             u64 = 2_000_000_000;
 /// Block reward in era 0.
 pub const INITIAL_BLOCK_REWARD: u64 = 50;
-/// Number of blocks between halvings for the current dev/testnet schedule.
-pub const HALVING_INTERVAL:     u64 = 17_280_000;
+/// Number of blocks between halvings at a 40 ms target block time.
+pub const HALVING_INTERVAL:     u64 = 1_576_800_000;
 
 /// Compute the block reward for a given height, capped by remaining supply.
 ///

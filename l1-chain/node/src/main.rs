@@ -16,7 +16,7 @@ use l1_core::bitcoin_entropy::BtcEntropyState;
 use l1_core::block::{genesis_block, leading_zero_bits};
 use l1_core::claims::{select_winning_claim, SignedBlockClaim};
 use l1_core::crypto::WalletKeypair;
-use l1_core::difficulty::DifficultyAdjuster;
+use l1_core::difficulty::{DifficultyAdjuster, TARGET_BLOCK_MS};
 use l1_core::pow::mine_block;
 use l1_core::randomness::{NullifierSet, RandomnessOutput};
 use l1_core::rewards::{
@@ -38,6 +38,7 @@ const PORT: u16 = 8181;
 const NETWORK_ID: &str = "bina-l1";
 const DEFAULT_P2P_TTL: u8 = 8;
 const MAX_PEERS: usize = 128;
+const DEFAULT_SEED_PEERS: &[&str] = &["144.126.157.197:8181"];
 const LEDGER_PATH: &str = "data/ledger.csv";
 const CHAIN_STATE_PATH: &str = "data/chain-state.json";
 const SUBMISSION_GRACE_MS: u64 = 1_500;
@@ -1058,9 +1059,11 @@ fn load_miner_keypair() -> WalletKeypair {
 }
 
 fn parse_seed_peers() -> Vec<SocketAddr> {
-    std::env::var("BINA_SEEDS")
-        .unwrap_or_default()
-        .split(',')
+    let configured = std::env::var("BINA_SEEDS").unwrap_or_default();
+    DEFAULT_SEED_PEERS
+        .iter()
+        .copied()
+        .chain(configured.split(','))
         .filter_map(|raw| {
             let trimmed = raw.trim();
             if trimmed.is_empty() {
@@ -1074,7 +1077,12 @@ fn parse_seed_peers() -> Vec<SocketAddr> {
                 }
             }
         })
-        .collect()
+        .fold(Vec::new(), |mut peers, addr| {
+            if !peers.contains(&addr) {
+                peers.push(addr);
+            }
+            peers
+        })
 }
 
 // ─── Entry point ───────────────────────────────────────────────────────────
@@ -1090,9 +1098,10 @@ async fn main() {
     println!("╚══════════════════════════════════════════════════════╝");
     println!("  threads    : {}", threads);
     println!(
-        "  difficulty : {}-{} bits  (dynamic, target 3.65s/block, epoch 20)",
+        "  difficulty : {}-{} bits  (dynamic, target {}ms/block, epoch 20)",
         l1_core::difficulty::MIN_BITS,
-        l1_core::difficulty::MAX_BITS
+        l1_core::difficulty::MAX_BITS,
+        TARGET_BLOCK_MS
     );
     println!(
         "  supply     : {} BINA cap  |  {} BINA/block  |  halving every {} blocks",
@@ -1153,7 +1162,7 @@ async fn main() {
 
     println!("  p2p network: {NETWORK_ID}");
     println!("  p2p listen : {p2p_listen_addr}");
-    println!("  p2p seeds  : {}", gossip.peers().count());
+    println!("  p2p seeds  : {} ({})", gossip.peers().count(), DEFAULT_SEED_PEERS.join(", "));
 
     let app = Router::new()
         .route("/", get(handle_status))
