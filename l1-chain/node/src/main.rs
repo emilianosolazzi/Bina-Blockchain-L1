@@ -1,11 +1,17 @@
 mod bitcoin_entropy;
+mod envelope;
+mod gossip;
+mod peers;
 
 use axum::{
-    extract::{Path, State},
+    extract::{ConnectInfo, Path, State},
     http::StatusCode,
+    response::IntoResponse,
     routing::{get, post},
-    Json, Router,
+    Extension, Json, Router,
 };
+use envelope::{BinaMessage, BlockClaimEnvelope, PeerHelloEnvelope};
+use gossip::Gossip;
 use l1_core::bitcoin_entropy::BtcEntropyState;
 use l1_core::block::{genesis_block, leading_zero_bits};
 use l1_core::claims::{select_winning_claim, SignedBlockClaim};
@@ -16,14 +22,19 @@ use l1_core::randomness::{NullifierSet, RandomnessOutput};
 use l1_core::rewards::{
     block_reward, RewardLedger, HALVING_INTERVAL, HARD_CAP, INITIAL_BLOCK_REWARD,
 };
+use peers::PeerList;
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
+use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tower_http::cors::CorsLayer;
 
 const MAX_STORED: usize = 1_000; // keep last 1 000 blocks in memory
 const PORT: u16 = 8181;
+const NETWORK_ID: &str = "bina-l1";
+const DEFAULT_P2P_TTL: u8 = 8;
+const MAX_PEERS: usize = 128;
 const LEDGER_PATH: &str = "data/ledger.csv";
 const SUBMISSION_GRACE_MS: u64 = 1_500;
 const MAX_FUTURE_BLOCK_SECS: u64 = 30;
@@ -79,6 +90,29 @@ struct NodeState {
 }
 
 type SharedState = Arc<RwLock<NodeState>>;
+
+#[derive(Clone)]
+struct AcceptedClaim {
+    height: u64,
+    miner_hex: String,
+    block_hash: String,
+    election_score: String,
+    work_bits: u32,
+}
+
+struct ClaimReject {
+    status: StatusCode,
+    message: String,
+}
+
+impl ClaimReject {
+    fn new(status: StatusCode, message: impl Into<String>) -> Self {
+        Self {
+            status,
+            message: message.into(),
+        }
+    }
+}
 
 // ─── HTTP handlers ─────────────────────────────────────────────────────────
 
@@ -200,10 +234,89 @@ async fn handle_randomness_at(
 
 async fn handle_submit_claim(
     State(s): State<SharedState>,
+    Extension(gossip): Extension<Arc<Gossip>>,
     Json(claim): Json<SignedBlockClaim>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let accepted = accept_signed_claim(&s, claim.clone()).map_err(claim_error_response)?;
+    let envelope = BlockClaimEnvelope::from_claim(gossip.network().to_string(), DEFAULT_P2P_TTL, claim);
+    gossip.broadcast_claim(envelope).await;
+
+    Ok(Json(serde_json::json!({
+        "status": "accepted",
+        "height": accepted.height,
+        "miner_address": accepted.miner_hex,
+        "block_hash": accepted.block_hash,
+        "work_bits": accepted.work_bits,
+        "election_score": accepted.election_score,
+        "candidate_window_ms": SUBMISSION_GRACE_MS,
+        "broadcast": true,
+    })))
+}
+
+async fn handle_p2p_message(
+    State(s): State<SharedState>,
+    Extension(gossip): Extension<Arc<Gossip>>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    Json(message): Json<BinaMessage>,
+) -> impl IntoResponse {
+    let Some(message) = gossip.handle_incoming(message, peer_addr).await else {
+        return StatusCode::OK;
+    };
+
+    if let BinaMessage::BlockClaim(envelope) = message {
+        match accept_signed_claim(&s, envelope.claim.clone()) {
+            Ok(accepted) => {
+                println!(
+                    "[p2p] accepted claim from {} height={} hash={}…",
+                    peer_addr,
+                    accepted.height,
+                    &accepted.block_hash[..12]
+                );
+                if envelope.ttl > 0 {
+                    gossip
+                        .relay_message(BinaMessage::BlockClaim(envelope), peer_addr)
+                        .await;
+                }
+            }
+            Err(e) => eprintln!("[p2p] rejected claim from {}: {}", peer_addr, e.message),
+        }
+    }
+
+    StatusCode::OK
+}
+
+async fn handle_get_peers(Extension(gossip): Extension<Arc<Gossip>>) -> Json<Vec<String>> {
+    Json(
+        gossip
+            .peers()
+            .all()
+            .into_iter()
+            .map(|addr| addr.to_string())
+            .collect(),
+    )
+}
+
+async fn handle_peer_hello(
+    Extension(gossip): Extension<Arc<Gossip>>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    Json(hello): Json<PeerHelloEnvelope>,
+) -> StatusCode {
+    if hello.network != gossip.network() {
+        return StatusCode::BAD_REQUEST;
+    }
+    match hello.listen_addr.parse() {
+        Ok(addr) => {
+            gossip.peers().add(addr);
+            println!("[p2p] hello from {} listen={}", peer_addr, addr);
+            StatusCode::OK
+        }
+        Err(_) => StatusCode::BAD_REQUEST,
+    }
+}
+
+fn accept_signed_claim(state: &SharedState, claim: SignedBlockClaim) -> Result<AcceptedClaim, ClaimReject> {
     claim.verify().map_err(|e| {
-        json_error(
+        ClaimReject::new(
             StatusCode::BAD_REQUEST,
             format!("invalid signed claim: {e}"),
         )
@@ -215,9 +328,9 @@ async fn handle_submit_claim(
     let election_score = claim.election_score_hex();
     let work_bits = claim.work_bits();
 
-    let mut state = s.write().unwrap();
+    let mut state = state.write().unwrap();
     if state.genesis_hash == [0u8; 32] {
-        return Err(json_error(
+        return Err(ClaimReject::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "genesis not initialized",
         ));
@@ -225,31 +338,31 @@ async fn handle_submit_claim(
 
     let next_height = state.blocks.back().map(|b| b.height + 1).unwrap_or(1);
     if height != next_height {
-        return Err(json_error(
+        return Err(ClaimReject::new(
             StatusCode::CONFLICT,
             format!("claim height {height} does not match next height {next_height}"),
         ));
     }
     if claim.header.prev_hash != state.tip_hash {
-        return Err(json_error(
+        return Err(ClaimReject::new(
             StatusCode::CONFLICT,
             "claim prev_hash does not match chain tip",
         ));
     }
     if claim.header.difficulty_bits != state.difficulty_bits {
-        return Err(json_error(
+        return Err(ClaimReject::new(
             StatusCode::CONFLICT,
             "claim difficulty does not match current node difficulty",
         ));
     }
     if claim.header.bitcoin_seed_hash != state.btc_seed_hash {
-        return Err(json_error(
+        return Err(ClaimReject::new(
             StatusCode::CONFLICT,
             "claim Bitcoin seed does not match current node seed",
         ));
     }
     if claim.header.timestamp > unix_secs().saturating_add(MAX_FUTURE_BLOCK_SECS) {
-        return Err(json_error(
+        return Err(ClaimReject::new(
             StatusCode::BAD_REQUEST,
             "claim timestamp is too far in the future",
         ));
@@ -257,22 +370,20 @@ async fn handle_submit_claim(
 
     let claims = state.pending_claims.entry(height).or_default();
     if claims.contains_key(&miner_hex) {
-        return Err(json_error(
+        return Err(ClaimReject::new(
             StatusCode::CONFLICT,
             "miner already submitted a claim for this height; first valid claim is kept",
         ));
     }
     claims.insert(miner_hex.clone(), claim);
 
-    Ok(Json(serde_json::json!({
-        "status": "accepted",
-        "height": height,
-        "miner_address": miner_hex,
-        "block_hash": block_hash,
-        "work_bits": work_bits,
-        "election_score": election_score,
-        "candidate_window_ms": SUBMISSION_GRACE_MS,
-    })))
+    Ok(AcceptedClaim {
+        height,
+        miner_hex,
+        block_hash,
+        election_score,
+        work_bits,
+    })
 }
 
 // GET /wallet/:address/balance
@@ -324,6 +435,10 @@ fn json_error(
     (status, Json(serde_json::json!({ "error": message.into() })))
 }
 
+fn claim_error_response(error: ClaimReject) -> (StatusCode, Json<serde_json::Value>) {
+    json_error(error.status, error.message)
+}
+
 fn unix_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -333,7 +448,7 @@ fn unix_secs() -> u64 {
 
 // ─── Mining loop (runs forever) ────────────────────────────────────────────
 
-async fn mining_loop(state: SharedState, mut ledger: RewardLedger) {
+async fn mining_loop(state: SharedState, mut ledger: RewardLedger, gossip: Arc<Gossip>) {
     let threads = state.read().unwrap().threads;
     let miner_keypair = load_miner_keypair();
     let miner_address: [u8; 20] = miner_keypair.address();
@@ -427,6 +542,14 @@ async fn mining_loop(state: SharedState, mut ledger: RewardLedger) {
                 .entry(miner_hex.clone())
                 .or_insert_with(|| local_claim.clone());
         }
+
+        gossip
+            .broadcast_claim(BlockClaimEnvelope::from_claim(
+                gossip.network().to_string(),
+                DEFAULT_P2P_TTL,
+                local_claim,
+            ))
+            .await;
 
         tokio::time::sleep(Duration::from_millis(SUBMISSION_GRACE_MS)).await;
 
@@ -593,6 +716,26 @@ fn load_miner_keypair() -> WalletKeypair {
     }
 }
 
+fn parse_seed_peers() -> Vec<SocketAddr> {
+    std::env::var("BINA_SEEDS")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|raw| {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            match trimmed.parse() {
+                Ok(addr) => Some(addr),
+                Err(e) => {
+                    eprintln!("[p2p] ignoring invalid seed '{trimmed}': {e}");
+                    None
+                }
+            }
+        })
+        .collect()
+}
+
 // ─── Entry point ───────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -622,6 +765,9 @@ async fn main() {
     println!("    GET /chain/latest              — latest mined block");
     println!("    GET /chain/blocks              — last 20 blocks");
     println!("    POST /chain/submit             — submit a signed mined block claim");
+    println!("    POST /p2p/message              — receive signed gossip messages");
+    println!("    POST /p2p/hello                — peer introduction");
+    println!("    GET /p2p/peers                 — known peer list");
     println!("    GET /block/:height             — block by height");
     println!("    GET /randomness/latest         — latest randomness output");
     println!("    GET /wallet/:address/balance   — $BINA balance");
@@ -649,6 +795,17 @@ async fn main() {
     }));
 
     let ledger = RewardLedger::open(LEDGER_PATH).expect("failed to open reward ledger");
+    let peers = Arc::new(PeerList::new(MAX_PEERS));
+    for seed in parse_seed_peers() {
+        peers.add(seed);
+    }
+    let gossip = Arc::new(Gossip::new(peers, NETWORK_ID));
+    let p2p_listen_addr = std::env::var("BINA_P2P_LISTEN_ADDR")
+        .unwrap_or_else(|_| format!("127.0.0.1:{PORT}"));
+
+    println!("  p2p network: {NETWORK_ID}");
+    println!("  p2p listen : {p2p_listen_addr}");
+    println!("  p2p seeds  : {}", gossip.peers().count());
 
     let app = Router::new()
         .route("/", get(handle_status))
@@ -657,11 +814,15 @@ async fn main() {
         .route("/chain/blocks", get(handle_blocks_recent))
         .route("/chain/submit", post(handle_submit_claim))
         .route("/chain/supply", get(handle_supply))
+        .route("/p2p/message", post(handle_p2p_message))
+        .route("/p2p/hello", post(handle_peer_hello))
+        .route("/p2p/peers", get(handle_get_peers))
         .route("/block/{height}", get(handle_block))
         .route("/randomness/latest", get(handle_randomness_latest))
         .route("/randomness/{height}", get(handle_randomness_at))
         .route("/wallet/{address}/balance", get(handle_wallet_balance))
         .layer(CorsLayer::permissive())
+        .layer(Extension(gossip.clone()))
         .with_state(state.clone());
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{PORT}"))
@@ -669,8 +830,21 @@ async fn main() {
         .expect("bind failed");
 
     tokio::spawn(async move {
-        axum::serve(listener, app).await.expect("axum failed");
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .expect("axum failed");
     });
 
-    mining_loop(state, ledger).await;
+    let bootstrap_gossip = gossip.clone();
+    let bootstrap_listen_addr = p2p_listen_addr.clone();
+    tokio::spawn(async move {
+        bootstrap_gossip
+            .bootstrap(&bootstrap_listen_addr, 0, "")
+            .await;
+    });
+
+    mining_loop(state, ledger, gossip).await;
 }
