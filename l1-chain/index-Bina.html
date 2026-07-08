@@ -413,7 +413,7 @@
             <h2>Latest Randomness</h2>
             <p class="note">BINA output and nullifier derived from block hash plus Bitcoin entropy seed.</p>
           </div>
-          <div class="badge ok"><span class="dot"></span><span id="randomVerified">Node verified</span></div>
+          <div class="badge ok"><span class="dot"></span><span id="randomVerified">Locally verified by node</span></div>
         </div>
         <div class="two-col">
           <div>
@@ -486,7 +486,7 @@
         <div class="section-head">
           <div>
             <h2>P2P And Claim Relay</h2>
-            <p class="note">Signed block claims are accepted through `/chain/submit` and relayed through `/p2p/message`.</p>
+            <p class="note">Signed block claims are accepted through <span class="mono">/chain/submit</span> and relayed through <span class="mono">/p2p/message</span>.</p>
           </div>
           <div class="badge" id="peerBadge"><span class="dot"></span><span>Peers</span></div>
         </div>
@@ -519,7 +519,7 @@
           <span>Chain work</span><strong class="mono" id="chainWork">0</strong>
           <span>Mempool size</span><strong id="mempoolSize">0</strong>
           <span>Block store</span><strong class="mono" id="blockStoreBackend">sqlite-persistent</strong>
-          <span>Reorg depth limit</span><strong id="reorgDepthLimit">0</strong> <span class="small">blocks (1 difficulty epoch)</span>
+          <span>Reorg depth limit</span><strong><span id="reorgDepthLimit">0</span> <span class="small" style="font-weight: 400;">blocks (1 difficulty epoch)</span></strong>
           <span>Network</span><strong class="mono">bina-l1</strong>
         </div>
       </article>
@@ -612,6 +612,7 @@
     // API — this converts one to the other for comparison against
     // hex-string addresses (walletAddress, a submitted tx's `from`, etc).
     const bytesToHex = (arr) => Array.isArray(arr) ? arr.map(b => b.toString(16).padStart(2, '0')).join('') : '';
+    const hex0x = (v) => { const s = String(v ?? '').trim(); return s && s !== '0' ? (s.startsWith('0x') ? s : '0x' + s) : '0'; };
     const prettyUptime = (secs) => {
       secs = Number(secs || 0);
       const h = Math.floor(secs / 3600);
@@ -661,7 +662,7 @@
       els.difficulty.textContent = status.difficulty_bits ?? supply.difficulty_bits ?? 0;
       els.genesisHash.textContent = status.genesis_hash || 'Waiting...';
       els.tipHash.textContent = status.tip_hash || 'Waiting...';
-      els.chainWork.textContent = status.chain_work || '0';
+      els.chainWork.textContent = hex0x(status.chain_work);
       els.mempoolSize.textContent = fmt(status.mempool_size);
       els.blockStoreBackend.textContent = status.block_store || 'sqlite-persistent';
       els.reorgDepthLimit.textContent = fmt(status.reorg_depth_limit);
@@ -683,7 +684,7 @@
       els.nullifiersSpent.textContent = fmt(status.nullifiers_spent);
       els.randomHeight.textContent = fmt(randomLatest.height || latest.height || status.height);
       els.randomBlock.textContent = randomLatest.block_hash || latestBlockHash || 'Waiting...';
-      els.randomVerified.textContent = randomLatest.verified === false ? 'Unverified' : 'Node verified';
+      els.randomVerified.textContent = randomLatest.verified === false ? 'Unverified' : 'Locally verified by node';
 
       els.btcHeight.textContent = fmt(status.btc_height);
       els.btcTip.textContent = status.btc_tip || 'Waiting...';
@@ -715,7 +716,7 @@
       els.merkleRoot.textContent = latest.merkle_root || 'Waiting...';
       els.stateRoot.textContent = latest.state_root || 'Waiting...';
       els.txCount.textContent = fmt((latest.transactions || []).length);
-      els.blockChainWork.textContent = latest.chain_work_hex || '0';
+      els.blockChainWork.textContent = hex0x(latest.chain_work_hex);
       els.claimDigest.textContent = latest.claim_digest || 'Waiting...';
       els.electionScore.textContent = latest.election_score || 'Waiting...';
       els.minerPublicKey.textContent = fingerprint(latestMinerPublicKey, 'fingerprint');

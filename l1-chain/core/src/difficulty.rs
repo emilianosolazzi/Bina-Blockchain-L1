@@ -163,10 +163,17 @@ impl DifficultyAdjuster {
         let arrow  = if info.new_bits > info.old_bits { "▲ harder" }
                      else if info.new_bits < info.old_bits { "▼ easier" }
                      else { "= unchanged" };
+        // Epochs spanning node downtime can average minutes+; show ms for
+        // normal operation (target is 40ms) and seconds only past 10s.
+        let avg = if avg_ms < 10_000 {
+            format!("{avg_ms}ms")
+        } else {
+            format!("{:.2}s", avg_ms as f64 / 1000.0)
+        };
         format!(
-            "[difficulty] epoch at h={} | avg {:.2}s/block | {} bits → {} bits {} (Δ{})",
+            "[difficulty] epoch at h={} | avg {}/block | {} bits → {} bits {} (Δ{})",
             info.at_height,
-            avg_ms as f64 / 1000.0,
+            avg,
             info.old_bits,
             info.new_bits,
             arrow,
