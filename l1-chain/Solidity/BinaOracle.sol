@@ -20,6 +20,30 @@ interface IBinaOracle {
 contract BinaOracle is IBinaOracle {
     // ======================== TYPES ========================
 
+    /// @dev Field-mapping notes for whoever writes the BINA L1 -> EVM
+    ///      publisher relay (this contract only stores what a publisher
+    ///      submits; it does not re-verify BINA's PoW/signatures on-chain,
+    ///      see the trust-model note on ProofOfBinaWork):
+    ///
+    ///      - minedTimestamp MUST be Unix **seconds** (checked against
+    ///        `block.timestamp`, which is seconds). BINA L1's own node API
+    ///        exposes both `timestamp` (consensus clock, Unix
+    ///        **milliseconds** — used for BINA's own difficulty
+    ///        retargeting) and `mined_timestamp_secs` (the same instant,
+    ///        floor-divided to seconds). Use `mined_timestamp_secs`. Relaying
+    ///        the raw millisecond value here reverts on every submission.
+    ///      - workBits should be the block's *actual* achieved leading-zero
+    ///        count (BINA API field `zero_bits`), not the difficulty
+    ///        threshold it had to clear (`difficulty_bits`) — the former is
+    ///        the real proof-of-work measure and is always >= the latter.
+    ///        Note MAX_WORK_BITS=64 below: an extraordinarily lucky BINA
+    ///        block (rare but not impossible) could exceed that and fail
+    ///        `InvalidWorkBits` — cap workBits at 64 when relaying rather
+    ///        than passing zero_bits through unclamped.
+    ///      - btcHeight/btcSeed are BINA's *checkpoint-pinned* Bitcoin
+    ///        anchor (BINA API fields `btc_height`/`btc_seed` on a
+    ///        BlockRecord), reused across ~20 BINA blocks between
+    ///        checkpoints — not an independent live read for every block.
     struct BinaOutput {
         uint64 height;
         bytes32 blockHash;

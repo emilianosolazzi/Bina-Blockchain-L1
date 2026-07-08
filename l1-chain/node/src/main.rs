@@ -102,7 +102,19 @@ struct BlockRecord {
     block_hash: String,
     prev_hash: String,
     nonce: u64,
+    /// Consensus timestamp in Unix **milliseconds** (see
+    /// `L1BlockHeader.timestamp`'s doc comment for why this chain uses ms
+    /// rather than the more common Unix-seconds).
     timestamp: u64,
+    /// Same instant as `timestamp`, floor-divided to Unix **seconds**. Added
+    /// specifically for EVM/Solidity relaying: `block.timestamp` and every
+    /// timestamp check in `Solidity/BinaOracle.sol` (`minedTimestamp`,
+    /// `MAX_TIMESTAMP_DRIFT`, `MAX_TIMESTAMP_AGE`) are Unix-seconds. Relaying
+    /// the raw `timestamp` field into `BinaOutput.minedTimestamp` would be
+    /// ~1000x too large and make `submitOutput` revert on every block —
+    /// use this field for that purpose instead.
+    #[serde(default)]
+    mined_timestamp_secs: u64,
     zero_bits: u32,
     difficulty_bits: u32, // difficulty that produced this block
     hashes_tried: u64,
@@ -1881,6 +1893,7 @@ async fn mining_loop(state: SharedState, ledger: SharedLedger, gossip: Arc<Gossi
             prev_hash: hex::encode(winning_claim.header.prev_hash),
             nonce: winning_claim.header.nonce,
             timestamp,
+            mined_timestamp_secs: timestamp / 1000,
             zero_bits,
             difficulty_bits: winning_claim.header.difficulty_bits,
             hashes_tried,
@@ -2196,6 +2209,7 @@ mod adversarial_tests {
             prev_hash: format!("h{}", height.saturating_sub(1)),
             nonce: 0,
             timestamp: 1_000_000 + height,
+            mined_timestamp_secs: (1_000_000 + height) / 1000,
             zero_bits: 0,
             difficulty_bits: 0,
             hashes_tried: 0,

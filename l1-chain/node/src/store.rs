@@ -215,12 +215,14 @@ impl BlockStore {
 }
 
 fn row_to_record(row: &rusqlite::Row) -> rusqlite::Result<BlockRecord> {
+    let timestamp: u64 = row.get::<_, i64>("timestamp")? as u64;
     Ok(BlockRecord {
         height: row.get::<_, i64>("height")? as u64,
         block_hash: row.get("block_hash")?,
         prev_hash: row.get("prev_hash")?,
         nonce: row.get::<_, i64>("nonce")? as u64,
-        timestamp: row.get::<_, i64>("timestamp")? as u64,
+        timestamp,
+        mined_timestamp_secs: timestamp / 1000,
         zero_bits: row.get("zero_bits")?,
         difficulty_bits: row.get("difficulty_bits")?,
         hashes_tried: row.get::<_, i64>("hashes_tried")? as u64,
@@ -257,6 +259,7 @@ mod tests {
             prev_hash: prev_hash.to_string(),
             nonce: height,
             timestamp: 1_000_000 + height,
+            mined_timestamp_secs: (1_000_000 + height) / 1000,
             zero_bits: 25,
             difficulty_bits: 25,
             hashes_tried: 1000,
