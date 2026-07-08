@@ -5,6 +5,8 @@
   "type": "module",
   "description": "Non-wired stack prep for a future REST API in front of BinaOracle.",
   "scripts": {
+    "relay": "node bina-relay.mjs",
+    "verify": "node verify-bina-output.mjs",
     "check:json": "node -e \"JSON.parse(require('fs').readFileSync('openapi.json','utf8')); JSON.parse(require('fs').readFileSync('package.json','utf8')); console.log('json ok')\""
   },
   "dependencies": {
