@@ -521,7 +521,12 @@ async fn handle_submit_claim(
 /// gossip (propagate + dedupe by tx_id + a TTL so stale entries don't pin
 /// memory forever), then fee-based selection when building a candidate
 /// block instead of the current "whatever's in the map" order.
-fn enqueue_transaction(state: &SharedState, ledger: &SharedLedger, signed: SignedTransaction) -> Result<(), String> {
+fn enqueue_transaction(
+    state: &SharedState,
+    ledger: &SharedLedger,
+    store: &BlockStore,
+    signed: SignedTransaction,
+) -> Result<(), String> {
     signed.verify().map_err(|e| format!("transaction rejected: {e}"))?;
 
     let ledger = ledger.lock().map_err(|_| "ledger lock poisoned".to_string())?;
@@ -541,17 +546,25 @@ fn enqueue_transaction(state: &SharedState, ledger: &SharedLedger, signed: Signe
     }
     drop(ledger);
 
-    let mut s = state.write().unwrap();
-    if s.mempool.len() >= MAX_MEMPOOL_SIZE && !s.mempool.contains_key(&signed.tx_id()) {
-        return Err("mempool is full, try again shortly".to_string());
+    {
+        let mut s = state.write().unwrap();
+        if s.mempool.len() >= MAX_MEMPOOL_SIZE && !s.mempool.contains_key(&signed.tx_id()) {
+            return Err("mempool is full, try again shortly".to_string());
+        }
+        s.mempool.insert(signed.tx_id(), signed.clone());
     }
-    s.mempool.insert(signed.tx_id(), signed);
+    // Persist so a pending transaction survives a node restart; failure to
+    // persist is logged but doesn't reject the (already queued) submission.
+    if let Err(e) = store.mempool_insert(&signed) {
+        eprintln!("[mempool] failed to persist pending transaction {}: {e}", signed.tx_id_hex());
+    }
     Ok(())
 }
 
 async fn handle_submit_transaction(
     State(s): State<SharedState>,
     Extension(ledger): Extension<SharedLedger>,
+    Extension(store): Extension<Arc<BlockStore>>,
     Json(payload): Json<SignedTransactionPayload>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let signed = payload
@@ -565,7 +578,7 @@ async fn handle_submit_transaction(
     let tx_id = signed.tx_id_hex();
     let (from, to, amount, fee, nonce) =
         (signed.from_hex(), signed.to_hex(), signed.tx.amount, signed.tx.fee, signed.tx.nonce);
-    enqueue_transaction(&s, &ledger, signed)
+    enqueue_transaction(&s, &ledger, &store, signed)
         .map_err(|e| json_error(StatusCode::BAD_REQUEST, e))?;
 
     Ok(Json(serde_json::json!({
@@ -584,6 +597,7 @@ async fn handle_submit_transaction(
 async fn handle_wallet_send(
     State(s): State<SharedState>,
     Extension(ledger): Extension<SharedLedger>,
+    Extension(store): Extension<Arc<BlockStore>>,
     Json(payload): Json<LocalSendRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let to = parse_address_hex(&payload.to)
@@ -606,7 +620,7 @@ async fn handle_wallet_send(
     let tx_digest = signed.tx.digest_hex();
     let public_key = signed.public_key_hex();
     let signature = signed.signature_hex();
-    enqueue_transaction(&s, &ledger, signed)
+    enqueue_transaction(&s, &ledger, &store, signed)
         .map_err(|e| json_error(StatusCode::BAD_REQUEST, e))?;
 
     Ok(Json(serde_json::json!({
@@ -1307,8 +1321,20 @@ async fn sync_forward_from_peer(
                 for tx in &applied {
                     s.mempool.remove(&tx.tx_id());
                 }
+                // Adopted block's randomness is spent like any other.
+                // (Defensive decode: this field came from a peer.)
+                if let Ok(bytes) = hex::decode(&record.nullifier) {
+                    if let Ok(n) = <[u8; 32]>::try_from(bytes.as_slice()) {
+                        s.nullifiers.mark_spent(n);
+                    }
+                }
                 // Drop any now-stale pending candidates at or below the new tip.
                 s.pending_claims.retain(|candidate_height, _| *candidate_height > *height);
+            }
+            for tx in &applied {
+                if let Err(e) = store.mempool_remove(&tx.tx_id()) {
+                    eprintln!("[mempool] failed to drop synced transaction {}: {e}", tx.tx_id_hex());
+                }
             }
         }
         if stop {
@@ -1404,9 +1430,16 @@ const MAX_AUTO_REORG_DEPTH: u64 = l1_core::difficulty::EPOCH_SIZE - 1;
 /// Re-admit every transaction bound into a rolled-back block so a reorg
 /// never silently drops a transaction the network had accepted — it simply
 /// becomes eligible for inclusion again, exactly like a fresh submission.
-fn requeue_rolled_back_transactions(mempool: &mut HashMap<[u8; 32], SignedTransaction>, rolled_back: &[BlockRecord]) {
+fn requeue_rolled_back_transactions(
+    store: &BlockStore,
+    mempool: &mut HashMap<[u8; 32], SignedTransaction>,
+    rolled_back: &[BlockRecord],
+) {
     for block in rolled_back {
         for tx in &block.transactions {
+            if let Err(e) = store.mempool_insert(tx) {
+                eprintln!("[mempool] failed to persist requeued transaction {}: {e}", tx.tx_id_hex());
+            }
             mempool.insert(tx.tx_id(), tx.clone());
         }
     }
@@ -1583,7 +1616,7 @@ async fn reconcile_fork(
         s.total_mined_bina = ledger.lock().unwrap().total_mined();
         // Rolled-back transactions are no longer confirmed — make them
         // eligible for inclusion again rather than losing them outright.
-        requeue_rolled_back_transactions(&mut s.mempool, &rolled_back);
+        requeue_rolled_back_transactions(store, &mut s.mempool, &rolled_back);
     }
 
     let synced = sync_forward_from_peer(
@@ -1618,6 +1651,68 @@ async fn mining_loop(state: SharedState, ledger: SharedLedger, gossip: Arc<Gossi
     };
 
     let mut btc_seed_hash = hex_to_32("resume.btc_seed_hash", &resume.btc_seed_hash);
+    let mut btc_checkpoint_tip_height = resume.btc_checkpoint_tip_height;
+    // SQLite block history is authoritative over chain-state.json (see
+    // store.rs). If the resume file lost or regressed the pinned BTC
+    // checkpoint (e.g. a Bitcoin API outage let a mock observation get
+    // persisted), restore the last real checkpoint the chain actually
+    // pinned instead of coming back up on tip_height=0/deadbeef.
+    match store.latest_checkpoint() {
+        Ok(Some((seed_hex, tip_height))) if tip_height > btc_checkpoint_tip_height => {
+            btc_seed_hash = hex_to_32("store.blocks.btc_seed", &seed_hex);
+            btc_checkpoint_tip_height = tip_height;
+            println!("[btc]      restored last real checkpoint from block store (btc tip {tip_height})");
+        }
+        Err(e) => eprintln!("[store] latest checkpoint lookup failed: {e}"),
+        _ => {}
+    }
+
+    // Rebuild replay protection from the chain itself: without this, every
+    // nullifier ever spent would look fresh again after a restart.
+    match store.all_nullifiers() {
+        Ok(nullifiers) => {
+            let count = nullifiers.len();
+            let mut s = state.write().unwrap();
+            for n_hex in &nullifiers {
+                s.nullifiers.mark_spent(hex_to_32("store.blocks.nullifier", n_hex));
+            }
+            if count > 0 {
+                println!("[chain]    reloaded {count} spent nullifier(s) from block store");
+            }
+        }
+        Err(e) => eprintln!("[store] nullifier reload failed: {e}"),
+    }
+
+    // Reload pending transactions that were in the mempool when the node
+    // stopped, re-checking each against the current ledger (its nonce may
+    // have been consumed by a block mined elsewhere in the meantime).
+    match store.mempool_load() {
+        Ok(pending) => {
+            let ledger_guard = ledger.lock().unwrap();
+            let mut s = state.write().unwrap();
+            let (mut restored, mut dropped) = (0usize, 0usize);
+            for tx in pending {
+                let from = tx.from_hex();
+                let valid = tx.verify().is_ok()
+                    && tx.tx.nonce == ledger_guard.nonce(&from)
+                    && tx.tx.amount.checked_add(tx.tx.fee).is_some_and(|need| ledger_guard.balance(&from) >= need);
+                if valid {
+                    s.mempool.insert(tx.tx_id(), tx);
+                    restored += 1;
+                } else {
+                    if let Err(e) = store.mempool_remove(&tx.tx_id()) {
+                        eprintln!("[mempool] failed to drop stale pending transaction: {e}");
+                    }
+                    dropped += 1;
+                }
+            }
+            if restored > 0 || dropped > 0 {
+                println!("[mempool]  restored {restored} pending transaction(s) from block store ({dropped} stale dropped)");
+            }
+        }
+        Err(e) => eprintln!("[store] mempool reload failed: {e}"),
+    }
+
     let mut chain_work: u128 = u128::from_str_radix(&resume.chain_work_hex, 16).unwrap_or(0);
     let initial_observed_btc = fetch_btc(None).await;
 
@@ -1631,7 +1726,7 @@ async fn mining_loop(state: SharedState, ledger: SharedLedger, gossip: Arc<Gossi
         s.current_reward = block_reward(chain_state.height + 1, persisted_total);
         s.difficulty_bits = resume.difficulty_bits;
         s.btc_seed_hash = btc_seed_hash;
-        s.btc_checkpoint_tip_height = resume.btc_checkpoint_tip_height;
+        s.btc_checkpoint_tip_height = btc_checkpoint_tip_height;
         s.last_block_timestamp_ms = resume.last_block_timestamp_ms;
         s.chain_work = chain_work;
         s.last_observed_btc = initial_observed_btc.clone();
@@ -1664,7 +1759,6 @@ async fn mining_loop(state: SharedState, ledger: SharedLedger, gossip: Arc<Gossi
     let mut prev_hash = chain_state.tip_hash;
     let mut height: u64 = chain_state.height;
     let mut last_block_timestamp_ms = resume.last_block_timestamp_ms;
-    let mut btc_checkpoint_tip_height = resume.btc_checkpoint_tip_height;
 
     let mut adjuster = DifficultyAdjuster::restore(
         resume.difficulty_bits,
@@ -1723,7 +1817,17 @@ async fn mining_loop(state: SharedState, ledger: SharedLedger, gossip: Arc<Gossi
         // block reuses the seed pinned by the last accepted checkpoint —
         // chain data, not a race against independently-polled live APIs.
         let (btc_seed, checkpoint_proof) = if is_ckpt {
-            let fresh = fetch_btc(Some(&state.read().unwrap().last_observed_btc)).await;
+            let mut fresh = fetch_btc(Some(&state.read().unwrap().last_observed_btc)).await;
+            // A checkpoint pins this observation into consensus. Once the
+            // chain has a real checkpoint, never pin a mock/failed one
+            // (tip_height == 0) over it — a Bitcoin API outage must stall
+            // this fetch, not regress the chain to tip 0/deadbeef (peers
+            // would reject such a proof via `plausible()` anyway).
+            while fresh.tip_height == 0 && btc_checkpoint_tip_height > 0 {
+                eprintln!("[btc]      checkpoint h={height} blocked: no live Bitcoin observation yet, retrying in 5s…");
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                fresh = fetch_btc(Some(&state.read().unwrap().last_observed_btc)).await;
+            }
             {
                 let mut s = state.write().unwrap();
                 s.last_observed_btc = fresh.clone();
@@ -1884,6 +1988,11 @@ async fn mining_loop(state: SharedState, ledger: SharedLedger, gossip: Arc<Gossi
             let mut s = state.write().unwrap();
             for tx in &winning_txs {
                 s.mempool.remove(&tx.tx_id());
+            }
+        }
+        for tx in &winning_txs {
+            if let Err(e) = store.mempool_remove(&tx.tx_id()) {
+                eprintln!("[mempool] failed to drop confirmed transaction {}: {e}", tx.tx_id_hex());
             }
         }
 
@@ -2140,6 +2249,15 @@ mod adversarial_tests {
     use super::*;
     use l1_core::crypto::WalletKeypair;
 
+    fn temp_block_store(tag: &str) -> BlockStore {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("bina_adversarial_store_{tag}_{nanos}.sqlite3"));
+        BlockStore::open(path.to_str().unwrap()).unwrap()
+    }
+
     fn test_env(tag: &str) -> (SharedState, SharedLedger, WalletKeypair, [u8; 32]) {
         let genesis_hash = [7u8; 32];
         let miner = WalletKeypair::generate();
@@ -2236,6 +2354,26 @@ mod adversarial_tests {
     // ── merkle_root / state_root integrity ──────────────────────────────
 
     #[test]
+    fn block_record_with_transactions_has_nonzero_merkle_root() {
+        // The dashboard warns only when tx_count > 0 AND merkle_root is
+        // all-zero; this pins the invariant that makes the warning sound:
+        // a non-empty block always commits a non-zero merkle root, while an
+        // empty block's zero root is legitimate.
+        let miner = WalletKeypair::generate();
+        let recipient = WalletKeypair::generate();
+        let tx = signed_transfer(&miner, &recipient, 1, 0, 0);
+
+        let confirmed = dummy_block_record(5, vec![tx]);
+        assert!(!confirmed.transactions.is_empty(), "confirmed tx block must have tx_count > 0");
+        assert_ne!(confirmed.merkle_root, "0".repeat(64), "non-empty block must commit a non-zero merkle root");
+
+        let empty = dummy_block_record(6, vec![]);
+        assert_eq!(empty.merkle_root, "0".repeat(64), "empty block legitimately has an all-zero merkle root");
+        // A newer empty block cannot alias the confirmed block's commitment.
+        assert_ne!(confirmed.merkle_root, empty.merkle_root);
+    }
+
+    #[test]
     fn claim_with_wrong_merkle_root_is_rejected() {
         let (state, ledger, miner, genesis) = test_env("bad_merkle");
         let recipient = WalletKeypair::generate();
@@ -2308,7 +2446,7 @@ mod adversarial_tests {
 
         // Sender's ledger nonce is 0; submit a transaction claiming nonce 5.
         let tx = signed_transfer(&miner, &recipient, 5, 5, 1);
-        let err = enqueue_transaction(&state, &ledger, tx).unwrap_err();
+        let err = enqueue_transaction(&state, &ledger, &temp_block_store("wrong_nonce"), tx).unwrap_err();
         assert!(err.contains("nonce"), "unexpected message: {err}");
     }
 
@@ -2378,11 +2516,14 @@ mod adversarial_tests {
         ];
 
         let mut mempool: HashMap<[u8; 32], SignedTransaction> = HashMap::new();
-        requeue_rolled_back_transactions(&mut mempool, &rolled_back);
+        let store = temp_block_store("rollback_requeue");
+        requeue_rolled_back_transactions(&store, &mut mempool, &rolled_back);
 
         assert_eq!(mempool.len(), 2);
         assert!(mempool.contains_key(&tx1.tx_id()), "tx from the first rolled-back block must be requeued");
         assert!(mempool.contains_key(&tx2.tx_id()), "tx from the second rolled-back block must be requeued");
+        // Requeued transactions must also be durable across a restart.
+        assert_eq!(store.mempool_load().unwrap().len(), 2, "requeued txs must be persisted");
     }
 
     // ── Bitcoin checkpoint integrity ─────────────────────────────────────
@@ -2596,6 +2737,74 @@ mod integration_tests {
 
         drop(node_a);
         drop(node_b);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Dashboard contract: /wallet/send returns every displayable field the
+    /// UI shows (tx_id, to, amount, fee, nonce), and once mined the tx's
+    /// block — fetched via /block/{height} — has tx_count > 0 and a
+    /// non-zero merkle_root, regardless of newer empty (zero-merkle) blocks.
+    #[tokio::test]
+    #[ignore]
+    async fn wallet_send_returns_displayable_fields_and_confirmed_block_commits_them() {
+        let base = std::env::temp_dir().join(format!("bina_walletsend_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let port: u16 = 18283;
+        let client = reqwest::Client::builder().timeout(Duration::from_secs(3)).build().unwrap();
+
+        let node = spawn_node(port, &base, "");
+        // Mine a couple of blocks first so the node wallet has a balance.
+        wait_for_height(&client, port, 2, Duration::from_secs(90))
+            .await
+            .expect("node did not reach height 2 in time");
+
+        let recipient = hex::encode([0x42u8; 20]);
+        let send: serde_json::Value = client
+            .post(format!("http://127.0.0.1:{port}/wallet/send"))
+            .json(&serde_json::json!({ "to": recipient, "amount": 1, "fee": 0 }))
+            .send().await.expect("send request")
+            .json().await.expect("parse send response");
+
+        // Every field the dashboard's Last Submitted Transaction panel
+        // displays must come from this response, so all must be present.
+        assert_eq!(send["status"].as_str(), Some("queued"));
+        assert!(send["tx_id"].as_str().is_some_and(|s| s.len() == 64), "tx_id must be 64-char hex");
+        assert_eq!(send["to"].as_str(), Some(recipient.as_str()));
+        assert_eq!(send["amount"].as_u64(), Some(1));
+        assert_eq!(send["fee"].as_u64(), Some(0));
+        assert!(send["nonce"].as_u64().is_some(), "nonce must be present");
+
+        // Wait until some block includes a transaction, then verify its
+        // commitment through /block/{height} — the same endpoint the
+        // dashboard's Confirmed Transaction Block section uses.
+        let deadline = Instant::now() + Duration::from_secs(90);
+        let mut mined_height = None;
+        while Instant::now() < deadline && mined_height.is_none() {
+            if let Ok(resp) = client.get(format!("http://127.0.0.1:{port}/chain/blocks")).send().await {
+                if let Ok(blocks) = resp.json::<Vec<serde_json::Value>>().await {
+                    mined_height = blocks.iter()
+                        .find(|b| b["transactions"].as_array().is_some_and(|t| !t.is_empty()))
+                        .and_then(|b| b["height"].as_u64());
+                }
+            }
+            if mined_height.is_none() {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        }
+        let mined_height = mined_height.expect("submitted tx was never mined into a block");
+
+        let block: serde_json::Value = client
+            .get(format!("http://127.0.0.1:{port}/block/{mined_height}"))
+            .send().await.expect("fetch confirmed block")
+            .json().await.expect("parse confirmed block");
+
+        let tx_count = block["transactions"].as_array().map_or(0, |t| t.len());
+        assert!(tx_count > 0, "confirmed tx block must have tx_count > 0");
+        let merkle = block["merkle_root"].as_str().unwrap_or_default();
+        assert_ne!(merkle, "0".repeat(64), "confirmed non-empty block must have a non-zero merkle_root");
+
+        drop(node);
         let _ = std::fs::remove_dir_all(&base);
     }
 }

@@ -287,6 +287,8 @@
     }
 
     tbody tr:hover td { background: rgba(56, 189, 248, 0.04); }
+    tbody tr.tx-block td { background: rgba(251, 191, 36, 0.06); cursor: pointer; }
+    tbody tr.tx-block:hover td { background: rgba(251, 191, 36, 0.14); }
 
     .two-col {
       display: grid;
@@ -545,6 +547,59 @@
           <button class="btn gold" id="sendTxBtn">Send</button>
         </div>
         <div class="hash compact" id="txStatus" style="margin-top: 14px;">No transaction submitted.</div>
+
+        <h3 style="margin-top: 16px;" class="eyebrow">Last Submitted Transaction</h3>
+        <p class="note" style="margin: 0 0 10px;">Populated from the <span class="mono">/wallet/send</span> response — never from the form fields, which reset after submission.</p>
+        <div class="small" id="lastTxEmpty">No transaction submitted yet.</div>
+        <div class="kv" id="lastTxPanel" style="display: none;">
+          <span>Tx ID</span><div class="hash compact" id="lastTxId">-</div>
+          <span>To</span><div class="hash compact" id="lastTxTo">-</div>
+          <span>Amount</span><strong id="lastTxAmount">-</strong>
+          <span>Fee</span><strong id="lastTxFee">-</strong>
+          <span>Nonce</span><strong id="lastTxNonce">-</strong>
+          <span>Status</span><span><span class="badge warn" id="lastTxStatusBadge"><span class="dot"></span><span>pending</span></span></span>
+          <span>Submitted</span><strong id="lastTxSubmitted">-</strong>
+          <span>Mined block</span><strong id="lastTxMinedHeight">not mined yet</strong>
+        </div>
+
+        <div id="confirmedBlockSection" style="display: none; margin-top: 16px;">
+          <h3 class="eyebrow">Confirmed Transaction Block</h3>
+          <div class="kv">
+            <span>Height</span><strong id="confirmedBlockHeight">-</strong>
+            <span>Tx count</span><strong id="confirmedBlockTxCount">-</strong>
+            <span>Confirmation</span><strong id="confirmedBlockStatus">-</strong>
+            <span>Block hash</span><div class="hash compact" id="confirmedBlockHash">-</div>
+            <span>Merkle root</span><div class="hash compact" id="confirmedMerkleRoot">-</div>
+            <span>State root</span><div class="hash compact" id="confirmedStateRoot">-</div>
+          </div>
+          <div class="small" id="confirmedMerkleWarning" style="display: none; color: var(--danger); font-weight: 700; margin-top: 8px;">Invalid tx commitment: non-empty block has empty Merkle root.</div>
+          <div class="small" style="margin-top: 8px;">Empty blocks legitimately carry an all-zero Merkle root; a newer empty block on the Latest Mined Block panel does not affect this confirmed block.</div>
+        </div>
+      </article>
+
+      <article class="panel span-6">
+        <div class="section-head">
+          <div>
+            <h2>Recent Wallet Transactions</h2>
+            <p class="note">Transactions submitted from this dashboard, tracked from node responses and mined-block contents (stored locally in this browser).</p>
+          </div>
+        </div>
+        <table style="min-width: 0;">
+          <thead>
+            <tr>
+              <th>Tx ID</th>
+              <th>Amount</th>
+              <th>Fee</th>
+              <th>Nonce</th>
+              <th>Status</th>
+              <th>Block</th>
+              <th>Submitted</th>
+            </tr>
+          </thead>
+          <tbody id="walletTxBody">
+            <tr><td colspan="7">No wallet transactions yet.</td></tr>
+          </tbody>
+        </table>
       </article>
 
       <article class="panel span-12">
@@ -573,6 +628,7 @@
             <tr><td colspan="9">Waiting for blocks...</td></tr>
           </tbody>
         </table>
+        <div class="hash compact" id="blockDetail" style="display: none; margin-top: 10px; white-space: pre-wrap;"></div>
       </article>
     </section>
 
@@ -591,9 +647,18 @@
     let latestMinerSignature = '';
     let walletAddress = '';
     // Tracks the most recently submitted-but-not-yet-confirmed transaction
-    // so the status line can update itself once it's actually mined,
-    // instead of freezing on "queued" forever.
+    // so the status panels can update themselves once it's actually mined,
+    // instead of freezing on "queued" forever. Every field comes from the
+    // /wallet/send response or the mined block — never from the form inputs.
     let pendingTx = null;
+    let latestBlocks = [];
+    const ZERO_ROOT = '0'.repeat(64);
+    const isZeroRoot = (hex) => String(hex || '').replace(/^0x/, '') === ZERO_ROOT;
+
+    const TX_HISTORY_KEY = 'bina-wallet-tx-history';
+    let txHistory = [];
+    try { txHistory = JSON.parse(localStorage.getItem(TX_HISTORY_KEY) || '[]'); } catch { txHistory = []; }
+    const saveTxHistory = () => { try { localStorage.setItem(TX_HISTORY_KEY, JSON.stringify(txHistory.slice(0, 20))); } catch {} };
 
     const fmt = (value) => Number(value || 0).toLocaleString();
     const fmtSeconds = (value) => `${fmt(value)}s`;
@@ -732,24 +797,101 @@
 
     function renderBlocks(blocks) {
       const rows = Array.isArray(blocks) ? blocks : [];
-      els.blocksBody.innerHTML = rows.map(block => `
-        <tr>
+      latestBlocks = rows;
+      els.blocksBody.innerHTML = rows.map(block => {
+        const txCount = (block.transactions || []).length;
+        const isTxBlock = txCount > 0;
+        const badMerkle = isTxBlock && isZeroRoot(block.merkle_root);
+        const txCell = badMerkle
+          ? `<span class="badge fail" title="Invalid tx commitment: non-empty block has empty Merkle root."><span class="dot"></span><span>${fmt(txCount)} tx invalid</span></span>`
+          : isTxBlock
+            ? `<span class="badge ok" title="tx block — click row for full merkle/state roots"><span class="dot"></span><span>${fmt(txCount)} tx</span></span>`
+            : '0';
+        return `
+        <tr${isTxBlock ? ` class="tx-block" data-height="${block.height}" title="tx block — click for full merkle/state roots"` : ''}>
           <td>${fmt(block.height)}</td>
           <td class="mono">+${fmt(block.reward_bina)}</td>
           <td>${block.difficulty_bits}</td>
           <td>${block.zero_bits}</td>
-          <td>${fmt((block.transactions || []).length)}</td>
+          <td>${txCell}</td>
           <td>${fmt(block.elapsed_ms)} ms</td>
           <td>${block.source || '-'}</td>
           <td class="mono">${short(block.block_hash)}</td>
           <td class="mono">${short(block.randomness_output)}</td>
         </tr>
-      `).join('') || '<tr><td colspan="9">No blocks yet</td></tr>';
+      `;
+      }).join('') || '<tr><td colspan="9">No blocks yet</td></tr>';
+    }
+
+    // Clicking a tx block row reveals its full merkle_root/state_root so
+    // the commitment can be inspected/copied even after newer (possibly
+    // empty, zero-merkle) blocks replace it on the Latest Mined Block panel.
+    function showBlockDetail(height) {
+      const block = latestBlocks.find(b => Number(b.height) === Number(height));
+      if (!block) return;
+      els.blockDetail.style.display = '';
+      els.blockDetail.textContent =
+        `Block ${fmt(block.height)} — ${fmt((block.transactions || []).length)} tx\n` +
+        `block_hash:  ${block.block_hash}\n` +
+        `merkle_root: ${block.merkle_root}\n` +
+        `state_root:  ${block.state_root}`;
+    }
+
+    function renderLastTx() {
+      const tx = txHistory[0];
+      if (!tx) return;
+      els.lastTxEmpty.style.display = 'none';
+      els.lastTxPanel.style.display = '';
+      els.lastTxId.textContent = tx.tx_id || '-';
+      els.lastTxTo.textContent = tx.to || '-';
+      els.lastTxAmount.textContent = `${fmt(tx.amount)} BINA`;
+      els.lastTxFee.textContent = `${fmt(tx.fee)} BINA`;
+      els.lastTxNonce.textContent = fmt(tx.nonce);
+      els.lastTxSubmitted.textContent = tx.submitted_at ? new Date(tx.submitted_at).toLocaleString() : '-';
+      els.lastTxMinedHeight.textContent = tx.minedHeight != null ? fmt(tx.minedHeight) : 'not mined yet';
+      const state = tx.status === 'confirmed' ? 'ok' : tx.status === 'failed' ? 'fail' : 'warn';
+      setBadge(els.lastTxStatusBadge, state, tx.status || 'pending');
+    }
+
+    function renderWalletTxs() {
+      els.walletTxBody.innerHTML = txHistory.slice(0, 20).map(tx => `
+        <tr>
+          <td class="mono">${short(tx.tx_id, 10, 6)}</td>
+          <td>${fmt(tx.amount)}</td>
+          <td>${fmt(tx.fee)}</td>
+          <td>${fmt(tx.nonce)}</td>
+          <td>${tx.status || 'pending'}</td>
+          <td>${tx.minedHeight != null ? fmt(tx.minedHeight) : '-'}</td>
+          <td>${tx.submitted_at ? new Date(tx.submitted_at).toLocaleTimeString() : '-'}</td>
+        </tr>
+      `).join('') || '<tr><td colspan="7">No wallet transactions yet.</td></tr>';
+    }
+
+    // Fetches the block that mined the tx via /block/{height} so the
+    // confirmed commitment stays visible even after newer empty blocks
+    // (which legitimately have zero merkle roots) take over the Latest
+    // Mined Block panel.
+    async function showConfirmedBlock(height) {
+      try {
+        const block = await getJson(`/block/${height}`);
+        if (!block) return;
+        const txCount = (block.transactions || []).length;
+        els.confirmedBlockSection.style.display = '';
+        els.confirmedBlockHeight.textContent = fmt(block.height);
+        els.confirmedBlockTxCount.textContent = fmt(txCount);
+        els.confirmedBlockStatus.textContent = 'confirmed — included in canonical chain';
+        els.confirmedBlockHash.textContent = block.block_hash || '-';
+        els.confirmedMerkleRoot.textContent = block.merkle_root || '-';
+        els.confirmedStateRoot.textContent = block.state_root || '-';
+        els.confirmedMerkleWarning.style.display = txCount > 0 && isZeroRoot(block.merkle_root) ? '' : 'none';
+      } catch (err) {
+        console.error('confirmed block fetch failed', err);
+      }
     }
 
     // Looks for `pendingTx` inside the recent-blocks list and, once it
     // finds the block that actually included it, replaces the frozen
-    // "queued" status line with the real mined outcome. Matches by
+    // "queued" status with the real mined outcome. Matches by
     // (from, nonce) rather than tx_id — computing BINA's tx_id needs a
     // BLAKE3 hash, which this plain-JS dashboard doesn't have, but a
     // sender's nonce only appears once per confirmed transaction.
@@ -763,8 +905,18 @@
         );
         if (match) {
           pendingTx.confirmed = true;
+          pendingTx.status = 'confirmed';
+          pendingTx.minedHeight = Number(block.height);
+          // Amount/fee come from the mined block's own copy of the tx,
+          // never from the (already reset) form inputs.
+          pendingTx.amount = Number(match.tx.amount);
+          pendingTx.fee = Number(match.tx.fee);
+          saveTxHistory();
           els.txStatus.textContent =
-            `Tx mined in block ${fmt(block.height)} | Amount: ${fmt(match.tx.amount)} BINA | Fee: ${fmt(match.tx.fee)} BINA | Status: confirmed`;
+            `Tx mined in block ${fmt(block.height)} | Amount: ${fmt(match.tx.amount)} BINA | Fee: ${fmt(match.tx.fee)} BINA | confirmed`;
+          renderLastTx();
+          renderWalletTxs();
+          showConfirmedBlock(pendingTx.minedHeight);
           return;
         }
       }
@@ -844,11 +996,27 @@
         const result = await postJson('/wallet/send', { to, amount, fee });
         // Submission only queues the transaction into the mempool now — it
         // has no effect on any balance until a miner includes it in a
-        // block. Track it so the next few refresh() cycles can notice once
-        // it's actually mined and replace this message with the real
-        // outcome instead of leaving it frozen on "queued" forever.
-        pendingTx = { from: result.from, nonce: Number(result.nonce), confirmed: false };
-        els.txStatus.textContent = `Queued tx ${short(result.tx_id, 18, 12)} | nonce ${result.nonce} | pending until mined`;
+        // block. Every displayed field comes from the node's response, not
+        // from the form inputs (which reset immediately after this).
+        pendingTx = {
+          tx_id: result.tx_id,
+          from: result.from,
+          to: result.to,
+          amount: Number(result.amount),
+          fee: Number(result.fee),
+          nonce: Number(result.nonce),
+          submitted_at: Date.now(),
+          status: 'pending',
+          minedHeight: null,
+          confirmed: false,
+        };
+        txHistory.unshift(pendingTx);
+        txHistory = txHistory.slice(0, 20);
+        saveTxHistory();
+        els.txStatus.textContent = `Queued tx ${short(result.tx_id, 18, 12)} | Amount: ${fmt(result.amount)} BINA | Fee: ${fmt(result.fee)} BINA | nonce ${result.nonce}`;
+        els.confirmedBlockSection.style.display = 'none';
+        renderLastTx();
+        renderWalletTxs();
         els.txAmount.value = '';
         await refresh();
       } catch (err) {
@@ -865,6 +1033,21 @@
     els.copyMinerSignatureBtn.addEventListener('click', () => copyText(latestMinerSignature));
     els.connectPeerBtn.addEventListener('click', connectPeer);
     els.sendTxBtn.addEventListener('click', sendTransaction);
+    els.blocksBody.addEventListener('click', (e) => {
+      const row = e.target.closest('tr.tx-block');
+      if (row) showBlockDetail(row.dataset.height);
+    });
+
+    // Restore tx history from a previous page load: an unconfirmed tx keeps
+    // being watched for inclusion; a confirmed one re-fetches its block.
+    if (txHistory[0]) {
+      if (txHistory[0].status === 'pending') pendingTx = txHistory[0];
+      renderLastTx();
+      renderWalletTxs();
+      if (txHistory[0].status === 'confirmed' && txHistory[0].minedHeight != null) {
+        showConfirmedBlock(txHistory[0].minedHeight);
+      }
+    }
 
     refresh();
     setInterval(refresh, 3500);

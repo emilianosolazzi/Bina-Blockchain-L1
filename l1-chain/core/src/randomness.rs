@@ -140,6 +140,13 @@ impl NullifierSet {
         self.spent.contains(&output.nullifier)
     }
 
+    /// Directly record a nullifier as spent — used to rebuild the set from
+    /// persisted chain history at startup. Returns `false` if it was
+    /// already present.
+    pub fn mark_spent(&mut self, nullifier: [u8; 32]) -> bool {
+        self.spent.insert(nullifier)
+    }
+
     /// Number of outputs consumed so far.
     pub fn len(&self) -> usize { self.spent.len() }
 

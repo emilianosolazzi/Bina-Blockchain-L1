@@ -67,6 +67,10 @@ impl BlockStore {
                 tx_index    INTEGER NOT NULL,
                 tx_json     TEXT NOT NULL,
                 PRIMARY KEY (height, tx_index)
+            );
+            CREATE TABLE IF NOT EXISTS mempool (
+                tx_id       TEXT PRIMARY KEY,
+                tx_json     TEXT NOT NULL
             );",
         )
         .context("creating block store schema")?;
@@ -211,6 +215,83 @@ impl BlockStore {
             .context("rolling back blocks")?;
         tx.commit().context("committing rollback")?;
         Ok(())
+    }
+
+    /// The most recent block that pinned a *real* Bitcoin checkpoint —
+    /// mock/failed observations record `btc_height = 0` and are skipped.
+    /// Returns `(btc_seed_hex, btc_tip_height)`.
+    pub fn latest_checkpoint(&self) -> Result<Option<(String, u64)>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT btc_seed, btc_height FROM blocks WHERE btc_height > 0 ORDER BY height DESC LIMIT 1",
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64)),
+        )
+        .optional()
+        .context("querying latest btc checkpoint")
+    }
+
+    /// Every nullifier on the canonical chain (hex), for rebuilding the
+    /// in-memory spent set at startup.
+    pub fn all_nullifiers(&self) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT nullifier FROM blocks ORDER BY height ASC")
+            .context("preparing nullifiers query")?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .context("querying nullifiers")?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.context("reading nullifier row")?);
+        }
+        Ok(out)
+    }
+
+    pub fn mempool_insert(&self, tx: &SignedTransaction) -> Result<()> {
+        let json = serde_json::to_string(tx).context("serializing pending transaction")?;
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO mempool (tx_id, tx_json) VALUES (?1, ?2)",
+            params![tx.tx_id_hex(), json],
+        )
+        .context("inserting mempool row")?;
+        Ok(())
+    }
+
+    pub fn mempool_remove(&self, tx_id: &[u8; 32]) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM mempool WHERE tx_id = ?1", params![hex::encode(tx_id)])
+            .context("deleting mempool row")?;
+        Ok(())
+    }
+
+    /// Load every persisted pending transaction. Rows that no longer
+    /// deserialize (e.g. after a format change) are deleted rather than
+    /// crashing startup — the caller re-validates the survivors anyway.
+    pub fn mempool_load(&self) -> Result<Vec<SignedTransaction>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT tx_id, tx_json FROM mempool")
+            .context("preparing mempool query")?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .context("querying mempool")?;
+        let mut out = Vec::new();
+        let mut corrupt = Vec::new();
+        for row in rows {
+            let (tx_id, json) = row.context("reading mempool row")?;
+            match serde_json::from_str(&json) {
+                Ok(tx) => out.push(tx),
+                Err(_) => corrupt.push(tx_id),
+            }
+        }
+        drop(stmt);
+        for tx_id in corrupt {
+            conn.execute("DELETE FROM mempool WHERE tx_id = ?1", params![tx_id])
+                .context("deleting corrupt mempool row")?;
+        }
+        Ok(out)
     }
 }
 
@@ -389,5 +470,70 @@ mod tests {
         let after = store.get(1).unwrap().unwrap();
         assert_eq!(after.block_hash, "h1b");
         assert_eq!(after.transactions.len(), 1, "old row's transactions must not linger after overwrite");
+    }
+
+    #[test]
+    fn latest_checkpoint_skips_mock_rows_and_returns_the_newest_real_one() {
+        let store = temp_store();
+        assert!(store.latest_checkpoint().unwrap().is_none(), "empty store has no checkpoint");
+
+        let mut real = dummy_record(1, "h1", "0000", vec![]);
+        real.btc_seed = "aa".repeat(32);
+        real.btc_height = 900_100;
+        store.insert_block(&real).unwrap();
+
+        // A later block whose checkpoint was mock/failed (btc_height = 0)
+        // must not shadow the older real checkpoint.
+        let mut mock = dummy_record(2, "h2", "h1", vec![]);
+        mock.btc_seed = "de".repeat(32);
+        mock.btc_height = 0;
+        store.insert_block(&mock).unwrap();
+
+        let (seed, height) = store.latest_checkpoint().unwrap().unwrap();
+        assert_eq!(seed, "aa".repeat(32));
+        assert_eq!(height, 900_100);
+
+        let mut newer = dummy_record(3, "h3", "h2", vec![]);
+        newer.btc_seed = "bb".repeat(32);
+        newer.btc_height = 900_200;
+        store.insert_block(&newer).unwrap();
+        let (seed, height) = store.latest_checkpoint().unwrap().unwrap();
+        assert_eq!(seed, "bb".repeat(32));
+        assert_eq!(height, 900_200);
+    }
+
+    #[test]
+    fn all_nullifiers_returns_every_stored_block_nullifier() {
+        let store = temp_store();
+        for h in 1..=3u64 {
+            let mut record = dummy_record(h, &format!("h{h}"), &format!("h{}", h - 1), vec![]);
+            record.nullifier = format!("{:02x}", h).repeat(32);
+            store.insert_block(&record).unwrap();
+        }
+        let nullifiers = store.all_nullifiers().unwrap();
+        assert_eq!(nullifiers.len(), 3);
+        assert!(nullifiers.contains(&"02".repeat(32)));
+    }
+
+    #[test]
+    fn mempool_rows_survive_a_reopen_and_are_removable() {
+        let path = std::env::temp_dir().join(format!("bina_store_test_{}.sqlite3", uuid_ish()));
+        let tx1 = dummy_tx();
+        let tx2 = dummy_tx();
+        {
+            let store = BlockStore::open(path.to_str().unwrap()).unwrap();
+            store.mempool_insert(&tx1).unwrap();
+            store.mempool_insert(&tx2).unwrap();
+            // Re-inserting the same tx must not duplicate it.
+            store.mempool_insert(&tx1).unwrap();
+        }
+        let store = BlockStore::open(path.to_str().unwrap()).unwrap();
+        let loaded = store.mempool_load().unwrap();
+        assert_eq!(loaded.len(), 2, "pending transactions must survive a restart");
+
+        store.mempool_remove(&tx1.tx_id()).unwrap();
+        let after = store.mempool_load().unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].tx_id_hex(), tx2.tx_id_hex());
     }
 }
