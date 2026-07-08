@@ -98,3 +98,6 @@ l1-chain/data/blocks.sqlite3-shm
 l1-chain/data/blocks.sqlite3-wal
 l1-chain/data/archive-pre-consensus-v2/
 l1-chain/logs/
+
+node_modules/
+l1-chain/randomness-api/node_modules/
