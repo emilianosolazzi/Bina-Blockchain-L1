@@ -4,17 +4,20 @@ mod gossip;
 mod peers;
 
 use axum::{
-    extract::{ConnectInfo, Path, State},
+    extract::{ConnectInfo, Path, Request, State},
     http::StatusCode,
-    response::IntoResponse,
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::{get, post},
     Extension, Json, Router,
 };
 use envelope::{BinaMessage, BlockClaimEnvelope, PeerHelloEnvelope};
 use gossip::Gossip;
-use l1_core::bitcoin_entropy::BtcEntropyState;
-use l1_core::block::{genesis_block, leading_zero_bits};
-use l1_core::claims::{select_winning_claim, SignedBlockClaim};
+use l1_core::bitcoin_entropy::{
+    governing_checkpoint_height, is_checkpoint_height, BtcCheckpointProof, BtcEntropyState, BTC_CHECKPOINT_INTERVAL,
+};
+use l1_core::block::{genesis_block, leading_zero_bits, timestamp_is_valid, L1BlockHeader};
+use l1_core::claims::{claim_is_better, SignedBlockClaim};
 use l1_core::crypto::WalletKeypair;
 use l1_core::difficulty::{DifficultyAdjuster, TARGET_BLOCK_MS};
 use l1_core::pow::mine_block;
@@ -27,29 +30,70 @@ use l1_core::transaction::{parse_address_hex, SignedTransaction, Transaction, ED
 use peers::PeerList;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tower_http::cors::CorsLayer;
+use tower_http::limit::RequestBodyLimitLayer;
 use zeroize::{Zeroize, Zeroizing};
 
 const MAX_STORED: usize = 1_000; // keep last 1 000 blocks in memory
-const PORT: u16 = 8181;
+const DEFAULT_PORT: u16 = 8181;
 const NETWORK_ID: &str = "bina-l1";
 const DEFAULT_P2P_TTL: u8 = 8;
 const MAX_PEERS: usize = 128;
 const DEFAULT_SEED_PEERS: &[&str] = &["144.126.157.197:8181"];
-const LEDGER_PATH: &str = "data/ledger.csv";
-const CHAIN_STATE_PATH: &str = "data/chain-state.json";
+
+/// HTTP API port. Overridable so multiple nodes can run on one machine
+/// (local dev/test networks, or a host running more than one instance).
+fn http_port() -> u16 {
+    std::env::var("BINA_HTTP_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_PORT)
+}
+
+/// Data directory for the reward ledger and chain-state files. Overridable
+/// for the same reason as `http_port` — distinct local nodes must not share
+/// a data directory.
+fn data_dir() -> String {
+    std::env::var("BINA_DATA_DIR").unwrap_or_else(|_| "data".to_string())
+}
+
+fn ledger_path() -> String {
+    format!("{}/ledger.csv", data_dir())
+}
+
+fn chain_state_path() -> String {
+    format!("{}/chain-state.json", data_dir())
+}
+const CHAIN_STATE_VERSION: u32 = 2;
 const SUBMISSION_GRACE_MS: u64 = 1_500;
-const MAX_FUTURE_BLOCK_SECS: u64 = 30;
+/// How far a claim's embedded timestamp may sit ahead of a validator's own clock.
+const MAX_FUTURE_MS: u64 = 30_000;
+/// Bitcoin-block tolerance for checkpoint plausibility checks — see
+/// `BtcCheckpointProof::plausible`. Wide enough to absorb ordinary
+/// provider/propagation lag between independent validators, narrow enough
+/// that a miner cannot pin an arbitrary/fabricated Bitcoin state.
+const BTC_HEIGHT_TOLERANCE: u64 = 2;
+/// How often the background task refreshes the node's own live observation
+/// of Bitcoin chain state (used for checkpoint plausibility + telemetry).
+const BTC_OBSERVE_INTERVAL: Duration = Duration::from_secs(5);
+/// Maximum number of blocks returned by a single `/chain/headers` sync page.
+const MAX_SYNC_PAGE: usize = 500;
+/// Maximum accepted JSON request body size for mutating endpoints.
+const MAX_BODY_BYTES: usize = 64 * 1024;
+/// Sliding-window request budget per source IP for mutating endpoints.
+const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(10);
+const RATE_LIMIT_MAX_REQUESTS: u32 = 200;
 
 // ─── Per-block record (stored + returned by API) ───────────────────────────
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 struct BlockRecord {
     height: u64,
     block_hash: String,
+    prev_hash: String,
     nonce: u64,
     timestamp: u64,
     zero_bits: u32,
@@ -70,6 +114,32 @@ struct BlockRecord {
     btc_height: u64,
 }
 
+/// A claim not yet finalized for its height, plus the Bitcoin-checkpoint
+/// proof it carried (only present when the claim targets a checkpoint
+/// height — see `l1_core::bitcoin_entropy`).
+#[derive(Clone)]
+struct PendingClaim {
+    claim: SignedBlockClaim,
+    btc_checkpoint: Option<BtcCheckpointProof>,
+}
+
+/// Deterministic winner-selection over a height's candidate claims, using
+/// the same objective-work-then-election-score rule as
+/// `l1_core::claims::select_winning_claim`, but carrying the checkpoint
+/// proof of whichever candidate wins so it can be pinned on finalization.
+fn select_winning_pending<I>(claims: I) -> Option<PendingClaim>
+where
+    I: IntoIterator<Item = PendingClaim>,
+{
+    claims.into_iter().reduce(|winner, candidate| {
+        if claim_is_better(&candidate.claim, &winner.claim) {
+            candidate
+        } else {
+            winner
+        }
+    })
+}
+
 // ─── Shared mutable node state ─────────────────────────────────────────────
 
 struct NodeState {
@@ -77,19 +147,30 @@ struct NodeState {
     tip_hash: [u8; 32],
     chain_height: u64,
     blocks: VecDeque<BlockRecord>,
-    pending_claims: HashMap<u64, HashMap<String, SignedBlockClaim>>,
+    pending_claims: HashMap<u64, HashMap<String, PendingClaim>>,
     nullifiers: NullifierSet,
     total_hashes: u64,
     total_time_ms: u64,
     started_at: Instant,
     threads: usize,
-    btc_height: u64,
-    btc_tip: String,
+    /// Freshest live observation of Bitcoin chain state (telemetry +
+    /// checkpoint-plausibility input). Refreshed by a background task and
+    /// opportunistically whenever this node mines a checkpoint block.
+    last_observed_btc: BtcEntropyState,
+    /// Consensus-pinned Bitcoin seed for the current checkpoint epoch. Every
+    /// non-checkpoint block must reuse this value exactly; it only changes
+    /// when a checkpoint-height block is finalized.
     btc_seed_hash: [u8; 32],
     btc_seed_changed_at: u64,
-    btc_fork: bool,
-    btc_tip_divergence_height: Option<u64>,
+    /// Bitcoin tip height committed by the last accepted checkpoint.
+    btc_checkpoint_tip_height: u64,
     difficulty_bits: u32,
+    /// Consensus timestamp (Unix ms) of the current chain tip — the
+    /// monotonicity floor the next block's timestamp must exceed.
+    last_block_timestamp_ms: u64,
+    /// Cumulative proof-of-work across the whole chain (sum of 2^work_bits
+    /// per block), used for heaviest-chain fork choice during sync.
+    chain_work: u128,
     miner_address: String,
     // Economics
     total_mined_bina: u64,
@@ -114,6 +195,21 @@ struct ClaimReject {
     message: String,
 }
 
+/// Consensus-critical fields persisted alongside the chain tip so a
+/// restarted node resumes deterministic difficulty/checkpoint state exactly
+/// where it left off, instead of re-seeding from wall clock or defaults.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ConsensusResumeState {
+    difficulty_bits: u32,
+    epoch_start_ms: u64,
+    epoch_start_height: u64,
+    btc_seed_hash: String,
+    btc_checkpoint_tip_height: u64,
+    last_block_timestamp_ms: u64,
+    /// u128 chain-work total, hex-encoded (JSON numbers cannot hold u128 safely).
+    chain_work_hex: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ChainStateFile {
     version: u32,
@@ -122,6 +218,8 @@ struct ChainStateFile {
     tip_hash: String,
     height: u64,
     updated_at: u64,
+    #[serde(flatten)]
+    resume: ConsensusResumeState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -164,12 +262,23 @@ struct PeerConnectRequest {
     address: String,
 }
 
+/// Wire format for `POST /chain/submit` and the gossip `BlockClaim` message:
+/// a signed claim plus its Bitcoin-checkpoint proof, when the claim targets
+/// a checkpoint height (see `l1_core::bitcoin_entropy::is_checkpoint_height`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ClaimSubmission {
+    claim: SignedBlockClaim,
+    #[serde(default)]
+    btc_checkpoint: Option<BtcCheckpointProof>,
+}
+
 #[derive(Debug, Clone)]
 struct LoadedChainState {
     genesis_hash: [u8; 32],
     tip_hash: [u8; 32],
     height: u64,
     created: bool,
+    resume: ConsensusResumeState,
 }
 
 impl ClaimReject {
@@ -209,17 +318,25 @@ async fn handle_status(State(s): State<SharedState>) -> Json<serde_json::Value> 
         "uptime_secs":        uptime,
         "threads":            s.threads,
         "miner_address":      s.miner_address,
-        "btc_height":         s.btc_height,
-        "btc_tip":            s.btc_tip,
+        // "btc_height"/"btc_tip" are kept as aliases of the live-observed
+        // Bitcoin state for dashboard compatibility; the pinned consensus
+        // value miners must actually match is "btc_checkpoint_tip_height".
+        "btc_height":         s.last_observed_btc.tip_height,
+        "btc_tip":            hex::encode(&s.last_observed_btc.tip_hash[..8]),
+        "btc_observed_height": s.last_observed_btc.tip_height,
+        "btc_observed_tip":   hex::encode(&s.last_observed_btc.tip_hash[..8]),
+        "btc_checkpoint_tip_height": s.btc_checkpoint_tip_height,
+        "btc_tip_divergence_height": s.last_observed_btc.fork_detected.then_some(s.last_observed_btc.tip_height),
         "btc_seed_age_secs":  btc_seed_age_secs,
         "btc_seed_changed_at": s.btc_seed_changed_at,
-        "btc_fork_seen":      s.btc_fork,
-        "btc_tip_divergence_height": s.btc_tip_divergence_height,
+        "btc_fork_seen":      s.last_observed_btc.fork_detected,
+        "btc_checkpoint_interval": BTC_CHECKPOINT_INTERVAL,
         "block_time_avg_ms":  block_time_avg_ms,
         "block_time_stddev_ms": block_time_stddev_ms,
         "nullifiers_spent":   s.nullifiers.len(),
         "genesis_hash":       hex::encode(s.genesis_hash),
         "tip_hash":           hex::encode(s.tip_hash),
+        "chain_work":         format!("{:x}", s.chain_work),
         "last_difficulty_adjustment": s.last_adjustment,
     }))
 }
@@ -261,6 +378,33 @@ async fn handle_blocks_recent(State(s): State<SharedState>) -> Json<Vec<BlockRec
         .cloned()
         .collect();
     Json(recent)
+}
+
+/// Bounded-range block header sync — lets a lagging or newly-joined peer
+/// catch up. Only serves what this node still retains in its in-memory
+/// window (`MAX_STORED` blocks); a peer requesting a range older than that
+/// gets whatever's left of it. Deep historical sync beyond that window needs
+/// persistent block storage, which this node does not yet have.
+async fn handle_chain_headers(
+    State(s): State<SharedState>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, u64>>,
+) -> Json<Vec<BlockRecord>> {
+    let from = params.get("from").copied().unwrap_or(0);
+    let to = params
+        .get("to")
+        .copied()
+        .unwrap_or(u64::MAX)
+        .min(from.saturating_add(MAX_SYNC_PAGE as u64));
+    let page: Vec<BlockRecord> = s
+        .read()
+        .unwrap()
+        .blocks
+        .iter()
+        .filter(|b| b.height >= from && b.height <= to)
+        .take(MAX_SYNC_PAGE)
+        .cloned()
+        .collect();
+    Json(page)
 }
 
 async fn handle_randomness_latest(
@@ -310,10 +454,16 @@ async fn handle_randomness_at(
 async fn handle_submit_claim(
     State(s): State<SharedState>,
     Extension(gossip): Extension<Arc<Gossip>>,
-    Json(claim): Json<SignedBlockClaim>,
+    Json(submission): Json<ClaimSubmission>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let accepted = accept_signed_claim(&s, claim.clone()).map_err(claim_error_response)?;
-    let envelope = BlockClaimEnvelope::from_claim(gossip.network().to_string(), DEFAULT_P2P_TTL, claim);
+    let accepted = accept_signed_claim(&s, submission.claim.clone(), submission.btc_checkpoint.clone())
+        .map_err(claim_error_response)?;
+    let envelope = BlockClaimEnvelope::from_claim(
+        gossip.network().to_string(),
+        DEFAULT_P2P_TTL,
+        submission.claim,
+        submission.btc_checkpoint,
+    );
     gossip.broadcast_claim(envelope).await;
 
     Ok(Json(serde_json::json!({
@@ -426,7 +576,7 @@ async fn handle_p2p_message(
     };
 
     if let BinaMessage::BlockClaim(envelope) = message {
-        match accept_signed_claim(&s, envelope.claim.clone()) {
+        match accept_signed_claim(&s, envelope.claim.clone(), envelope.btc_checkpoint.clone()) {
             Ok(accepted) => {
                 println!(
                     "[p2p] accepted claim from {} height={} hash={}…",
@@ -491,7 +641,7 @@ async fn handle_peer_connect(
         (state.chain_height, hex::encode(state.tip_hash))
     };
     let listen_addr = std::env::var("BINA_P2P_LISTEN_ADDR")
-        .unwrap_or_else(|_| format!("127.0.0.1:{PORT}"));
+        .unwrap_or_else(|_| format!("127.0.0.1:{}", http_port()));
     let hello = PeerHelloEnvelope {
         network: gossip.network().to_string(),
         version: 1,
@@ -534,7 +684,11 @@ async fn handle_peer_connect(
     })))
 }
 
-fn accept_signed_claim(state: &SharedState, claim: SignedBlockClaim) -> Result<AcceptedClaim, ClaimReject> {
+fn accept_signed_claim(
+    state: &SharedState,
+    claim: SignedBlockClaim,
+    btc_checkpoint: Option<BtcCheckpointProof>,
+) -> Result<AcceptedClaim, ClaimReject> {
     claim.verify().map_err(|e| {
         ClaimReject::new(
             StatusCode::BAD_REQUEST,
@@ -572,19 +726,43 @@ fn accept_signed_claim(state: &SharedState, claim: SignedBlockClaim) -> Result<A
     if claim.header.difficulty_bits != state.difficulty_bits {
         return Err(ClaimReject::new(
             StatusCode::CONFLICT,
-            "claim difficulty does not match current node difficulty",
+            "claim difficulty does not match the deterministic difficulty for this height",
         ));
     }
-    if claim.header.bitcoin_seed_hash != state.btc_seed_hash {
-        return Err(ClaimReject::new(
-            StatusCode::CONFLICT,
-            "claim Bitcoin seed does not match current node seed",
-        ));
-    }
-    if claim.header.timestamp > unix_secs().saturating_add(MAX_FUTURE_BLOCK_SECS) {
+    if !timestamp_is_valid(claim.header.timestamp, state.last_block_timestamp_ms, unix_ms(), MAX_FUTURE_MS) {
         return Err(ClaimReject::new(
             StatusCode::BAD_REQUEST,
-            "claim timestamp is too far in the future",
+            "claim timestamp must be after the previous block and not too far in the future",
+        ));
+    }
+
+    if is_checkpoint_height(height) {
+        let proof = btc_checkpoint.as_ref().ok_or_else(|| {
+            ClaimReject::new(
+                StatusCode::BAD_REQUEST,
+                "height requires a Bitcoin checkpoint proof",
+            )
+        })?;
+        if proof.seed_hash() != claim.header.bitcoin_seed_hash {
+            return Err(ClaimReject::new(
+                StatusCode::BAD_REQUEST,
+                "checkpoint proof does not match the claim's bitcoin_seed_hash",
+            ));
+        }
+        let observed_tip_height = state.last_observed_btc.tip_height;
+        if !proof.plausible(state.btc_checkpoint_tip_height, observed_tip_height, BTC_HEIGHT_TOLERANCE) {
+            return Err(ClaimReject::new(
+                StatusCode::CONFLICT,
+                format!(
+                    "checkpoint proof not plausible: claimed btc height {}, last checkpoint {}, locally observed {}",
+                    proof.tip_height, state.btc_checkpoint_tip_height, observed_tip_height
+                ),
+            ));
+        }
+    } else if claim.header.bitcoin_seed_hash != state.btc_seed_hash {
+        return Err(ClaimReject::new(
+            StatusCode::CONFLICT,
+            "claim Bitcoin seed does not match the seed pinned at the last checkpoint",
         ));
     }
 
@@ -595,7 +773,7 @@ fn accept_signed_claim(state: &SharedState, claim: SignedBlockClaim) -> Result<A
             "miner already submitted a claim for this height; first valid claim is kept",
         ));
     }
-    claims.insert(miner_hex.clone(), claim);
+    claims.insert(miner_hex.clone(), PendingClaim { claim, btc_checkpoint });
 
     Ok(AcceptedClaim {
         height,
@@ -620,7 +798,7 @@ async fn handle_wallet_balance(
         "address":          address,
         "balance_bina":     balance,
         "next_nonce":       nonce,
-        "source":           LEDGER_PATH,
+        "source":           ledger_path(),
         "note":             "persistent ledger balance",
     })))
 }
@@ -663,6 +841,15 @@ fn unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// Validator's own wall clock in Unix ms — used only as the upper bound in
+/// `timestamp_is_valid`, never as a consensus value itself.
+fn unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 fn rolling_block_time_stats(blocks: &VecDeque<BlockRecord>, window: usize) -> (u64, u64) {
     let values: Vec<f64> = blocks
         .iter()
@@ -695,34 +882,62 @@ fn hex_to_32(label: &str, value: &str) -> [u8; 32] {
     out
 }
 
-fn chain_state_file(genesis_hash: [u8; 32], tip_hash: [u8; 32], height: u64) -> ChainStateFile {
+fn chain_state_file(
+    genesis_hash: [u8; 32],
+    tip_hash: [u8; 32],
+    height: u64,
+    resume: ConsensusResumeState,
+) -> ChainStateFile {
     ChainStateFile {
-        version: 1,
+        version: CHAIN_STATE_VERSION,
         network: NETWORK_ID.to_string(),
         genesis_hash: hex::encode(genesis_hash),
         tip_hash: hex::encode(tip_hash),
         height,
         updated_at: unix_secs(),
+        resume,
     }
 }
 
-fn save_chain_state(path: &str, genesis_hash: [u8; 32], tip_hash: [u8; 32], height: u64) -> std::io::Result<()> {
+fn save_chain_state(
+    path: &str,
+    genesis_hash: [u8; 32],
+    tip_hash: [u8; 32],
+    height: u64,
+    resume: ConsensusResumeState,
+) -> std::io::Result<()> {
     let path = std::path::Path::new(path);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let file = chain_state_file(genesis_hash, tip_hash, height);
+    let file = chain_state_file(genesis_hash, tip_hash, height, resume);
     let text = serde_json::to_string_pretty(&file).expect("chain state serialization cannot fail");
     std::fs::write(path, text)
 }
 
-fn load_or_create_chain_state(path: &str, genesis_hash: [u8; 32]) -> LoadedChainState {
+fn genesis_resume_state(genesis_timestamp_ms: u64) -> ConsensusResumeState {
+    ConsensusResumeState {
+        difficulty_bits: l1_core::difficulty::MIN_BITS,
+        epoch_start_ms: genesis_timestamp_ms,
+        epoch_start_height: 0,
+        btc_seed_hash: hex::encode([0u8; 32]),
+        btc_checkpoint_tip_height: 0,
+        last_block_timestamp_ms: genesis_timestamp_ms,
+        chain_work_hex: "0".to_string(),
+    }
+}
+
+fn load_or_create_chain_state(path: &str, genesis_hash: [u8; 32], genesis_timestamp_ms: u64) -> LoadedChainState {
     match std::fs::read_to_string(path) {
         Ok(text) => {
             let file: ChainStateFile = serde_json::from_str(&text)
                 .unwrap_or_else(|e| panic!("{path} is not valid chain state JSON: {e}"));
-            if file.version != 1 {
-                panic!("unsupported chain state version {} in {path}", file.version);
+            if file.version != CHAIN_STATE_VERSION {
+                panic!(
+                    "unsupported chain state version {} in {path} (expected {CHAIN_STATE_VERSION}). \
+                     Move {path} aside to resync from genesis under the current consensus rules.",
+                    file.version
+                );
             }
             if file.network != NETWORK_ID {
                 panic!("chain state network mismatch: expected {NETWORK_ID}, found {}", file.network);
@@ -740,19 +955,480 @@ fn load_or_create_chain_state(path: &str, genesis_hash: [u8; 32]) -> LoadedChain
                 tip_hash: hex_to_32("chain_state.tip_hash", &file.tip_hash),
                 height: file.height,
                 created: false,
+                resume: file.resume,
             }
         }
         Err(_) => {
-            save_chain_state(path, genesis_hash, genesis_hash, 0)
+            let resume = genesis_resume_state(genesis_timestamp_ms);
+            save_chain_state(path, genesis_hash, genesis_hash, 0, resume.clone())
                 .unwrap_or_else(|e| panic!("failed to create {path}: {e}"));
             LoadedChainState {
                 genesis_hash,
                 tip_hash: genesis_hash,
                 height: 0,
                 created: true,
+                resume,
             }
         }
     }
+}
+
+// ─── Chain sync (one-shot catch-up before mining starts) ──────────────────
+
+/// A peer's self-reported chain status, used to pick a sync source.
+struct PeerStatus {
+    addr: SocketAddr,
+    height: u64,
+    genesis_hash: [u8; 32],
+    chain_work: u128,
+}
+
+async fn fetch_peer_status(client: &reqwest::Client, addr: SocketAddr) -> Option<PeerStatus> {
+    let url = format!("http://{addr}/chain/status");
+    let json: serde_json::Value = client.get(&url).send().await.ok()?.json().await.ok()?;
+    let genesis_hash = l1_core::bitcoin_entropy::hex_to_32(json.get("genesis_hash")?.as_str()?).ok()?;
+    let chain_work = u128::from_str_radix(json.get("chain_work")?.as_str()?, 16).ok()?;
+    let height = json.get("height")?.as_u64()?;
+    Some(PeerStatus { addr, height, genesis_hash, chain_work })
+}
+
+/// Reconstruct the header a `BlockRecord` claims to represent, given the
+/// previous block's hash. `version` and `merkle_root` are not carried by
+/// `BlockRecord` because they are presently consensus constants (no
+/// transactions are bound into blocks yet) — this must be revisited if that
+/// changes.
+fn header_from_record(record: &BlockRecord, prev_hash: [u8; 32]) -> anyhow::Result<L1BlockHeader> {
+    let miner_address = parse_address_hex(&record.miner_address)?;
+    let bitcoin_seed_hash = l1_core::bitcoin_entropy::hex_to_32(&record.btc_seed)?;
+    Ok(L1BlockHeader {
+        version: 1,
+        height: record.height,
+        prev_hash,
+        merkle_root: [0u8; 32],
+        timestamp: record.timestamp,
+        nonce: record.nonce,
+        miner_address,
+        difficulty_bits: record.difficulty_bits,
+        bitcoin_seed_hash,
+    })
+}
+
+/// Fetch and apply a peer's block history strictly forward from `*height`,
+/// up to `target_height`. Every record is independently validated (chain
+/// linkage, timestamp, deterministic difficulty, checkpoint continuity,
+/// signature + PoW) before being applied — this never trusts the peer's
+/// framing, only what each record cryptographically proves.
+///
+/// Historical checkpoint blocks are validated for signature + PoW +
+/// difficulty + timestamp + chain-linkage, but NOT re-checked for Bitcoin
+/// plausibility against this node's live observation the way a fresh live
+/// claim is (see `BtcCheckpointProof::plausible`) — for buried history,
+/// trust comes from the accumulated PoW built on top, the same way any
+/// other historical chain data is trusted, not from re-fetching live oracle
+/// state for blocks that are long past.
+///
+/// Limitation: this only covers block/PoW/difficulty/checkpoint history.
+/// Value-transfer transactions are applied directly to each node's local
+/// reward ledger today and are not bound into blocks or synced between
+/// peers at all — a node catching up here will NOT receive transaction
+/// history from peers. That is a separate, larger gap (transactions need to
+/// become part of consensus data) tracked as follow-up work, not solved here.
+#[allow(clippy::too_many_arguments)]
+async fn sync_forward_from_peer(
+    client: &reqwest::Client,
+    peer_addr: SocketAddr,
+    target_height: u64,
+    state: &SharedState,
+    ledger: &SharedLedger,
+    height: &mut u64,
+    tip_hash: &mut [u8; 32],
+    last_block_timestamp_ms: &mut u64,
+    btc_seed_hash: &mut [u8; 32],
+    btc_checkpoint_tip_height: &mut u64,
+    chain_work: &mut u128,
+    adjuster: &mut DifficultyAdjuster,
+) -> u64 {
+    let mut synced = 0u64;
+    loop {
+        if *height >= target_height {
+            break;
+        }
+        let from = *height + 1;
+        let to = from.saturating_add(MAX_SYNC_PAGE as u64 - 1);
+        let url = format!("http://{peer_addr}/chain/headers?from={from}&to={to}");
+        let page: Vec<BlockRecord> = match client.get(&url).send().await {
+            Ok(resp) => match resp.json().await {
+                Ok(records) => records,
+                Err(e) => {
+                    eprintln!("[sync] peer {peer_addr} sent invalid headers page: {e}");
+                    break;
+                }
+            },
+            Err(e) => {
+                eprintln!("[sync] peer {peer_addr} unreachable during sync: {e}");
+                break;
+            }
+        };
+        if page.is_empty() {
+            eprintln!("[sync] peer {peer_addr} has no more headers to offer at height {from} — stopping short of its reported tip");
+            break;
+        }
+
+        let mut stop = false;
+        for record in &page {
+            if record.height != *height + 1 {
+                eprintln!("[sync] peer {peer_addr} sent out-of-sequence height {} (expected {})", record.height, *height + 1);
+                stop = true;
+                break;
+            }
+            if record.prev_hash != hex::encode(*tip_hash) {
+                eprintln!("[sync] peer {peer_addr} record at height {} does not chain from our tip", record.height);
+                stop = true;
+                break;
+            }
+            let header = match header_from_record(record, *tip_hash) {
+                Ok(h) => h,
+                Err(e) => {
+                    eprintln!("[sync] peer {peer_addr} record at height {} malformed: {e}", record.height);
+                    stop = true;
+                    break;
+                }
+            };
+            if !timestamp_is_valid(header.timestamp, *last_block_timestamp_ms, unix_ms(), MAX_FUTURE_MS) {
+                eprintln!("[sync] peer {peer_addr} record at height {} has an invalid timestamp", record.height);
+                stop = true;
+                break;
+            }
+            if header.difficulty_bits != adjuster.current_bits() {
+                eprintln!(
+                    "[sync] peer {peer_addr} record at height {} difficulty {} does not match expected {}",
+                    record.height, header.difficulty_bits, adjuster.current_bits()
+                );
+                stop = true;
+                break;
+            }
+            if !is_checkpoint_height(record.height) {
+                let expected_seed = hex::encode(*btc_seed_hash);
+                if record.btc_seed != expected_seed {
+                    eprintln!("[sync] peer {peer_addr} record at height {} has a Bitcoin seed that does not match the pinned checkpoint", record.height);
+                    stop = true;
+                    break;
+                }
+            }
+
+            let public_key = match hex::decode(&record.miner_public_key) {
+                Ok(b) => b,
+                Err(_) => { stop = true; break; }
+            };
+            let signature = match hex::decode(&record.miner_signature) {
+                Ok(b) => b,
+                Err(_) => { stop = true; break; }
+            };
+            let claim = SignedBlockClaim { header: header.clone(), public_key, signature };
+            if let Err(e) = claim.verify() {
+                eprintln!("[sync] peer {peer_addr} record at height {} failed verification: {e}", record.height);
+                stop = true;
+                break;
+            }
+            if claim.block_hash_hex() != record.block_hash {
+                eprintln!("[sync] peer {peer_addr} record at height {} hash mismatch", record.height);
+                stop = true;
+                break;
+            }
+
+            // Apply.
+            let block_hash = claim.block_hash();
+            {
+                let mut ledger = ledger.lock().unwrap();
+                let _ = ledger.credit(record.height, &record.miner_address, record.reward_bina, record.timestamp / 1000);
+            }
+            adjuster.record_block(record.height, header.timestamp);
+            if is_checkpoint_height(record.height) {
+                *btc_seed_hash = header.bitcoin_seed_hash;
+                *btc_checkpoint_tip_height = record.btc_height;
+            }
+            // Work is counted from the *required* difficulty, not the
+            // winning hash's actual leading-zero count — otherwise a single
+            // lucky block would count for far more than its real expected
+            // cost, letting a chain claim disproportionate cumulative work.
+            *chain_work = chain_work.saturating_add(1u128 << header.difficulty_bits.min(127));
+            *last_block_timestamp_ms = header.timestamp;
+            *tip_hash = block_hash;
+            *height = record.height;
+            synced += 1;
+
+            {
+                let mut s = state.write().unwrap();
+                s.chain_height = *height;
+                s.tip_hash = *tip_hash;
+                s.difficulty_bits = adjuster.current_bits();
+                s.btc_seed_hash = *btc_seed_hash;
+                s.btc_checkpoint_tip_height = *btc_checkpoint_tip_height;
+                s.last_block_timestamp_ms = *last_block_timestamp_ms;
+                s.chain_work = *chain_work;
+                s.total_mined_bina = ledger.lock().unwrap().total_mined();
+                if s.blocks.len() >= MAX_STORED {
+                    s.blocks.pop_front();
+                }
+                s.blocks.push_back(record.clone());
+                // Drop any now-stale pending candidates at or below the new tip.
+                s.pending_claims.retain(|candidate_height, _| *candidate_height > *height);
+            }
+        }
+        if stop {
+            break;
+        }
+    }
+    synced
+}
+
+/// Query every known peer's `/chain/status`, keeping only those on our
+/// genesis whose reported cumulative work exceeds `local_work`.
+async fn best_peer_by_work(client: &reqwest::Client, gossip: &Gossip, local_genesis: [u8; 32], local_work: u128) -> Option<PeerStatus> {
+    let mut statuses = Vec::new();
+    for peer in gossip.peers().all() {
+        if let Some(status) = fetch_peer_status(client, peer).await {
+            statuses.push(status);
+        }
+    }
+    statuses
+        .into_iter()
+        .filter(|p| p.genesis_hash == local_genesis && p.chain_work > local_work)
+        .max_by_key(|p| p.chain_work)
+}
+
+/// One-shot startup catch-up: if a known peer on the same genesis reports
+/// strictly more cumulative chain work than this node has, fetch and
+/// replay its block history (bounded by what the peer still retains) before
+/// mining begins, so a restarted or newly-joined node doesn't immediately
+/// start extending a chain that the rest of the network has already
+/// surpassed. See `sync_forward_from_peer` for validation details.
+#[allow(clippy::too_many_arguments)]
+async fn catch_up_from_peers(
+    state: &SharedState,
+    ledger: &SharedLedger,
+    gossip: &Gossip,
+    height: &mut u64,
+    tip_hash: &mut [u8; 32],
+    last_block_timestamp_ms: &mut u64,
+    btc_seed_hash: &mut [u8; 32],
+    btc_checkpoint_tip_height: &mut u64,
+    chain_work: &mut u128,
+    adjuster: &mut DifficultyAdjuster,
+) {
+    let client = match reqwest::Client::builder().timeout(Duration::from_secs(5)).build() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let local_genesis = state.read().unwrap().genesis_hash;
+    let Some(best) = best_peer_by_work(&client, gossip, local_genesis, *chain_work).await else {
+        return;
+    };
+
+    println!(
+        "[sync] peer {} reports heavier chain (work {:x} > {:x}, height {}) — catching up",
+        best.addr, best.chain_work, *chain_work, best.height
+    );
+
+    let synced = sync_forward_from_peer(
+        &client, best.addr, best.height, state, ledger,
+        height, tip_hash, last_block_timestamp_ms, btc_seed_hash, btc_checkpoint_tip_height, chain_work, adjuster,
+    ).await;
+
+    println!("[sync] applied {synced} block(s) from {}, now at height {}", best.addr, *height);
+}
+
+/// Maximum depth (in blocks) a live reorg will roll back automatically.
+/// Bounded to less than one difficulty epoch so the rollback never needs to
+/// cross an already-applied epoch boundary — see `reconcile_fork` for why
+/// that keeps the difficulty-adjuster rebuild trivially correct without a
+/// full from-genesis replay. Deeper divergences are logged, not silently
+/// resolved automatically: an operator should look at those.
+const MAX_AUTO_REORG_DEPTH: u64 = l1_core::difficulty::EPOCH_SIZE - 1;
+
+/// Continuously-running reorg reconciliation: if a peer's chain has more
+/// cumulative work than ours *and* the two chains have actually diverged
+/// (not just a peer being further ahead on the same history — that's plain
+/// catch-up, handled the same way here), find the common ancestor within
+/// the locally-retained block window, roll back to it, and adopt the
+/// heavier branch. This is what lets two nodes that each mined a
+/// competing tail (e.g. a gossip claim arrived a moment too late) converge
+/// back onto one chain instead of silently forking forever.
+#[allow(clippy::too_many_arguments)]
+async fn reconcile_fork(
+    state: &SharedState,
+    ledger: &SharedLedger,
+    ledger_path: &str,
+    gossip: &Gossip,
+    height: &mut u64,
+    tip_hash: &mut [u8; 32],
+    last_block_timestamp_ms: &mut u64,
+    btc_seed_hash: &mut [u8; 32],
+    btc_checkpoint_tip_height: &mut u64,
+    chain_work: &mut u128,
+    adjuster: &mut DifficultyAdjuster,
+) {
+    let client = match reqwest::Client::builder().timeout(Duration::from_secs(5)).build() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let local_genesis = state.read().unwrap().genesis_hash;
+    let Some(best) = best_peer_by_work(&client, gossip, local_genesis, *chain_work).await else {
+        return;
+    };
+    if best.height < *height {
+        // More work over fewer-or-equal blocks than us would mean we
+        // disagree on the difficulty rules entirely — outside what this
+        // reconciler can safely fix. Leave it for an operator to notice.
+        eprintln!("[reorg] peer {} reports more work at a lower height ({} < {}) — not attempting to reconcile", best.addr, best.height, *height);
+        return;
+    }
+
+    // Find the common ancestor by probing the peer's record at each height
+    // going backward from our tip, compared against our own retained
+    // history, bounded to MAX_AUTO_REORG_DEPTH.
+    let probe_floor = height.saturating_sub(MAX_AUTO_REORG_DEPTH);
+    let local_hash_at = |h: u64| -> Option<[u8; 32]> {
+        state.read().unwrap().blocks.iter().find(|b| b.height == h).and_then(|b| l1_core::bitcoin_entropy::hex_to_32(&b.block_hash).ok())
+    };
+
+    let mut fork_point = *height;
+    while fork_point > probe_floor {
+        let peer_hash = match client
+            .get(format!("http://{}/chain/headers?from={fork_point}&to={fork_point}", best.addr))
+            .send()
+            .await
+        {
+            Ok(resp) => match resp.json::<Vec<BlockRecord>>().await {
+                Ok(records) => records.into_iter().find(|r| r.height == fork_point).and_then(|r| l1_core::bitcoin_entropy::hex_to_32(&r.block_hash).ok()),
+                Err(_) => None,
+            },
+            Err(_) => None,
+        };
+        let Some(peer_hash) = peer_hash else { return };
+        match local_hash_at(fork_point) {
+            Some(local_hash) if local_hash == peer_hash => break, // common ancestor found
+            Some(_) => {} // definite mismatch at this height — keep searching further back
+            None => {
+                // We no longer retain this height ourselves (e.g. we
+                // restarted since it was mined — block records only live
+                // in memory, not on disk, today). We cannot distinguish
+                // "would have matched" from "would have mismatched", so we
+                // must not guess either way.
+                eprintln!(
+                    "[reorg] no longer have height {fork_point} retained locally (likely due to a restart) — cannot determine the fork point, refusing to auto-reorg"
+                );
+                return;
+            }
+        }
+        if fork_point == 0 {
+            return;
+        }
+        fork_point -= 1;
+    }
+
+    if fork_point == *height {
+        // No divergence — peer is just further ahead on our own history.
+        let synced = sync_forward_from_peer(
+            &client, best.addr, best.height, state, ledger,
+            height, tip_hash, last_block_timestamp_ms, btc_seed_hash, btc_checkpoint_tip_height, chain_work, adjuster,
+        ).await;
+        if synced > 0 {
+            println!("[sync] applied {synced} block(s) from {}, now at height {}", best.addr, *height);
+        }
+        return;
+    }
+    if fork_point <= probe_floor {
+        eprintln!(
+            "[reorg] peer {} diverges more than {MAX_AUTO_REORG_DEPTH} blocks back from our tip {} — refusing to auto-reorg that deep",
+            best.addr, *height
+        );
+        return;
+    }
+    if fork_point < adjuster.epoch_start_height() {
+        eprintln!("[reorg] fork point {fork_point} predates our current difficulty epoch (started {}) — refusing to auto-reorg across an epoch boundary", adjuster.epoch_start_height());
+        return;
+    }
+
+    // Roll back: subtract the (small, bounded) rolled-back blocks' work,
+    // recover checkpoint/tip/timestamp state as of fork_point from what we
+    // retained, truncate our block window, and reopen the ledger scoped to
+    // fork_point (it already only replays rows up to that height).
+    let rolled_back: Vec<BlockRecord> = {
+        let s = state.read().unwrap();
+        s.blocks.iter().filter(|b| b.height > fork_point).cloned().collect()
+    };
+    let work_removed: u128 = rolled_back.iter().fold(0u128, |acc, b| acc.saturating_add(1u128 << b.difficulty_bits.min(127)));
+
+    eprintln!(
+        "[reorg] rolling back {} block(s) (height {} -> {}) to adopt peer {}'s heavier chain",
+        rolled_back.len(), *height, fork_point, best.addr
+    );
+
+    let (new_tip, new_ts) = if fork_point == 0 {
+        (state.read().unwrap().genesis_hash, adjuster.epoch_start_ms())
+    } else {
+        let s = state.read().unwrap();
+        match s.blocks.iter().find(|b| b.height == fork_point) {
+            Some(b) => (
+                l1_core::bitcoin_entropy::hex_to_32(&b.block_hash).unwrap_or(s.genesis_hash),
+                b.timestamp,
+            ),
+            None => return, // not actually retained despite the probe above — bail out safely
+        }
+    };
+
+    let governing = governing_checkpoint_height(fork_point);
+    let (new_seed, new_seed_tip_height) = if governing == 0 {
+        (*btc_seed_hash, *btc_checkpoint_tip_height)
+    } else {
+        let s = state.read().unwrap();
+        match s.blocks.iter().find(|b| b.height == governing) {
+            Some(b) => match l1_core::bitcoin_entropy::hex_to_32(&b.btc_seed) {
+                Ok(seed) => (seed, b.btc_height),
+                Err(_) => return,
+            },
+            None => return,
+        }
+    };
+
+    let new_ledger = match RewardLedger::open_scoped(ledger_path, fork_point) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("[reorg] failed to reopen ledger scoped to height {fork_point}: {e}");
+            return;
+        }
+    };
+
+    {
+        let mut l = ledger.lock().unwrap();
+        *l = new_ledger;
+    }
+    *chain_work = chain_work.saturating_sub(work_removed);
+    *height = fork_point;
+    *tip_hash = new_tip;
+    *last_block_timestamp_ms = new_ts;
+    *btc_seed_hash = new_seed;
+    *btc_checkpoint_tip_height = new_seed_tip_height;
+
+    {
+        let mut s = state.write().unwrap();
+        s.blocks.retain(|b| b.height <= fork_point);
+        s.pending_claims.retain(|candidate_height, _| *candidate_height > fork_point);
+        s.chain_height = *height;
+        s.tip_hash = *tip_hash;
+        s.last_block_timestamp_ms = *last_block_timestamp_ms;
+        s.btc_seed_hash = *btc_seed_hash;
+        s.btc_checkpoint_tip_height = *btc_checkpoint_tip_height;
+        s.chain_work = *chain_work;
+        s.total_mined_bina = ledger.lock().unwrap().total_mined();
+    }
+
+    let synced = sync_forward_from_peer(
+        &client, best.addr, best.height, state, ledger,
+        height, tip_hash, last_block_timestamp_ms, btc_seed_hash, btc_checkpoint_tip_height, chain_work, adjuster,
+    ).await;
+    println!("[reorg] adopted {} block(s) from {} after rollback, now at height {}", synced, best.addr, *height);
 }
 
 // ─── Mining loop (runs forever) ────────────────────────────────────────────
@@ -766,14 +1442,23 @@ async fn mining_loop(state: SharedState, ledger: SharedLedger, gossip: Arc<Gossi
     // Genesis
     let genesis = genesis_block();
     let genesis_hash = genesis.header.hash();
-    let chain_state = load_or_create_chain_state(CHAIN_STATE_PATH, genesis_hash);
+    let genesis_timestamp_ms = genesis.header.timestamp;
+    let chain_state_path = chain_state_path();
+    let ledger_path = ledger_path();
+    let chain_state = load_or_create_chain_state(&chain_state_path, genesis_hash, genesis_timestamp_ms);
+    let resume = chain_state.resume.clone();
     let persisted_total = {
-        let scoped_ledger = RewardLedger::open_scoped(LEDGER_PATH, chain_state.height)
+        let scoped_ledger = RewardLedger::open_scoped(&ledger_path, chain_state.height)
             .unwrap_or_else(|e| panic!("failed to open scoped reward ledger: {e}"));
         let total = scoped_ledger.total_mined();
         *ledger.lock().unwrap() = scoped_ledger;
         total
     };
+
+    let mut btc_seed_hash = hex_to_32("resume.btc_seed_hash", &resume.btc_seed_hash);
+    let mut chain_work: u128 = u128::from_str_radix(&resume.chain_work_hex, 16).unwrap_or(0);
+    let initial_observed_btc = fetch_btc(None).await;
+
     {
         let mut s = state.write().unwrap();
         s.genesis_hash = chain_state.genesis_hash;
@@ -782,7 +1467,12 @@ async fn mining_loop(state: SharedState, ledger: SharedLedger, gossip: Arc<Gossi
         s.miner_address = miner_hex.clone();
         s.total_mined_bina = persisted_total;
         s.current_reward = block_reward(chain_state.height + 1, persisted_total);
-        s.difficulty_bits = l1_core::difficulty::MIN_BITS;
+        s.difficulty_bits = resume.difficulty_bits;
+        s.btc_seed_hash = btc_seed_hash;
+        s.btc_checkpoint_tip_height = resume.btc_checkpoint_tip_height;
+        s.last_block_timestamp_ms = resume.last_block_timestamp_ms;
+        s.chain_work = chain_work;
+        s.last_observed_btc = initial_observed_btc.clone();
     }
     println!("[genesis]  hash={}…", hex::encode(&genesis_hash[..16]));
     println!(
@@ -790,7 +1480,7 @@ async fn mining_loop(state: SharedState, ledger: SharedLedger, gossip: Arc<Gossi
         if chain_state.created { "initialized" } else { "resumed" },
         chain_state.height,
         hex::encode(&chain_state.tip_hash[..16]),
-        CHAIN_STATE_PATH,
+        chain_state_path,
     );
     println!("[wallet]   mining to: {miner_hex}");
     println!("[ledger]   persistent total mined: {persisted_total} BINA");
@@ -798,60 +1488,101 @@ async fn mining_loop(state: SharedState, ledger: SharedLedger, gossip: Arc<Gossi
         "[supply]   hard cap: {} BINA  |  initial reward: {} BINA  |  halving: every {} blocks",
         HARD_CAP, INITIAL_BLOCK_REWARD, HALVING_INTERVAL
     );
+    println!(
+        "[btc]      checkpoint every {} blocks  |  tolerance ±{} btc blocks",
+        BTC_CHECKPOINT_INTERVAL, BTC_HEIGHT_TOLERANCE
+    );
     println!();
+
+    // Background: keep `state.last_observed_btc` fresh regardless of mining
+    // cadence, so incoming peer checkpoint claims always have a recent
+    // observation to be plausibility-checked against.
+    tokio::spawn(btc_observer_task(state.clone()));
 
     let mut prev_hash = chain_state.tip_hash;
     let mut height: u64 = chain_state.height;
-    let mut btc = fetch_btc(None).await;
-    let mut btc_seed_changed_at = unix_secs();
-    log_btc(&btc);
+    let mut last_block_timestamp_ms = resume.last_block_timestamp_ms;
+    let mut btc_checkpoint_tip_height = resume.btc_checkpoint_tip_height;
 
-    let now_ms = || {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0)
-    };
+    let mut adjuster = DifficultyAdjuster::restore(
+        resume.difficulty_bits,
+        resume.epoch_start_ms,
+        resume.epoch_start_height,
+    );
 
-    let mut adjuster = DifficultyAdjuster::new(l1_core::difficulty::MIN_BITS, now_ms());
+    // One-shot catch-up: if a peer already has a heavier chain than we do
+    // (e.g. we're a fresh node, or we were offline while the network kept
+    // mining), adopt it before we start extending our own tip.
+    catch_up_from_peers(
+        &state,
+        &ledger,
+        &gossip,
+        &mut height,
+        &mut prev_hash,
+        &mut last_block_timestamp_ms,
+        &mut btc_seed_hash,
+        &mut btc_checkpoint_tip_height,
+        &mut chain_work,
+        &mut adjuster,
+    )
+    .await;
+
+    let mut last_reorg_check = Instant::now();
+    const REORG_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 
     loop {
-        height += 1;
-
-        let previous_btc_seed = btc.bitcoin_seed_hash();
-        let fresh = fetch_btc(Some(&btc)).await;
-        let fresh_seed = fresh.bitcoin_seed_hash();
-        if fresh_seed != previous_btc_seed {
-            btc_seed_changed_at = unix_secs();
-            println!(
-                "[btc] new seed at height {}  (was {})",
-                fresh.tip_height, btc.tip_height
-            );
-            log_btc(&fresh);
+        // Throttled: check whether a peer has a heavier chain than ours and,
+        // if the chains have diverged, reconcile onto it. See
+        // `reconcile_fork` for why this only auto-resolves shallow forks.
+        if last_reorg_check.elapsed() >= REORG_CHECK_INTERVAL {
+            last_reorg_check = Instant::now();
+            reconcile_fork(
+                &state,
+                &ledger,
+                &ledger_path,
+                &gossip,
+                &mut height,
+                &mut prev_hash,
+                &mut last_block_timestamp_ms,
+                &mut btc_seed_hash,
+                &mut btc_checkpoint_tip_height,
+                &mut chain_work,
+                &mut adjuster,
+            )
+            .await;
         }
-        btc = fresh;
+
+        height += 1;
+        let is_ckpt = is_checkpoint_height(height);
+
+        // Bitcoin seed: only a live fetch at checkpoint heights. Every other
+        // block reuses the seed pinned by the last accepted checkpoint —
+        // chain data, not a race against independently-polled live APIs.
+        let (btc_seed, checkpoint_proof) = if is_ckpt {
+            let fresh = fetch_btc(Some(&state.read().unwrap().last_observed_btc)).await;
+            {
+                let mut s = state.write().unwrap();
+                s.last_observed_btc = fresh.clone();
+            }
+            log_btc(&fresh);
+            (fresh.bitcoin_seed_hash(), Some(BtcCheckpointProof::from_state(&fresh)))
+        } else {
+            (btc_seed_hash, None)
+        };
 
         let current_bits = adjuster.current_bits();
-        let btc_seed = btc.bitcoin_seed_hash();
-        let btc_height_now = btc.tip_height;
-        let btc_fork_now = btc.fork_detected;
         {
             let mut s = state.write().unwrap();
             s.difficulty_bits = current_bits;
-            s.btc_height = btc_height_now;
-            s.btc_tip = hex::encode(&btc.tip_hash[..8]);
-            s.btc_seed_hash = btc_seed;
-            s.btc_seed_changed_at = btc_seed_changed_at;
-            s.btc_fork = btc_fork_now;
-            s.btc_tip_divergence_height = btc_fork_now.then_some(btc_height_now);
         }
 
         let total_mined = state.read().unwrap().total_mined_bina;
         let reward = block_reward(height, total_mined);
+        let candidate_timestamp = unix_ms().max(last_block_timestamp_ms.saturating_add(1));
 
-        let (ph, ma, bs, cb) = (prev_hash, miner_address, btc_seed, current_bits);
+        let (ph, ma, bs, cb, ts) = (prev_hash, miner_address, btc_seed, current_bits, candidate_timestamp);
         let result =
-            tokio::task::spawn_blocking(move || mine_block(height, ph, ma, bs, cb, threads))
+            tokio::task::spawn_blocking(move || mine_block(height, ph, ma, bs, cb, ts, threads))
                 .await
                 .expect("mine_block panicked");
 
@@ -860,13 +1591,14 @@ async fn mining_loop(state: SharedState, ledger: SharedLedger, gossip: Arc<Gossi
             .verify()
             .expect("locally mined signed claim must verify");
         let local_block_hash = local_claim.block_hash();
+        let local_pending = PendingClaim { claim: local_claim.clone(), btc_checkpoint: checkpoint_proof.clone() };
 
         {
             let mut s = state.write().unwrap();
             let claims = s.pending_claims.entry(height).or_default();
             claims
                 .entry(miner_hex.clone())
-                .or_insert_with(|| local_claim.clone());
+                .or_insert_with(|| local_pending);
         }
 
         gossip
@@ -874,14 +1606,15 @@ async fn mining_loop(state: SharedState, ledger: SharedLedger, gossip: Arc<Gossi
                 gossip.network().to_string(),
                 DEFAULT_P2P_TTL,
                 local_claim,
+                checkpoint_proof,
             ))
             .await;
 
         tokio::time::sleep(Duration::from_millis(SUBMISSION_GRACE_MS)).await;
 
-        let winning_claim = {
+        let winning = {
             let mut s = state.write().unwrap();
-            let candidates: Vec<SignedBlockClaim> = s
+            let candidates: Vec<PendingClaim> = s
                 .pending_claims
                 .remove(&height)
                 .unwrap_or_default()
@@ -889,9 +1622,10 @@ async fn mining_loop(state: SharedState, ledger: SharedLedger, gossip: Arc<Gossi
                 .collect();
             s.pending_claims
                 .retain(|candidate_height, _| *candidate_height > height);
-            select_winning_claim(candidates)
+            select_winning_pending(candidates)
                 .expect("local signed claim missing from candidate pool")
         };
+        let winning_claim = winning.claim;
 
         let block_hash = winning_claim.block_hash();
         let zero_bits = leading_zero_bits(&block_hash);
@@ -912,30 +1646,58 @@ async fn mining_loop(state: SharedState, ledger: SharedLedger, gossip: Arc<Gossi
         };
         let winner_miner_hex = winning_claim.miner_address_hex();
 
-        // Difficulty adjustment (fires every 20 blocks)
-        let adj_info = adjuster.record_block(height, now_ms());
+        // Pin the checkpoint seed from whichever claim won the election —
+        // every node reaches the same value this way, regardless of who won.
+        let mut btc_checkpoint_tip_height_now = state.read().unwrap().btc_checkpoint_tip_height;
+        if is_ckpt {
+            if let Some(proof) = &winning.btc_checkpoint {
+                btc_seed_hash = winning_claim.header.bitcoin_seed_hash;
+                btc_checkpoint_tip_height_now = proof.tip_height;
+            }
+        }
+
+        // Difficulty adjustment (fires every 20 blocks), fed the winning
+        // claim's own consensus timestamp — never wall clock.
+        let adj_info = adjuster.record_block(height, timestamp);
         if let Some(ref info) = adj_info {
             let log = DifficultyAdjuster::adjustment_log(info);
             println!("{log}");
             state.write().unwrap().last_adjustment = Some(log);
         }
 
+        // Work is counted from the *required* difficulty for this height,
+        // not the winning hash's actual leading-zero count — otherwise a
+        // single lucky block would count for far more than its real
+        // expected cost, letting a chain claim disproportionate work.
+        chain_work = chain_work.saturating_add(1u128 << winning_claim.header.difficulty_bits.min(127));
+        last_block_timestamp_ms = timestamp;
+
         // Persist credit to ledger CSV
         let mut ledger = ledger.lock().unwrap();
         ledger
-            .credit(height, &winner_miner_hex, reward, timestamp)
+            .credit(height, &winner_miner_hex, reward, timestamp / 1000)
             .unwrap_or_else(|e| {
                 eprintln!("[ledger] write error: {e}");
                 0
             });
 
-        if let Err(e) = save_chain_state(CHAIN_STATE_PATH, genesis_hash, block_hash, height) {
+        let resume_state = ConsensusResumeState {
+            difficulty_bits: adjuster.current_bits(),
+            epoch_start_ms: adjuster.epoch_start_ms(),
+            epoch_start_height: adjuster.epoch_start_height(),
+            btc_seed_hash: hex::encode(btc_seed_hash),
+            btc_checkpoint_tip_height: btc_checkpoint_tip_height_now,
+            last_block_timestamp_ms,
+            chain_work_hex: format!("{:x}", chain_work),
+        };
+        if let Err(e) = save_chain_state(&chain_state_path, genesis_hash, block_hash, height, resume_state) {
             eprintln!("[chain] state write error: {e}");
         }
 
         let record = BlockRecord {
             height,
             block_hash: hex::encode(block_hash),
+            prev_hash: hex::encode(winning_claim.header.prev_hash),
             nonce: winning_claim.header.nonce,
             timestamp,
             zero_bits,
@@ -953,11 +1715,11 @@ async fn mining_loop(state: SharedState, ledger: SharedLedger, gossip: Arc<Gossi
             randomness_output: rand_out.output_hex(),
             nullifier: rand_out.nullifier_hex(),
             btc_seed: hex::encode(winning_claim.header.bitcoin_seed_hash),
-            btc_height: btc_height_now,
+            btc_height: btc_checkpoint_tip_height_now,
         };
 
         println!(
-            "[h={:<6}]  hash={}…  {:.2} MH/s  {}ms  +{} BINA  diff={}  winner={}…  source={}",
+            "[h={:<6}]  hash={}…  {:.2} MH/s  {}ms  +{} BINA  diff={}  winner={}…  source={}{}",
             height,
             &record.block_hash[..12],
             record.hashrate_mhs,
@@ -966,6 +1728,7 @@ async fn mining_loop(state: SharedState, ledger: SharedLedger, gossip: Arc<Gossi
             current_bits,
             &record.miner_address[..12],
             record.source,
+            if is_ckpt { "  [btc checkpoint pinned]" } else { "" },
         );
 
         {
@@ -980,12 +1743,13 @@ async fn mining_loop(state: SharedState, ledger: SharedLedger, gossip: Arc<Gossi
             s.current_reward = block_reward(height + 1, ledger.total_mined());
             s.difficulty_bits = adjuster.current_bits();
             s.tip_hash = block_hash;
-            s.btc_height = btc_height_now;
-            s.btc_tip = hex::encode(&btc.tip_hash[..8]);
-            s.btc_seed_hash = btc_seed;
-            s.btc_seed_changed_at = btc_seed_changed_at;
-            s.btc_fork = btc_fork_now;
-            s.btc_tip_divergence_height = btc_fork_now.then_some(btc_height_now);
+            s.btc_seed_hash = btc_seed_hash;
+            s.btc_checkpoint_tip_height = btc_checkpoint_tip_height_now;
+            if is_ckpt {
+                s.btc_seed_changed_at = unix_secs();
+            }
+            s.last_block_timestamp_ms = last_block_timestamp_ms;
+            s.chain_work = chain_work;
             if s.blocks.len() >= MAX_STORED {
                 s.blocks.pop_front();
             }
@@ -993,6 +1757,18 @@ async fn mining_loop(state: SharedState, ledger: SharedLedger, gossip: Arc<Gossi
         }
 
         prev_hash = block_hash;
+    }
+}
+
+/// Refreshes `state.last_observed_btc` on a fixed cadence, independent of
+/// mining/checkpoint timing, so plausibility checks on incoming peer
+/// checkpoint claims always have a recent observation to compare against.
+async fn btc_observer_task(state: SharedState) {
+    loop {
+        tokio::time::sleep(BTC_OBSERVE_INTERVAL).await;
+        let previous = state.read().unwrap().last_observed_btc.clone();
+        let fresh = fetch_btc(Some(&previous)).await;
+        state.write().unwrap().last_observed_btc = fresh;
     }
 }
 
@@ -1089,6 +1865,53 @@ fn parse_seed_peers() -> Vec<SocketAddr> {
         })
 }
 
+// ─── Rate limiting ──────────────────────────────────────────────────────────
+
+/// Simple fixed-window per-IP request budget for mutating endpoints
+/// (`/chain/submit`, `/tx/submit`, `/wallet/send`, `/p2p/*`). Claim
+/// verification is itself cheap to reject garbage early (PoW is checked
+/// before the expensive signature check — see `SignedBlockClaim::verify`),
+/// but nothing previously stopped a source from simply flooding requests;
+/// this bounds that regardless of payload validity.
+#[derive(Clone)]
+struct RateLimiter {
+    buckets: Arc<Mutex<HashMap<IpAddr, (Instant, u32)>>>,
+}
+
+impl RateLimiter {
+    fn new() -> Self {
+        Self { buckets: Arc::new(Mutex::new(HashMap::new())) }
+    }
+
+    fn allow(&self, ip: IpAddr) -> bool {
+        let mut buckets = self.buckets.lock().unwrap();
+        let now = Instant::now();
+        if buckets.len() > 50_000 {
+            buckets.retain(|_, (started, _)| now.duration_since(*started) < RATE_LIMIT_WINDOW);
+        }
+        let entry = buckets.entry(ip).or_insert((now, 0));
+        if now.duration_since(entry.0) >= RATE_LIMIT_WINDOW {
+            *entry = (now, 1);
+            return true;
+        }
+        entry.1 += 1;
+        entry.1 <= RATE_LIMIT_MAX_REQUESTS
+    }
+}
+
+async fn rate_limit_middleware(
+    Extension(limiter): Extension<RateLimiter>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    req: Request,
+    next: Next,
+) -> Response {
+    if limiter.allow(addr.ip()) {
+        next.run(req).await
+    } else {
+        (StatusCode::TOO_MANY_REQUESTS, "rate limit exceeded — slow down").into_response()
+    }
+}
+
 // ─── Entry point ───────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -1111,7 +1934,7 @@ async fn main() {
         "  supply     : {} BINA cap  |  {} BINA/block  |  halving every {} blocks",
         HARD_CAP, INITIAL_BLOCK_REWARD, HALVING_INTERVAL
     );
-    println!("  api        : http://127.0.0.1:{}", PORT);
+    println!("  api        : http://127.0.0.1:{}", http_port());
     println!();
     println!("  Endpoints:");
     println!("    GET /                          — node status + economics");
@@ -1141,13 +1964,13 @@ async fn main() {
         total_time_ms: 0,
         started_at: Instant::now(),
         threads,
-        btc_height: 0,
-        btc_tip: String::new(),
+        last_observed_btc: BtcEntropyState::mock(),
         btc_seed_hash: [0u8; 32],
         btc_seed_changed_at: unix_secs(),
-        btc_fork: false,
-        btc_tip_divergence_height: None,
+        btc_checkpoint_tip_height: 0,
         difficulty_bits: l1_core::difficulty::MIN_BITS,
+        last_block_timestamp_ms: 0,
+        chain_work: 0,
         miner_address: String::new(),
         total_mined_bina: 0,
         current_reward: INITIAL_BLOCK_REWARD,
@@ -1155,7 +1978,7 @@ async fn main() {
     }));
 
     let ledger = Arc::new(Mutex::new(
-        RewardLedger::open(LEDGER_PATH).expect("failed to open reward ledger")
+        RewardLedger::open(ledger_path()).expect("failed to open reward ledger")
     ));
     let peers = Arc::new(PeerList::new(MAX_PEERS));
     for seed in parse_seed_peers() {
@@ -1163,35 +1986,51 @@ async fn main() {
     }
     let gossip = Arc::new(Gossip::new(peers, NETWORK_ID));
     let p2p_listen_addr = std::env::var("BINA_P2P_LISTEN_ADDR")
-        .unwrap_or_else(|_| format!("127.0.0.1:{PORT}"));
+        .unwrap_or_else(|_| format!("127.0.0.1:{}", http_port()));
 
     println!("  p2p network: {NETWORK_ID}");
     println!("  p2p listen : {p2p_listen_addr}");
     println!("  p2p seeds  : {} ({})", gossip.peers().count(), DEFAULT_SEED_PEERS.join(", "));
 
-    let app = Router::new()
+    let rate_limiter = RateLimiter::new();
+
+    // Read-only endpoints: no rate limit, no body to bound.
+    let open_routes = Router::<SharedState>::new()
         .route("/", get(handle_status))
         .route("/chain/status", get(handle_status))
         .route("/chain/latest", get(handle_latest_block))
         .route("/chain/blocks", get(handle_blocks_recent))
-        .route("/chain/submit", post(handle_submit_claim))
+        .route("/chain/headers", get(handle_chain_headers))
         .route("/chain/supply", get(handle_supply))
-        .route("/tx/submit", post(handle_submit_transaction))
-        .route("/wallet/send", post(handle_wallet_send))
-        .route("/p2p/message", post(handle_p2p_message))
-        .route("/p2p/hello", post(handle_peer_hello))
-        .route("/p2p/connect", post(handle_peer_connect))
         .route("/p2p/peers", get(handle_get_peers))
         .route("/block/{height}", get(handle_block))
         .route("/randomness/latest", get(handle_randomness_latest))
         .route("/randomness/{height}", get(handle_randomness_at))
         .route("/wallet/{address}/balance", get(handle_wallet_balance))
-        .layer(CorsLayer::permissive())
+        .layer(CorsLayer::permissive());
+
+    // Mutating endpoints: bounded body size + per-IP rate limit. Claim/tx
+    // verification already rejects unworked/invalid payloads cheaply, but
+    // nothing previously stopped raw request or body-size flooding.
+    let mutating_routes = Router::<SharedState>::new()
+        .route("/chain/submit", post(handle_submit_claim))
+        .route("/tx/submit", post(handle_submit_transaction))
+        .route("/wallet/send", post(handle_wallet_send))
+        .route("/p2p/message", post(handle_p2p_message))
+        .route("/p2p/hello", post(handle_peer_hello))
+        .route("/p2p/connect", post(handle_peer_connect))
+        .layer(middleware::from_fn(rate_limit_middleware))
+        .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
+        .layer(Extension(rate_limiter))
+        .layer(CorsLayer::permissive());
+
+    let app = open_routes
+        .merge(mutating_routes)
         .layer(Extension(ledger.clone()))
         .layer(Extension(gossip.clone()))
         .with_state(state.clone());
 
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{PORT}"))
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", http_port()))
         .await
         .expect("bind failed");
 

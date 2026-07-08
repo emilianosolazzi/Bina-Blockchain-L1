@@ -18,6 +18,12 @@ pub struct MineResult {
 /// Mine a new block by searching nonces until `block_hash` satisfies `difficulty_bits`
 /// leading zero bits.
 ///
+/// `timestamp` is the block's consensus timestamp (Unix ms) — the caller must
+/// supply it (typically `max(now_ms(), previous_block_timestamp_ms + 1)`) so
+/// the mined header satisfies the chain's timestamp-monotonicity rule and
+/// difficulty retargeting stays a pure function of chain data rather than
+/// this machine's wall clock.
+///
 /// Uses `threads` OS threads (std::thread) that stripe the nonce space.
 /// An AtomicBool abort flag lets all threads stop as soon as one wins.
 pub fn mine_block(
@@ -26,17 +32,13 @@ pub fn mine_block(
     miner_address:     [u8; 20],
     bitcoin_seed_hash: [u8; 32],
     difficulty_bits:   u32,
+    timestamp:         u64,
     threads:           usize,
 ) -> MineResult {
     let start     = Instant::now();
     let found     = Arc::new(AtomicBool::new(false));
     let winner    = Arc::new(Mutex::new(None::<u64>)); // winning nonce
     let total_hashes = Arc::new(AtomicU64::new(0));
-
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
 
     // Template: every thread clones this and only varies `nonce`.
     let template = L1BlockHeader {

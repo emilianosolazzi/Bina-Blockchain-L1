@@ -1,5 +1,15 @@
 //! Bina Chain dynamic difficulty adjuster
 //!
+//! IMPORTANT — determinism: every timestamp fed into this adjuster (via
+//! `new`/`restore` and `record_block`) MUST be a block's own consensus
+//! timestamp (`L1BlockHeader.timestamp`, Unix ms), never a validator's local
+//! wall clock. The adjuster is a pure fold over chain history: given the same
+//! sequence of (height, timestamp) pairs from genesis, every node — whether
+//! mining live, replaying a synced chain, or resuming after a restart —
+//! reaches the exact same `current_bits` at every height. Feeding it wall
+//! clock time makes the required difficulty node-local and non-replayable,
+//! which breaks cross-node agreement on which claims are valid.
+//!
 //! Parameters
 //! ─────────────────────────────────────────────────────────────────────────
 //!   Target block time  : 40 ms
@@ -59,38 +69,61 @@ pub struct DifficultyAdjuster {
 }
 
 impl DifficultyAdjuster {
-    /// Create a new adjuster starting at `initial_bits` and at `now_ms`.
-    pub fn new(initial_bits: u32, now_ms: u64) -> Self {
+    /// Create a fresh adjuster for a brand-new chain, anchored at the
+    /// genesis block's own consensus timestamp (Unix ms) — NOT wall clock.
+    pub fn new(initial_bits: u32, genesis_timestamp_ms: u64) -> Self {
         let bits = initial_bits.max(MIN_BITS).min(MAX_BITS);
         Self {
             current_bits:       bits,
-            epoch_start_ms:     now_ms,
+            epoch_start_ms:     genesis_timestamp_ms,
             epoch_start_height: 0,
             last_adjustment:    None,
+        }
+    }
+
+    /// Restore an adjuster mid-chain from persisted or replayed state
+    /// (e.g. after a node restart, or after syncing a range of blocks from a
+    /// peer). `epoch_start_ms`/`epoch_start_height` must be the timestamp and
+    /// height of the last epoch boundary this adjuster observed, so the next
+    /// `record_block` call measures the correct epoch duration.
+    pub fn restore(current_bits: u32, epoch_start_ms: u64, epoch_start_height: u64) -> Self {
+        Self {
+            current_bits: current_bits.max(MIN_BITS).min(MAX_BITS),
+            epoch_start_ms,
+            epoch_start_height,
+            last_adjustment: None,
         }
     }
 
     /// Current difficulty in bits.
     pub fn current_bits(&self) -> u32 { self.current_bits }
 
+    /// Consensus timestamp (ms) at the start of the current epoch — persist
+    /// this alongside `current_bits`/`epoch_start_height` to resume exactly.
+    pub fn epoch_start_ms(&self) -> u64 { self.epoch_start_ms }
+
+    /// Height at the start of the current epoch.
+    pub fn epoch_start_height(&self) -> u64 { self.epoch_start_height }
+
     /// Information about the most recent adjustment, if any.
     pub fn last_adjustment(&self) -> Option<&AdjustmentInfo> {
         self.last_adjustment.as_ref()
     }
 
-    /// Call after each block is found.
+    /// Call after each block is accepted onto the chain.
     ///
-    /// `height`  — the height of the block just mined (1-based)
-    /// `now_ms`  — current wall-clock time in Unix milliseconds
+    /// `height`      — the height of the block just accepted (1-based)
+    /// `block_ts_ms` — that block's own consensus timestamp (`header.timestamp`,
+    ///                 Unix ms) — never a validator's wall clock.
     ///
     /// Returns `Some(AdjustmentInfo)` if this block completed an epoch and
     /// the difficulty was (potentially) changed.  Returns `None` otherwise.
-    pub fn record_block(&mut self, height: u64, now_ms: u64) -> Option<AdjustmentInfo> {
+    pub fn record_block(&mut self, height: u64, block_ts_ms: u64) -> Option<AdjustmentInfo> {
         if height == 0 || height % EPOCH_SIZE != 0 {
             return None;
         }
 
-        let actual_ms  = now_ms.saturating_sub(self.epoch_start_ms);
+        let actual_ms  = block_ts_ms.saturating_sub(self.epoch_start_ms);
         let target_ms  = EPOCH_SIZE * TARGET_BLOCK_MS;
         let old_bits   = self.current_bits;
 
@@ -109,7 +142,7 @@ impl DifficultyAdjuster {
             .min(MAX_BITS as i32)) as u32;
 
         self.current_bits       = new_bits;
-        self.epoch_start_ms     = now_ms;
+        self.epoch_start_ms     = block_ts_ms;
         self.epoch_start_height = height;
 
         let info = AdjustmentInfo {
@@ -195,6 +228,22 @@ mod tests {
         // Instant blocks
         let info = adj.record_block(20, 0).unwrap();
         assert_eq!(info.new_bits, MAX_BITS);
+    }
+
+    #[test]
+    fn restore_reproduces_identical_result_to_continuous_run() {
+        // A continuously-running adjuster and one that "restarts" mid-chain
+        // (restored from persisted state) must reach the same difficulty at
+        // the same height when fed the same block timestamps.
+        let mut continuous = DifficultyAdjuster::new(30, 0);
+        continuous.record_block(20, 20 * TARGET_BLOCK_MS / 2).unwrap(); // fast epoch → harder
+
+        let mut restored = DifficultyAdjuster::restore(30, 0, 0);
+        restored.record_block(20, 20 * TARGET_BLOCK_MS / 2).unwrap();
+
+        assert_eq!(continuous.current_bits(), restored.current_bits());
+        assert_eq!(continuous.epoch_start_ms(), restored.epoch_start_ms());
+        assert_eq!(continuous.epoch_start_height(), restored.epoch_start_height());
     }
 
     #[test]

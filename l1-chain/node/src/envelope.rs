@@ -1,4 +1,5 @@
 use anyhow::{bail, Result};
+use l1_core::bitcoin_entropy::BtcCheckpointProof;
 use l1_core::claims::SignedBlockClaim;
 use serde::{Deserialize, Serialize};
 
@@ -25,21 +26,31 @@ pub struct BlockClaimEnvelope {
     pub sent_at_unix: u64,
     pub ttl: u8,
     pub claim: SignedBlockClaim,
+    /// Bitcoin-checkpoint proof — present only when `claim` targets a
+    /// checkpoint height (see `l1_core::bitcoin_entropy::is_checkpoint_height`).
+    #[serde(default)]
+    pub btc_checkpoint: Option<BtcCheckpointProof>,
     pub derived: DerivedFields,
 }
 
 impl BlockClaimEnvelope {
-    pub fn from_claim(network: impl Into<String>, ttl: u8, claim: SignedBlockClaim) -> Self {
+    pub fn from_claim(
+        network: impl Into<String>,
+        ttl: u8,
+        claim: SignedBlockClaim,
+        btc_checkpoint: Option<BtcCheckpointProof>,
+    ) -> Self {
         let network = network.into();
         let sent_at_unix = unix_secs();
         let derived = DerivedFields::from_claim(&claim);
-        let message_id = message_id(&network, sent_at_unix, &claim, &derived);
+        let message_id = message_id(&network, sent_at_unix, &claim, &derived, btc_checkpoint.as_ref());
         Self {
             network,
             message_id,
             sent_at_unix,
             ttl,
             claim,
+            btc_checkpoint,
             derived,
         }
     }
@@ -105,6 +116,7 @@ fn message_id(
     sent_at_unix: u64,
     claim: &SignedBlockClaim,
     derived: &DerivedFields,
+    btc_checkpoint: Option<&BtcCheckpointProof>,
 ) -> String {
     let mut h = blake3::Hasher::new();
     h.update(b"BINA-P2P-MSG-v1");
@@ -114,5 +126,8 @@ fn message_id(
     h.update(derived.claim_digest.as_bytes());
     h.update(derived.election_score.as_bytes());
     h.update(&claim.signature);
+    if let Some(proof) = btc_checkpoint {
+        h.update(&proof.seed_hash());
+    }
     hex::encode(h.finalize().as_bytes())
 }

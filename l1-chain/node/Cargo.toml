@@ -22,6 +22,6 @@ serde              = { version = "1", features = ["derive"] }
 anyhow             = "1"
 serde_json         = "1"
 axum               = "0.8"
-tower-http         = { version = "0.6", features = ["cors"] }
+tower-http         = { version = "0.6", features = ["cors", "limit"] }
 blake3             = "1"
 zeroize            = "1"
