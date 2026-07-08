@@ -67,7 +67,7 @@ contract BinaOracleRequestSimulation {
             falconVerified: true
         });
 
-        oracle.submitOutput(output, purpose, bytes("mock finalized BINA proof bundle"));
+        oracle.submitOutput(output, purpose, bytes("mock finalized BINA proof bundle"), "ipfs://mock-proof-cid");
 
         bytes32 utilityWord = consumer.fulfill(requestId);
         bytes32 expected = keccak256(
