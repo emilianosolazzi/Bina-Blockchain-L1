@@ -14,6 +14,10 @@ use sha3::{Digest, Keccak256};
 pub const TX_DOMAIN_TAG: &[u8] = b"BINA-TX-v1";
 pub const ED25519_PUBLIC_KEY_BYTES: usize = 32;
 pub const ED25519_SIGNATURE_BYTES: usize = 64;
+pub const TX_MERKLE_TAG: &[u8] = b"BINA-TXMERKLE-v1";
+/// Upper bound on transactions a single block may bind, enforced both when a
+/// miner builds a candidate and when any node validates one it received.
+pub const MAX_TXS_PER_BLOCK: usize = 2_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Transaction {
@@ -173,6 +177,29 @@ pub fn ed25519_only_address(public_key: &[u8]) -> Result<WalletAddress> {
     Ok(out)
 }
 
+/// Binary Merkle root over a block's transaction list, in the given order.
+/// `[0u8; 32]` for an empty list, matching `L1BlockHeader.merkle_root`'s
+/// existing "empty block" convention. Order matters — this is not a set
+/// commitment, it commits to the exact sequence a block executes.
+pub fn merkle_root(txs: &[SignedTransaction]) -> [u8; 32] {
+    if txs.is_empty() {
+        return [0u8; 32];
+    }
+    let mut layer: Vec<[u8; 32]> = txs.iter().map(|t| t.tx_id()).collect();
+    while layer.len() > 1 {
+        let mut next = Vec::with_capacity(layer.len().div_ceil(2));
+        for pair in layer.chunks(2) {
+            let mut h = blake3::Hasher::new();
+            h.update(TX_MERKLE_TAG);
+            h.update(&pair[0]);
+            h.update(pair.get(1).unwrap_or(&pair[0])); // duplicate last if odd, standard convention
+            next.push(*h.finalize().as_bytes());
+        }
+        layer = next;
+    }
+    layer[0]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,5 +262,46 @@ mod tests {
         let address = "3054ac8bc5c9b358e270e17183851201d0bc6b69";
         assert_eq!(hex::encode(parse_address_hex(address).unwrap()), address);
         assert_eq!(hex::encode(parse_address_hex(&format!("0x{address}")).unwrap()), address);
+    }
+
+    fn signed_tx(nonce: u64) -> SignedTransaction {
+        let sender = WalletKeypair::generate();
+        let recipient = WalletKeypair::generate();
+        let tx = Transaction::new(sender.address(), recipient.address(), 10, nonce, 1);
+        SignedTransaction::sign(tx, &sender).unwrap()
+    }
+
+    #[test]
+    fn merkle_root_empty_is_zero() {
+        assert_eq!(merkle_root(&[]), [0u8; 32]);
+    }
+
+    #[test]
+    fn merkle_root_deterministic_and_order_sensitive() {
+        let a = signed_tx(0);
+        let b = signed_tx(0);
+        let r1 = merkle_root(&[a.clone(), b.clone()]);
+        let r2 = merkle_root(&[a.clone(), b.clone()]);
+        assert_eq!(r1, r2, "same order must give same root");
+        let r3 = merkle_root(&[b, a]);
+        assert_ne!(r1, r3, "different order must give a different root");
+    }
+
+    #[test]
+    fn merkle_root_odd_count_does_not_panic() {
+        let txs = vec![signed_tx(0), signed_tx(0), signed_tx(0)];
+        let root = merkle_root(&txs);
+        assert_ne!(root, [0u8; 32]);
+    }
+
+    #[test]
+    fn merkle_root_single_tx_equals_its_tx_id() {
+        // Matches the standard single-leaf Merkle convention (e.g. Bitcoin):
+        // the root of a one-transaction list is that transaction's id.
+        // Domain separation from other hashes comes from the outer header
+        // hash (DOMAIN_TAG), not from this field in isolation.
+        let tx = signed_tx(0);
+        let root = merkle_root(std::slice::from_ref(&tx));
+        assert_eq!(root, tx.tx_id());
     }
 }

@@ -24,11 +24,20 @@ pub struct MineResult {
 /// difficulty retargeting stays a pure function of chain data rather than
 /// this machine's wall clock.
 ///
+/// `merkle_root`/`state_root` commit to the transactions this block will
+/// contain and the ledger state after executing them — both are pure
+/// functions of the parent state and the candidate transaction list, so the
+/// caller computes them (see `l1_core::rewards::simulate_block_execution`)
+/// before mining; nonce search never changes what the block actually does.
+///
 /// Uses `threads` OS threads (std::thread) that stripe the nonce space.
 /// An AtomicBool abort flag lets all threads stop as soon as one wins.
+#[allow(clippy::too_many_arguments)]
 pub fn mine_block(
     height:            u64,
     prev_hash:         [u8; 32],
+    merkle_root:       [u8; 32],
+    state_root:        [u8; 32],
     miner_address:     [u8; 20],
     bitcoin_seed_hash: [u8; 32],
     difficulty_bits:   u32,
@@ -45,7 +54,8 @@ pub fn mine_block(
         version:          1,
         height,
         prev_hash,
-        merkle_root:      [0u8; 32],
+        merkle_root,
+        state_root,
         timestamp,
         nonce:            0,
         miner_address,

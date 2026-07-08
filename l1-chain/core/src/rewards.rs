@@ -44,6 +44,34 @@ pub fn block_reward(height: u64, total_mined: u64) -> u64 {
 /// Estimate the era for a given height.
 pub fn era(height: u64) -> u64 { height / HALVING_INTERVAL }
 
+/// Domain tag for the ledger state-root commitment.
+pub const STATE_ROOT_TAG: &[u8] = b"BINA-STATE-v1";
+
+/// Pure commitment over a canonical (address, balance, nonce) view of the
+/// ledger. Entries are sorted by address before hashing so the result is
+/// independent of iteration order — any two nodes with the same logical
+/// state produce the same root.
+pub fn compute_state_root<'a, I>(entries: I) -> [u8; 32]
+where
+    I: IntoIterator<Item = (&'a str, u64, u64)>,
+{
+    let mut sorted: Vec<(&str, u64, u64)> = entries.into_iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(b.0));
+    let mut h = blake3::Hasher::new();
+    h.update(STATE_ROOT_TAG);
+    for (addr, balance, nonce) in sorted {
+        h.update(addr.as_bytes());
+        h.update(&balance.to_le_bytes());
+        h.update(&nonce.to_le_bytes());
+    }
+    *h.finalize().as_bytes()
+}
+
+/// The state root of a ledger with no accounts at all — genesis's value.
+pub fn empty_state_root() -> [u8; 32] {
+    compute_state_root(std::iter::empty())
+}
+
 /// BINA remaining before the hard cap is hit.
 pub fn supply_remaining(total_mined: u64) -> u64 {
     HARD_CAP.saturating_sub(total_mined)
@@ -206,6 +234,36 @@ impl RewardLedger {
         v
     }
 
+    // ── State commitment ────────────────────────────────────────────────────
+
+    /// Deterministic commitment to the full ledger state (every address with
+    /// a nonzero balance and/or a recorded nonce). Any two nodes that agree
+    /// on chain history up to and including a given block must compute the
+    /// same value here — this is what `L1BlockHeader.state_root` commits to.
+    pub fn state_root(&self) -> [u8; 32] {
+        self.state_root_with_overlay(&HashMap::new())
+    }
+
+    /// Same commitment, but with `overlay` entries (address → (balance,
+    /// nonce)) taking precedence over the ledger's own stored values. Used
+    /// to compute the state root a block WOULD produce before actually
+    /// applying it (see `simulate_block_execution`).
+    pub fn state_root_with_overlay(&self, overlay: &HashMap<String, (u64, u64)>) -> [u8; 32] {
+        let mut addrs: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        addrs.extend(self.balances.keys().map(String::as_str));
+        addrs.extend(self.nonces.keys().map(String::as_str));
+        addrs.extend(overlay.keys().map(String::as_str));
+
+        let entries = addrs.into_iter().map(|addr| {
+            let (balance, nonce) = overlay
+                .get(addr)
+                .copied()
+                .unwrap_or_else(|| (self.balance(addr), self.nonce(addr)));
+            (addr, balance, nonce)
+        });
+        compute_state_root(entries)
+    }
+
     // ── Crediting ────────────────────────────────────────────────────────────
 
     /// Credit `reward` BINA to `miner_address` for `height`.
@@ -291,6 +349,75 @@ impl RewardLedger {
 
         Ok(())
     }
+}
+
+/// Deterministically evaluate what a block containing `txs` (in order) plus
+/// a `reward` credit to `miner_address` would do to `ledger`'s state,
+/// WITHOUT mutating it. Invalid transactions (bad signature, wrong nonce,
+/// insufficient balance against the state as of their position in the
+/// list) are silently dropped rather than aborting the block — the same
+/// rule every node applies, so any two nodes evaluating the same candidate
+/// list against the same parent state reach the same `applied` set and the
+/// same state root.
+///
+/// Returns the transactions that actually applied (in order) and the
+/// resulting state root. Callers apply the returned list for real via
+/// `apply_transaction`/`credit` only once a block is actually finalized —
+/// simulating first lets a miner (or a validator checking a peer's claim)
+/// learn the state root before doing any durable/expensive work.
+pub fn simulate_block_execution(
+    ledger: &RewardLedger,
+    txs: &[SignedTransaction],
+    miner_address: &str,
+    reward: u64,
+) -> (Vec<SignedTransaction>, [u8; 32]) {
+    let mut overlay: HashMap<String, (u64, u64)> = HashMap::new();
+    let mut applied = Vec::new();
+
+    let read = |overlay: &HashMap<String, (u64, u64)>, addr: &str| -> (u64, u64) {
+        overlay
+            .get(addr)
+            .copied()
+            .unwrap_or_else(|| (ledger.balance(addr), ledger.nonce(addr)))
+    };
+
+    for tx in txs {
+        if tx.verify().is_err() {
+            continue;
+        }
+        let from = tx.from_hex();
+        let to = tx.to_hex();
+
+        let (from_balance, from_nonce) = read(&overlay, &from);
+        if tx.tx.nonce != from_nonce {
+            continue;
+        }
+        let debit_total = match tx.tx.amount.checked_add(tx.tx.fee) {
+            Some(d) => d,
+            None => continue,
+        };
+        if from_balance < debit_total {
+            continue;
+        }
+
+        overlay.insert(from.clone(), (from_balance - debit_total, from_nonce + 1));
+        let (to_balance, to_nonce) = read(&overlay, &to);
+        overlay.insert(to.clone(), (to_balance.saturating_add(tx.tx.amount), to_nonce));
+        if tx.tx.fee > 0 && !miner_address.is_empty() {
+            let (miner_balance, miner_nonce) = read(&overlay, miner_address);
+            overlay.insert(miner_address.to_string(), (miner_balance.saturating_add(tx.tx.fee), miner_nonce));
+        }
+
+        applied.push(tx.clone());
+    }
+
+    if reward > 0 {
+        let (miner_balance, miner_nonce) = read(&overlay, miner_address);
+        overlay.insert(miner_address.to_string(), (miner_balance.saturating_add(reward), miner_nonce));
+    }
+
+    let state_root = ledger.state_root_with_overlay(&overlay);
+    (applied, state_root)
 }
 
 fn credit_balance(balances: &mut HashMap<String, u64>, address: &str, amount: u64) {
@@ -441,6 +568,95 @@ mod tests {
         let tx = crate::transaction::Transaction::new(sender.address(), recipient.address(), 25, 1, 2);
         let signed = crate::transaction::SignedTransaction::sign(tx, &sender).unwrap();
         assert!(ledger.apply_transaction(2, &signed, "", 1_000_004).is_err());
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn empty_state_root_matches_compute_with_no_entries() {
+        assert_eq!(empty_state_root(), compute_state_root(std::iter::empty()));
+    }
+
+    #[test]
+    fn state_root_is_order_independent() {
+        let a = compute_state_root(vec![("bbbb", 1, 0), ("aaaa", 2, 0)]);
+        let b = compute_state_root(vec![("aaaa", 2, 0), ("bbbb", 1, 0)]);
+        assert_eq!(a, b, "state root must not depend on iteration order");
+    }
+
+    #[test]
+    fn state_root_changes_with_any_balance_or_nonce_change() {
+        let base = compute_state_root(vec![("aaaa", 10, 0)]);
+        let diff_balance = compute_state_root(vec![("aaaa", 11, 0)]);
+        let diff_nonce = compute_state_root(vec![("aaaa", 10, 1)]);
+        assert_ne!(base, diff_balance);
+        assert_ne!(base, diff_nonce);
+    }
+
+    #[test]
+    fn simulate_applies_valid_tx_and_matches_real_apply() {
+        let tmp = std::env::temp_dir().join("bina_test_simulate_ledger.csv");
+        let _ = std::fs::remove_file(&tmp);
+
+        let sender = crate::crypto::WalletKeypair::generate();
+        let recipient = crate::crypto::WalletKeypair::generate();
+        let miner = crate::crypto::WalletKeypair::generate();
+        let mut ledger = RewardLedger::open(&tmp).unwrap();
+        ledger.credit(1, &sender.address_hex(), 100, 1_000_000).unwrap();
+
+        let tx = crate::transaction::Transaction::new(sender.address(), recipient.address(), 25, 0, 2);
+        let signed = crate::transaction::SignedTransaction::sign(tx, &sender).unwrap();
+
+        let (applied, sim_root) = simulate_block_execution(&ledger, &[signed.clone()], &miner.address_hex(), 50);
+        assert_eq!(applied.len(), 1, "valid tx must be included");
+
+        // Apply for real and confirm the resulting ledger's own state root matches the simulated one.
+        ledger.apply_transaction(2, &signed, &miner.address_hex(), 1_000_004).unwrap();
+        ledger.credit(2, &miner.address_hex(), 50, 1_000_004).unwrap();
+        assert_eq!(ledger.state_root(), sim_root, "real execution must match the simulated state root");
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn simulate_drops_transactions_that_would_overdraw() {
+        let tmp = std::env::temp_dir().join("bina_test_simulate_overdraw_ledger.csv");
+        let _ = std::fs::remove_file(&tmp);
+
+        let sender = crate::crypto::WalletKeypair::generate();
+        let recipient = crate::crypto::WalletKeypair::generate();
+        let ledger = RewardLedger::open(&tmp).unwrap(); // sender has 0 balance
+
+        let tx = crate::transaction::Transaction::new(sender.address(), recipient.address(), 25, 0, 2);
+        let signed = crate::transaction::SignedTransaction::sign(tx, &sender).unwrap();
+
+        let (applied, root) = simulate_block_execution(&ledger, &[signed], "", 0);
+        assert!(applied.is_empty(), "overdrawing tx must be dropped, not applied");
+        assert_eq!(root, ledger.state_root(), "dropped-only block must leave state root unchanged");
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn simulate_drops_second_conflicting_nonce_in_same_batch() {
+        let tmp = std::env::temp_dir().join("bina_test_simulate_double_spend_ledger.csv");
+        let _ = std::fs::remove_file(&tmp);
+
+        let sender = crate::crypto::WalletKeypair::generate();
+        let r1 = crate::crypto::WalletKeypair::generate();
+        let r2 = crate::crypto::WalletKeypair::generate();
+        let mut ledger = RewardLedger::open(&tmp).unwrap();
+        ledger.credit(1, &sender.address_hex(), 100, 1_000_000).unwrap();
+
+        // Two transactions both claiming nonce 0 from the same sender, spending
+        // more than the balance can cover twice over.
+        let tx1 = crate::transaction::Transaction::new(sender.address(), r1.address(), 80, 0, 0);
+        let signed1 = crate::transaction::SignedTransaction::sign(tx1, &sender).unwrap();
+        let tx2 = crate::transaction::Transaction::new(sender.address(), r2.address(), 80, 0, 0);
+        let signed2 = crate::transaction::SignedTransaction::sign(tx2, &sender).unwrap();
+
+        let (applied, _root) = simulate_block_execution(&ledger, &[signed1, signed2], "", 0);
+        assert_eq!(applied.len(), 1, "only the first valid nonce-0 tx may apply; the conflicting one must be dropped");
 
         let _ = std::fs::remove_file(&tmp);
     }

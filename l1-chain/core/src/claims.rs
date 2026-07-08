@@ -133,6 +133,7 @@ mod tests {
             height: 1,
             prev_hash: [1u8; 32],
             merkle_root: [0u8; 32],
+            state_root: [3u8; 32],
             timestamp: 1_800_000_000,
             nonce,
             miner_address: kp.address(),

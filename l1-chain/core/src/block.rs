@@ -23,6 +23,13 @@ pub struct L1BlockHeader {
     pub height:           u64,
     pub prev_hash:        [u8; 32],
     pub merkle_root:      [u8; 32],   // hash of tx list; [0;32] for empty block
+    /// Commitment to the full ledger state after executing this block's
+    /// transactions and crediting its reward (`RewardLedger::state_root`).
+    /// Computed by the miner *before* mining (execution is deterministic and
+    /// doesn't depend on the nonce), so any validator can independently
+    /// recompute it against its own copy of the parent state and reject a
+    /// header that claims an execution result it cannot reproduce.
+    pub state_root:       [u8; 32],
     /// Unix milliseconds. This is the *consensus* clock: difficulty retargeting
     /// and Bitcoin-seed checkpoint validation are pure functions of this field,
     /// replayed identically by every node from the chain history. It must never
@@ -52,6 +59,7 @@ impl L1BlockHeader {
         h.update(&self.height.to_le_bytes());
         h.update(&self.prev_hash);
         h.update(&self.merkle_root);
+        h.update(&self.state_root);
         h.update(&self.timestamp.to_le_bytes());
         h.update(&self.nonce.to_le_bytes());
         h.update(&self.miner_address);
@@ -107,6 +115,7 @@ pub fn genesis_block() -> L1Block {
         height:            0,
         prev_hash:         GENESIS_PREV_HASH,
         merkle_root:       [0u8; 32],
+        state_root:        crate::rewards::empty_state_root(),
         timestamp:         1751241600000, // 2025-06-30 00:00:00 UTC, in Unix ms
         nonce:             0,
         miner_address:     GENESIS_MINER_ADDRESS,

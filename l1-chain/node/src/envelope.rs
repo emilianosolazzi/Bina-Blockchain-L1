@@ -1,6 +1,7 @@
 use anyhow::{bail, Result};
 use l1_core::bitcoin_entropy::BtcCheckpointProof;
 use l1_core::claims::SignedBlockClaim;
+use l1_core::transaction::{merkle_root, SignedTransaction};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -30,6 +31,12 @@ pub struct BlockClaimEnvelope {
     /// checkpoint height (see `l1_core::bitcoin_entropy::is_checkpoint_height`).
     #[serde(default)]
     pub btc_checkpoint: Option<BtcCheckpointProof>,
+    /// The exact, ordered transaction list `claim.header.merkle_root`
+    /// commits to. Recipients must recompute the root and reject a
+    /// mismatch — the header alone only proves *a* root was mined, not
+    /// which transactions produced it.
+    #[serde(default)]
+    pub transactions: Vec<SignedTransaction>,
     pub derived: DerivedFields,
 }
 
@@ -39,6 +46,7 @@ impl BlockClaimEnvelope {
         ttl: u8,
         claim: SignedBlockClaim,
         btc_checkpoint: Option<BtcCheckpointProof>,
+        transactions: Vec<SignedTransaction>,
     ) -> Self {
         let network = network.into();
         let sent_at_unix = unix_secs();
@@ -51,6 +59,7 @@ impl BlockClaimEnvelope {
             ttl,
             claim,
             btc_checkpoint,
+            transactions,
             derived,
         }
     }
@@ -60,6 +69,9 @@ impl BlockClaimEnvelope {
         let expected = DerivedFields::from_claim(&self.claim);
         if self.derived != expected {
             bail!("block claim derived fields do not match claim");
+        }
+        if merkle_root(&self.transactions) != self.claim.header.merkle_root {
+            bail!("block claim transaction list does not match its merkle_root");
         }
         Ok(())
     }
