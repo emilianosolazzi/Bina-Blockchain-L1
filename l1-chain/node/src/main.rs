@@ -1817,7 +1817,12 @@ async fn mining_loop(state: SharedState, ledger: SharedLedger, gossip: Arc<Gossi
         // block reuses the seed pinned by the last accepted checkpoint —
         // chain data, not a race against independently-polled live APIs.
         let (btc_seed, checkpoint_proof) = if is_ckpt {
-            let mut fresh = fetch_btc(Some(&state.read().unwrap().last_observed_btc)).await;
+            // Clone the last observation BEFORE awaiting: holding the state
+            // read guard across `fetch_btc().await` lets the btc-observer's
+            // queued write() block every HTTP handler's read() — and can
+            // deadlock the whole runtime if all workers pile up on the lock.
+            let last_observed = state.read().unwrap().last_observed_btc.clone();
+            let mut fresh = fetch_btc(Some(&last_observed)).await;
             // A checkpoint pins this observation into consensus. Once the
             // chain has a real checkpoint, never pin a mock/failed one
             // (tip_height == 0) over it — a Bitcoin API outage must stall
@@ -1826,7 +1831,8 @@ async fn mining_loop(state: SharedState, ledger: SharedLedger, gossip: Arc<Gossi
             while fresh.tip_height == 0 && btc_checkpoint_tip_height > 0 {
                 eprintln!("[btc]      checkpoint h={height} blocked: no live Bitcoin observation yet, retrying in 5s…");
                 tokio::time::sleep(Duration::from_secs(5)).await;
-                fresh = fetch_btc(Some(&state.read().unwrap().last_observed_btc)).await;
+                let last_observed = state.read().unwrap().last_observed_btc.clone();
+                fresh = fetch_btc(Some(&last_observed)).await;
             }
             {
                 let mut s = state.write().unwrap();
