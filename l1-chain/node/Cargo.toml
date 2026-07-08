@@ -25,3 +25,4 @@ axum               = "0.8"
 tower-http         = { version = "0.6", features = ["cors", "limit"] }
 blake3             = "1"
 zeroize            = "1"
+rand               = "0.8"
