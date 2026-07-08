@@ -590,6 +590,10 @@
     let latestMinerPublicKey = '';
     let latestMinerSignature = '';
     let walletAddress = '';
+    // Tracks the most recently submitted-but-not-yet-confirmed transaction
+    // so the status line can update itself once it's actually mined,
+    // instead of freezing on "queued" forever.
+    let pendingTx = null;
 
     const fmt = (value) => Number(value || 0).toLocaleString();
     const fmtSeconds = (value) => `${fmt(value)}s`;
@@ -603,6 +607,11 @@
       const bytes = Math.floor(hex.replace(/^0x/, '').length / 2);
       return `${label}: ${short(hex, 16, 12)} (${fmt(bytes)} bytes hidden)`;
     };
+    // A mined block's embedded transactions serialize `from`/`to` as raw
+    // byte arrays (e.g. [48,84,...]), not hex strings like the rest of the
+    // API — this converts one to the other for comparison against
+    // hex-string addresses (walletAddress, a submitted tx's `from`, etc).
+    const bytesToHex = (arr) => Array.isArray(arr) ? arr.map(b => b.toString(16).padStart(2, '0')).join('') : '';
     const prettyUptime = (secs) => {
       secs = Number(secs || 0);
       const h = Math.floor(secs / 3600);
@@ -737,6 +746,29 @@
       `).join('') || '<tr><td colspan="9">No blocks yet</td></tr>';
     }
 
+    // Looks for `pendingTx` inside the recent-blocks list and, once it
+    // finds the block that actually included it, replaces the frozen
+    // "queued" status line with the real mined outcome. Matches by
+    // (from, nonce) rather than tx_id — computing BINA's tx_id needs a
+    // BLAKE3 hash, which this plain-JS dashboard doesn't have, but a
+    // sender's nonce only appears once per confirmed transaction.
+    function checkPendingTransaction(blocks) {
+      if (!pendingTx || pendingTx.confirmed) return;
+      const rows = Array.isArray(blocks) ? blocks : [];
+      for (const block of rows) {
+        const txs = Array.isArray(block.transactions) ? block.transactions : [];
+        const match = txs.find(entry =>
+          bytesToHex(entry?.tx?.from) === pendingTx.from && Number(entry?.tx?.nonce) === pendingTx.nonce
+        );
+        if (match) {
+          pendingTx.confirmed = true;
+          els.txStatus.textContent =
+            `Tx mined in block ${fmt(block.height)} | Amount: ${fmt(match.tx.amount)} BINA | Fee: ${fmt(match.tx.fee)} BINA | Status: confirmed`;
+          return;
+        }
+      }
+    }
+
     async function refresh() {
       try {
         const [status, supply, latest, blocks, randomLatest, peers] = await Promise.all([
@@ -755,6 +787,7 @@
         renderLatest(status, supply, latest, randomLatest, balance);
         renderPeers(peers);
         renderBlocks(blocks);
+        checkPendingTransaction(blocks);
         els.lastUpdate.textContent = new Date().toLocaleTimeString();
       } catch (err) {
         appShell.classList.add('offline');
@@ -810,7 +843,10 @@
         const result = await postJson('/wallet/send', { to, amount, fee });
         // Submission only queues the transaction into the mempool now — it
         // has no effect on any balance until a miner includes it in a
-        // block, so there is no post-submit balance to show here anymore.
+        // block. Track it so the next few refresh() cycles can notice once
+        // it's actually mined and replace this message with the real
+        // outcome instead of leaving it frozen on "queued" forever.
+        pendingTx = { from: result.from, nonce: Number(result.nonce), confirmed: false };
         els.txStatus.textContent = `Queued tx ${short(result.tx_id, 18, 12)} | nonce ${result.nonce} | pending until mined`;
         els.txAmount.value = '';
         await refresh();
