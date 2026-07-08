@@ -547,4 +547,4 @@ These tests verify:
 
 ## License
 
-**TGBT (The Great Bina Transfer)** — Proprietary until further notice.
+**TGB (Temporal Gradient Beacon)** — Proprietary until further notice.
