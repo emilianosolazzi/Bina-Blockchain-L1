@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>BINA L1 Miner Dashboard</title>
+  <title>BINA L1 Alpha Node Dashboard</title>
   <style>
     :root {
       --bg: #07111f;
@@ -340,8 +340,8 @@
     <section class="hero">
       <div class="hero-top">
         <div>
-          <h1>BINA L1 Miner <span>$BINA</span></h1>
-          <p class="sub">Local proof-of-work chain dashboard for wallet balance, block rewards, signed claims, BLAKE3 randomness, Bitcoin entropy anchors, difficulty, and P2P status.</p>
+          <h1>BINA L1 Alpha Node <span>$BINA</span></h1>
+          <p class="sub">Local BINA L1 proof-of-work node dashboard for wallet balance, mined rewards, signed block claims, BLAKE3 randomness outputs, Bitcoin entropy checkpoints, canonical chain state, transactions, difficulty, and P2P status.</p>
         </div>
         <div class="actions">
           <button class="btn primary" id="refreshBtn">Refresh</button>
@@ -413,7 +413,7 @@
             <h2>Latest Randomness</h2>
             <p class="note">BINA output and nullifier derived from block hash plus Bitcoin entropy seed.</p>
           </div>
-          <div class="badge ok"><span class="dot"></span><span id="randomVerified">Verified</span></div>
+          <div class="badge ok"><span class="dot"></span><span id="randomVerified">Node verified</span></div>
         </div>
         <div class="two-col">
           <div>
@@ -436,17 +436,19 @@
         <div class="section-head">
           <div>
             <h2>Bitcoin Entropy Anchor</h2>
-            <p class="note">The node folds Bitcoin tip entropy into each mined output.</p>
+            <p class="note">BINA uses checkpointed Bitcoin entropy as an external provenance anchor. The current checkpoint seed is folded into mined randomness outputs and reused across the checkpoint epoch, instead of every node racing live Bitcoin APIs on every block.</p>
           </div>
           <div class="badge" id="btcForkBadge" title="Bitcoin entropy sources disagreed on the BTC tip; this is not a BINA chain fork."><span class="dot"></span><span>BTC tips aligned</span></div>
         </div>
         <div class="kv">
-          <span>BTC height</span><strong id="btcHeight">0</strong>
-          <span>BTC tip prefix</span><strong class="mono" id="btcTip">Waiting...</strong>
+          <span>Checkpoint BTC height (pinned)</span><strong id="btcCheckpointHeight">0</strong>
+          <span>Checkpoint interval</span><strong><span id="btcCheckpointInterval">0</span> blocks</strong>
+          <span>Checkpoint age</span><strong id="btcSeedAge">0s</strong>
+          <span>Live observed BTC height</span><strong id="btcHeight">0</strong>
+          <span>Live BTC tip prefix</span><strong class="mono" id="btcTip">Waiting...</strong>
           <span>Latest block BTC height</span><strong id="latestBtcHeight">0</strong>
           <span>Seed freshness</span><strong id="btcFreshness">Waiting...</strong>
-          <span>Seed age</span><strong id="btcSeedAge">0s</strong>
-          <span>BTC seed</span><div class="hash compact" id="btcSeed">Waiting...</div>
+          <span>BTC seed (pinned)</span><div class="hash compact" id="btcSeed">Waiting...</div>
         </div>
       </article>
 
@@ -454,7 +456,7 @@
         <div class="section-head">
           <div>
             <h2>Latest Mined Block</h2>
-            <p class="note">PoW result, signed miner claim, deterministic election score, and reward.</p>
+            <p class="note">PoW result, signed miner claim, bound transactions, deterministic election score, and reward.</p>
           </div>
           <div class="badge ok"><span class="dot"></span><span id="blockReward">+0 BINA</span></div>
         </div>
@@ -465,10 +467,14 @@
           <div class="mini"><div class="label">Source</div><div class="value" id="source">-</div></div>
           <div class="mini"><div class="label">Avg 20</div><div class="value"><span id="blockAvgMs">0</span> ms</div></div>
           <div class="mini"><div class="label">Std dev</div><div class="value"><span id="blockStdMs">0</span> ms <span class="small" id="blockVarianceNote"></span></div></div>
+          <div class="mini"><div class="label">Tx count</div><div class="value" id="txCount">0</div></div>
+          <div class="mini"><div class="label">Chain work</div><div class="value mono" id="blockChainWork">0</div></div>
         </div>
         <div class="two-col" style="margin-top: 14px;">
           <div><h3>Block Hash</h3><div class="hash" id="blockHash">Waiting...</div></div>
           <div><h3>Miner Address</h3><div class="hash" id="latestMiner">Waiting...</div></div>
+          <div><h3>Merkle Root</h3><div class="hash" id="merkleRoot">Waiting...</div></div>
+          <div><h3>State Root</h3><div class="hash" id="stateRoot">Waiting...</div></div>
           <div><h3>Claim Digest</h3><div class="hash" id="claimDigest">Waiting...</div></div>
           <div><h3>Election Score</h3><div class="hash" id="electionScore">Waiting...</div></div>
           <div><h3>Miner Public Key</h3><div class="hash sensitive" id="minerPublicKey">Waiting...</div></div>
@@ -503,14 +509,17 @@
         <div class="section-head">
           <div>
             <h2>Consensus Identity</h2>
-            <p class="note">Genesis is fixed for the BINA L1 network; the persisted tip advances as blocks are accepted.</p>
+            <p class="note">Genesis is fixed for the BINA L1 network; the persisted tip advances as blocks are accepted and the heaviest valid chain wins.</p>
           </div>
           <div class="badge ok"><span class="dot"></span><span>Genesis fixed</span></div>
         </div>
         <div class="kv">
           <span>Genesis hash</span><div class="hash compact" id="genesisHash">Waiting...</div>
           <span>Current tip</span><div class="hash compact" id="tipHash">Waiting...</div>
-          <span>State file</span><strong class="mono">data/chain-state.json</strong>
+          <span>Chain work</span><strong class="mono" id="chainWork">0</strong>
+          <span>Mempool size</span><strong id="mempoolSize">0</strong>
+          <span>Block store</span><strong class="mono" id="blockStoreBackend">sqlite-persistent</strong>
+          <span>Reorg depth limit</span><strong id="reorgDepthLimit">0</strong> <span class="small">blocks (1 difficulty epoch)</span>
           <span>Network</span><strong class="mono">bina-l1</strong>
         </div>
       </article>
@@ -519,12 +528,12 @@
         <div class="section-head">
           <div>
             <h2>Transactions</h2>
-            <p class="note">Wallet transaction signing and direct node submission are implemented; mempool display and transaction history are the next ledger UI layer.</p>
+            <p class="note">Wallet transaction signing and node submission are implemented. Submitted transactions enter the local mempool and become canonical only after inclusion in a mined block; validators recompute the block's merkle_root and state_root before accepting it.</p>
           </div>
           <div class="badge ok"><span class="dot"></span><span>Submit ready</span></div>
         </div>
         <div class="kv">
-          <span>Digest domain</span><strong class="mono">BINA-TX-v1</strong>
+          <span>Digest domain</span><strong class="mono" title="Not yet bound to genesis/chain id — a signed transaction is theoretically replayable on another chain sharing this domain tag. Known limitation, not yet hardened.">BINA-TX-v1</strong>
           <span>Replay protection</span><strong>sender nonce</strong>
           <span>Local signer</span><strong>node wallet only</strong>
           <span>Submit endpoint</span><strong class="mono">POST /tx/submit</strong>
@@ -542,7 +551,7 @@
         <div class="section-head">
           <div>
             <h2>Recent Blocks</h2>
-            <p class="note">The local node keeps the latest 20 block records available to the dashboard.</p>
+            <p class="note">The dashboard displays the latest 20 blocks from the local node's persistent (SQLite) block store.</p>
           </div>
           <div class="tools"><button class="btn" id="copyBlockBtn">Copy Block Hash</button><button class="btn" id="copyClaimBtn">Copy Claim Digest</button><button class="btn" id="copyMinerPublicKeyBtn">Copy Miner Key</button><button class="btn" id="copyMinerSignatureBtn">Copy Signature</button></div>
         </div>
@@ -553,6 +562,7 @@
               <th>Reward</th>
               <th>Diff</th>
               <th>Zero</th>
+              <th>Txs</th>
               <th>Time</th>
               <th>Source</th>
               <th>Hash</th>
@@ -560,13 +570,13 @@
             </tr>
           </thead>
           <tbody id="blocksBody">
-            <tr><td colspan="8">Waiting for blocks...</td></tr>
+            <tr><td colspan="9">Waiting for blocks...</td></tr>
           </tbody>
         </table>
       </article>
     </section>
 
-    <p class="footer">BINA L1 local dashboard. Start the node with <span class="mono">.\node-start.ps1 start</span> or run <span class="mono">cargo run -p l1-node --bin l1-node</span>.</p>
+    <p class="footer">BINA L1 local alpha node dashboard. Start the node with <span class="mono">.\node-start.ps1 start</span> or run <span class="mono">cargo run -p l1-node --bin l1-node</span>.</p>
   </main>
 
   <script>
@@ -642,6 +652,10 @@
       els.difficulty.textContent = status.difficulty_bits ?? supply.difficulty_bits ?? 0;
       els.genesisHash.textContent = status.genesis_hash || 'Waiting...';
       els.tipHash.textContent = status.tip_hash || 'Waiting...';
+      els.chainWork.textContent = status.chain_work || '0';
+      els.mempoolSize.textContent = fmt(status.mempool_size);
+      els.blockStoreBackend.textContent = status.block_store || 'sqlite-persistent';
+      els.reorgDepthLimit.textContent = fmt(status.reorg_depth_limit);
 
       els.totalMined.textContent = fmt(supply.total_mined_bina);
       els.remaining.textContent = fmt(supply.supply_remaining);
@@ -660,10 +674,12 @@
       els.nullifiersSpent.textContent = fmt(status.nullifiers_spent);
       els.randomHeight.textContent = fmt(randomLatest.height || latest.height || status.height);
       els.randomBlock.textContent = randomLatest.block_hash || latestBlockHash || 'Waiting...';
-      els.randomVerified.textContent = randomLatest.verified === false ? 'Unverified' : 'Verified';
+      els.randomVerified.textContent = randomLatest.verified === false ? 'Unverified' : 'Node verified';
 
       els.btcHeight.textContent = fmt(status.btc_height);
       els.btcTip.textContent = status.btc_tip || 'Waiting...';
+      els.btcCheckpointHeight.textContent = fmt(status.btc_checkpoint_tip_height);
+      els.btcCheckpointInterval.textContent = fmt(status.btc_checkpoint_interval);
       els.latestBtcHeight.textContent = fmt(latest.btc_height || randomLatest.btc_height);
       els.btcSeedAge.textContent = fmtSeconds(status.btc_seed_age_secs);
       els.btcFreshness.textContent = Number(status.btc_seed_age_secs || 0) <= 1200 ? 'Fresh' : 'Stale';
@@ -687,6 +703,10 @@
       els.source.textContent = latest.source || '-';
       els.blockHash.textContent = latestBlockHash || 'Waiting...';
       els.latestMiner.textContent = latest.miner_address || walletAddress || 'Waiting...';
+      els.merkleRoot.textContent = latest.merkle_root || 'Waiting...';
+      els.stateRoot.textContent = latest.state_root || 'Waiting...';
+      els.txCount.textContent = fmt((latest.transactions || []).length);
+      els.blockChainWork.textContent = latest.chain_work_hex || '0';
       els.claimDigest.textContent = latest.claim_digest || 'Waiting...';
       els.electionScore.textContent = latest.election_score || 'Waiting...';
       els.minerPublicKey.textContent = fingerprint(latestMinerPublicKey, 'fingerprint');
@@ -708,12 +728,13 @@
           <td class="mono">+${fmt(block.reward_bina)}</td>
           <td>${block.difficulty_bits}</td>
           <td>${block.zero_bits}</td>
+          <td>${fmt((block.transactions || []).length)}</td>
           <td>${fmt(block.elapsed_ms)} ms</td>
           <td>${block.source || '-'}</td>
           <td class="mono">${short(block.block_hash)}</td>
           <td class="mono">${short(block.randomness_output)}</td>
         </tr>
-      `).join('') || '<tr><td colspan="8">No blocks yet</td></tr>';
+      `).join('') || '<tr><td colspan="9">No blocks yet</td></tr>';
     }
 
     async function refresh() {
@@ -787,7 +808,10 @@
       els.txStatus.textContent = 'Signing locally and submitting...';
       try {
         const result = await postJson('/wallet/send', { to, amount, fee });
-        els.txStatus.textContent = `Accepted tx ${short(result.tx_id, 18, 12)} | nonce ${result.nonce} | balance ${fmt(result.from_balance_bina)} BINA`;
+        // Submission only queues the transaction into the mempool now — it
+        // has no effect on any balance until a miner includes it in a
+        // block, so there is no post-submit balance to show here anymore.
+        els.txStatus.textContent = `Queued tx ${short(result.tx_id, 18, 12)} | nonce ${result.nonce} | pending until mined`;
         els.txAmount.value = '';
         await refresh();
       } catch (err) {
