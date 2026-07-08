@@ -199,7 +199,7 @@ struct NodeState {
 type SharedState = Arc<RwLock<NodeState>>;
 type SharedLedger = Arc<Mutex<RewardLedger>>;
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct AcceptedClaim {
     height: u64,
     miner_hex: String,
@@ -208,6 +208,7 @@ struct AcceptedClaim {
     work_bits: u32,
 }
 
+#[derive(Debug)]
 struct ClaimReject {
     status: StatusCode,
     message: String,
@@ -362,6 +363,10 @@ async fn handle_status(
         "tip_hash":           hex::encode(s.tip_hash),
         "chain_work":         format!("{:x}", s.chain_work),
         "last_difficulty_adjustment": s.last_adjustment,
+        "mempool_size":       s.mempool.len(),
+        "reorg_depth_limit":  MAX_AUTO_REORG_DEPTH,
+        "difficulty_epoch_size": l1_core::difficulty::EPOCH_SIZE,
+        "block_store":        "sqlite-persistent",
     }))
 }
 
@@ -494,6 +499,16 @@ async fn handle_submit_claim(
 /// exact parent state that block executes against (see
 /// `l1_core::rewards::simulate_block_execution`). This gate exists purely
 /// to reject obviously-bad submissions before they occupy mempool space.
+///
+/// KNOWN ALPHA LIMITATION: the mempool is entirely local — there is no
+/// gossip propagating a submitted transaction to other nodes, no
+/// deduplication/TTL/fee-ordering policy beyond FIFO-ish insertion order,
+/// and no eviction beyond the blunt `MAX_MEMPOOL_SIZE` cap. A transaction
+/// only ever gets mined if it reaches an active miner directly (e.g. via
+/// that miner's own `/tx/submit`). The next real feature here is mempool
+/// gossip (propagate + dedupe by tx_id + a TTL so stale entries don't pin
+/// memory forever), then fee-based selection when building a candidate
+/// block instead of the current "whatever's in the map" order.
 fn enqueue_transaction(state: &SharedState, ledger: &SharedLedger, signed: SignedTransaction) -> Result<(), String> {
     signed.verify().map_err(|e| format!("transaction rejected: {e}"))?;
 
@@ -1053,6 +1068,7 @@ fn load_or_create_chain_state(path: &str, genesis_hash: [u8; 32], genesis_timest
 // ─── Chain sync (one-shot catch-up before mining starts) ──────────────────
 
 /// A peer's self-reported chain status, used to pick a sync source.
+#[derive(Debug, Clone)]
 struct PeerStatus {
     addr: SocketAddr,
     height: u64,
@@ -1299,6 +1315,14 @@ async fn best_peer_by_work(client: &reqwest::Client, gossip: &Gossip, local_gene
             statuses.push(status);
         }
     }
+    select_best_peer(statuses, local_genesis, local_work)
+}
+
+/// Pure fork-choice rule: the heaviest reported chain on our own genesis
+/// that is strictly heavier than what we already have. Split out from
+/// `best_peer_by_work` so the rule itself — not the network call — is
+/// directly unit-testable.
+fn select_best_peer(statuses: Vec<PeerStatus>, local_genesis: [u8; 32], local_work: u128) -> Option<PeerStatus> {
     statuses
         .into_iter()
         .filter(|p| p.genesis_hash == local_genesis && p.chain_work > local_work)
@@ -1353,7 +1377,28 @@ async fn catch_up_from_peers(
 /// that keeps the difficulty-adjuster rebuild trivially correct without a
 /// full from-genesis replay. Deeper divergences are logged, not silently
 /// resolved automatically: an operator should look at those.
+///
+/// KNOWN ALPHA LIMITATION: this bound is a deliberate scope cut, not a
+/// hard protocol ceiling. A public network needs one of two things this
+/// codebase does not have yet: (a) a difficulty-adjuster rebuild that can
+/// safely replay across arbitrary epoch boundaries (removing the need for
+/// this bound at all), or (b) explicit finality/checkpoint rules (e.g. "N
+/// blocks buried = irreversible") so deep reorgs are rejected by protocol
+/// rather than merely un-handled by this node's reconciler. Until one of
+/// those lands, a deliberate or accidental fork deeper than
+/// `MAX_AUTO_REORG_DEPTH` requires operator intervention to resolve.
 const MAX_AUTO_REORG_DEPTH: u64 = l1_core::difficulty::EPOCH_SIZE - 1;
+
+/// Re-admit every transaction bound into a rolled-back block so a reorg
+/// never silently drops a transaction the network had accepted — it simply
+/// becomes eligible for inclusion again, exactly like a fresh submission.
+fn requeue_rolled_back_transactions(mempool: &mut HashMap<[u8; 32], SignedTransaction>, rolled_back: &[BlockRecord]) {
+    for block in rolled_back {
+        for tx in &block.transactions {
+            mempool.insert(tx.tx_id(), tx.clone());
+        }
+    }
+}
 
 /// Continuously-running reorg reconciliation: if a peer's chain has more
 /// cumulative work than ours *and* the two chains have actually diverged
@@ -1526,11 +1571,7 @@ async fn reconcile_fork(
         s.total_mined_bina = ledger.lock().unwrap().total_mined();
         // Rolled-back transactions are no longer confirmed — make them
         // eligible for inclusion again rather than losing them outright.
-        for b in &rolled_back {
-            for tx in &b.transactions {
-                s.mempool.insert(tx.tx_id(), tx.clone());
-            }
-        }
+        requeue_rolled_back_transactions(&mut s.mempool, &rolled_back);
     }
 
     let synced = sync_forward_from_peer(
@@ -2070,6 +2111,478 @@ async fn rate_limit_middleware(
         next.run(req).await
     } else {
         (StatusCode::TOO_MANY_REQUESTS, "rate limit exceeded — slow down").into_response()
+    }
+}
+
+// ─── Adversarial / failure-path tests ──────────────────────────────────────
+//
+// These exercise the actual consensus-acceptance functions in-process
+// (no HTTP, no real PoW — difficulty_bits=0 so `meets_difficulty` is
+// trivially satisfied) against inputs a malicious or buggy peer might send,
+// confirming each is rejected for the right reason rather than merely
+// "not crashing". Complements the live multi-node validation, which proves
+// the happy path converges; these prove the failure paths hold the line.
+#[cfg(test)]
+mod adversarial_tests {
+    use super::*;
+    use l1_core::crypto::WalletKeypair;
+
+    fn test_env(tag: &str) -> (SharedState, SharedLedger, WalletKeypair, [u8; 32]) {
+        let genesis_hash = [7u8; 32];
+        let miner = WalletKeypair::generate();
+        let state: SharedState = Arc::new(RwLock::new(NodeState {
+            genesis_hash,
+            tip_hash: genesis_hash,
+            chain_height: 1, // next claim targets height 2 (non-checkpoint) unless a test overrides this
+            pending_claims: HashMap::new(),
+            mempool: HashMap::new(),
+            nullifiers: NullifierSet::new(),
+            total_hashes: 0,
+            total_time_ms: 0,
+            started_at: Instant::now(),
+            threads: 1,
+            last_observed_btc: BtcEntropyState::mock(),
+            btc_seed_hash: [9u8; 32],
+            btc_seed_changed_at: 0,
+            btc_checkpoint_tip_height: 900_000,
+            difficulty_bits: 0,
+            last_block_timestamp_ms: 1_000_000,
+            chain_work: 0,
+            miner_address: miner.address_hex(),
+            total_mined_bina: 0,
+            current_reward: 50,
+            last_adjustment: None,
+        }));
+        let csv_path = std::env::temp_dir().join(format!("bina_adversarial_test_{tag}.csv"));
+        let _ = std::fs::remove_file(&csv_path);
+        let ledger: SharedLedger = Arc::new(Mutex::new(RewardLedger::open(&csv_path).expect("open test ledger")));
+        (state, ledger, miner, genesis_hash)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn claim_at(
+        miner: &WalletKeypair,
+        height: u64,
+        prev_hash: [u8; 32],
+        merkle_root: [u8; 32],
+        state_root: [u8; 32],
+        bitcoin_seed_hash: [u8; 32],
+        timestamp: u64,
+    ) -> SignedBlockClaim {
+        let header = L1BlockHeader {
+            version: 1,
+            height,
+            prev_hash,
+            merkle_root,
+            state_root,
+            timestamp,
+            nonce: 0, // difficulty_bits=0 in these tests, so any nonce satisfies PoW
+            miner_address: miner.address(),
+            difficulty_bits: 0,
+            bitcoin_seed_hash,
+        };
+        SignedBlockClaim::sign(header, miner)
+    }
+
+    fn signed_transfer(from: &WalletKeypair, to: &WalletKeypair, amount: u64, nonce: u64, fee: u64) -> SignedTransaction {
+        let tx = Transaction::new(from.address(), to.address(), amount, nonce, fee);
+        SignedTransaction::sign(tx, from).unwrap()
+    }
+
+    fn dummy_block_record(height: u64, txs: Vec<SignedTransaction>) -> BlockRecord {
+        BlockRecord {
+            height,
+            block_hash: format!("h{height}"),
+            prev_hash: format!("h{}", height.saturating_sub(1)),
+            nonce: 0,
+            timestamp: 1_000_000 + height,
+            zero_bits: 0,
+            difficulty_bits: 0,
+            hashes_tried: 0,
+            elapsed_ms: 0,
+            hashrate_mhs: 0.0,
+            miner_address: "aa".to_string(),
+            miner_public_key: "bb".to_string(),
+            miner_signature: "cc".to_string(),
+            claim_digest: "dd".to_string(),
+            election_score: "ee".to_string(),
+            source: "local".to_string(),
+            reward_bina: 50,
+            randomness_output: "ff".to_string(),
+            nullifier: "00".to_string(),
+            btc_seed: "11".repeat(32),
+            btc_height: 900_000,
+            merkle_root: hex::encode(l1_core::transaction::merkle_root(&txs)),
+            state_root: "22".repeat(32),
+            chain_work_hex: "0".to_string(),
+            transactions: txs,
+        }
+    }
+
+    // ── merkle_root / state_root integrity ──────────────────────────────
+
+    #[test]
+    fn claim_with_wrong_merkle_root_is_rejected() {
+        let (state, ledger, miner, genesis) = test_env("bad_merkle");
+        let recipient = WalletKeypair::generate();
+        let tx = signed_transfer(&miner, &recipient, 5, 0, 1);
+
+        let wrong_merkle = [0xAAu8; 32]; // does not match merkle_root(&[tx])
+        let claim = claim_at(&miner, 2, genesis, wrong_merkle, l1_core::rewards::empty_state_root(), [9u8; 32], 1_000_001);
+
+        let err = accept_signed_claim(&state, &ledger, claim, None, vec![tx]).unwrap_err();
+        assert!(err.message.contains("merkle_root"), "unexpected message: {}", err.message);
+    }
+
+    #[test]
+    fn claim_with_wrong_state_root_is_rejected() {
+        let (state, ledger, miner, genesis) = test_env("bad_state_root");
+        // Empty transaction list: merkle_root([]) == [0;32], so that check
+        // passes cleanly and isolates the state_root check.
+        let wrong_state_root = [0x55u8; 32];
+        let claim = claim_at(&miner, 2, genesis, [0u8; 32], wrong_state_root, [9u8; 32], 1_000_001);
+
+        let err = accept_signed_claim(&state, &ledger, claim, None, vec![]).unwrap_err();
+        assert!(err.message.contains("state_root"), "unexpected message: {}", err.message);
+    }
+
+    #[test]
+    fn claim_with_correct_roots_is_accepted() {
+        // Sanity check that the two rejection tests above are actually
+        // exercising the right thing and not just always failing.
+        let (state, ledger, miner, genesis) = test_env("good_roots");
+        let reward = {
+            let s = state.read().unwrap();
+            block_reward(2, s.total_mined_bina)
+        };
+        let (_, state_root) = {
+            let l = ledger.lock().unwrap();
+            l1_core::rewards::simulate_block_execution(&l, &[], &miner.address_hex(), reward)
+        };
+        let claim = claim_at(&miner, 2, genesis, [0u8; 32], state_root, [9u8; 32], 1_000_001);
+        accept_signed_claim(&state, &ledger, claim, None, vec![]).expect("well-formed claim must be accepted");
+    }
+
+    // ── transaction execution integrity ─────────────────────────────────
+
+    #[test]
+    fn claim_including_a_double_spend_is_rejected() {
+        let (state, ledger, miner, genesis) = test_env("double_spend");
+        let r1 = WalletKeypair::generate();
+        let r2 = WalletKeypair::generate();
+        ledger.lock().unwrap().credit(1, &miner.address_hex(), 100, 1_000_000).unwrap();
+
+        // Two transactions, both claiming nonce 0, spending more than the
+        // balance can cover twice over — a double-spend within one block.
+        let tx1 = signed_transfer(&miner, &r1, 80, 0, 0);
+        let tx2 = signed_transfer(&miner, &r2, 80, 0, 0);
+        let txs = vec![tx1, tx2];
+        let merkle = l1_core::transaction::merkle_root(&txs);
+        // Whatever the (incorrect) claimed state_root is doesn't matter —
+        // the transaction-validity check must fire first.
+        let claim = claim_at(&miner, 2, genesis, merkle, [0u8; 32], [9u8; 32], 1_000_001);
+
+        let err = accept_signed_claim(&state, &ledger, claim, None, txs).unwrap_err();
+        assert!(err.message.contains("does not validate"), "unexpected message: {}", err.message);
+    }
+
+    #[test]
+    fn mempool_rejects_a_submission_with_the_wrong_nonce() {
+        let (state, ledger, miner, _genesis) = test_env("wrong_nonce");
+        let recipient = WalletKeypair::generate();
+        ledger.lock().unwrap().credit(1, &miner.address_hex(), 100, 1_000_000).unwrap();
+
+        // Sender's ledger nonce is 0; submit a transaction claiming nonce 5.
+        let tx = signed_transfer(&miner, &recipient, 5, 5, 1);
+        let err = enqueue_transaction(&state, &ledger, tx).unwrap_err();
+        assert!(err.contains("nonce"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn claim_with_a_transaction_that_overdraws_is_rejected() {
+        let (state, ledger, miner, genesis) = test_env("overdraw");
+        let recipient = WalletKeypair::generate();
+        // Miner has 0 balance — any nonzero transfer must fail execution.
+        let tx = signed_transfer(&miner, &recipient, 5, 0, 1);
+        let txs = vec![tx];
+        let merkle = l1_core::transaction::merkle_root(&txs);
+        let claim = claim_at(&miner, 2, genesis, merkle, [0u8; 32], [9u8; 32], 1_000_001);
+
+        let err = accept_signed_claim(&state, &ledger, claim, None, txs).unwrap_err();
+        assert!(err.message.contains("does not validate"), "unexpected message: {}", err.message);
+    }
+
+    // ── chain-linkage / fork choice ──────────────────────────────────────
+
+    #[test]
+    fn select_best_peer_ignores_lower_or_equal_work_and_foreign_genesis() {
+        let genesis = [1u8; 32];
+        let addr: SocketAddr = "127.0.0.1:9001".parse().unwrap();
+        let lower = PeerStatus { addr, height: 3, genesis_hash: genesis, chain_work: 50 };
+        let equal = PeerStatus { addr, height: 5, genesis_hash: genesis, chain_work: 100 };
+        let foreign_genesis = PeerStatus { addr, height: 20, genesis_hash: [2u8; 32], chain_work: 999 };
+        let heavier = PeerStatus { addr, height: 6, genesis_hash: genesis, chain_work: 150 };
+
+        assert!(select_best_peer(vec![lower.clone()], genesis, 100).is_none(), "lower work must not be selected");
+        assert!(select_best_peer(vec![equal.clone()], genesis, 100).is_none(), "equal (not strictly heavier) work must not be selected");
+        assert!(select_best_peer(vec![foreign_genesis.clone()], genesis, 100).is_none(), "a different genesis must never be selected regardless of work");
+
+        let picked = select_best_peer(vec![lower, equal, foreign_genesis, heavier.clone()], genesis, 100).unwrap();
+        assert_eq!(picked.chain_work, heavier.chain_work);
+    }
+
+    #[test]
+    fn claim_with_wrong_prev_hash_is_rejected() {
+        let (state, ledger, miner, genesis) = test_env("wrong_prev_hash");
+        let not_the_tip = [0x44u8; 32];
+        assert_ne!(not_the_tip, genesis);
+        let claim = claim_at(&miner, 2, not_the_tip, [0u8; 32], l1_core::rewards::empty_state_root(), [9u8; 32], 1_000_001);
+        let err = accept_signed_claim(&state, &ledger, claim, None, vec![]).unwrap_err();
+        assert!(err.message.contains("prev_hash"), "unexpected message: {}", err.message);
+    }
+
+    #[test]
+    fn claim_for_wrong_height_is_rejected() {
+        let (state, ledger, miner, genesis) = test_env("wrong_height");
+        // Chain is at height 1, so the only valid next claim is height 2.
+        let claim = claim_at(&miner, 9, genesis, [0u8; 32], l1_core::rewards::empty_state_root(), [9u8; 32], 1_000_001);
+        let err = accept_signed_claim(&state, &ledger, claim, None, vec![]).unwrap_err();
+        assert!(err.message.contains("height"), "unexpected message: {}", err.message);
+    }
+
+    // ── reorg / rollback ─────────────────────────────────────────────────
+
+    #[test]
+    fn rollback_requeues_transactions_into_mempool() {
+        let miner = WalletKeypair::generate();
+        let recipient = WalletKeypair::generate();
+        let tx1 = signed_transfer(&miner, &recipient, 5, 0, 1);
+        let tx2 = signed_transfer(&miner, &recipient, 5, 1, 1);
+        let rolled_back = vec![
+            dummy_block_record(4, vec![tx1.clone()]),
+            dummy_block_record(5, vec![tx2.clone()]),
+        ];
+
+        let mut mempool: HashMap<[u8; 32], SignedTransaction> = HashMap::new();
+        requeue_rolled_back_transactions(&mut mempool, &rolled_back);
+
+        assert_eq!(mempool.len(), 2);
+        assert!(mempool.contains_key(&tx1.tx_id()), "tx from the first rolled-back block must be requeued");
+        assert!(mempool.contains_key(&tx2.tx_id()), "tx from the second rolled-back block must be requeued");
+    }
+
+    // ── Bitcoin checkpoint integrity ─────────────────────────────────────
+
+    #[test]
+    fn checkpoint_height_without_a_proof_is_rejected() {
+        let (state, ledger, miner, genesis) = test_env("ckpt_missing");
+        { state.write().unwrap().chain_height = 0; } // next height = 1, always a checkpoint height
+        let claim = claim_at(&miner, 1, genesis, [0u8; 32], l1_core::rewards::empty_state_root(), [9u8; 32], 1_000_001);
+        let err = accept_signed_claim(&state, &ledger, claim, None, vec![]).unwrap_err();
+        assert!(err.message.contains("checkpoint proof"), "unexpected message: {}", err.message);
+    }
+
+    #[test]
+    fn checkpoint_proof_with_mismatched_seed_hash_is_rejected() {
+        let (state, ledger, miner, genesis) = test_env("ckpt_seed_mismatch");
+        { state.write().unwrap().chain_height = 0; }
+        let proof = BtcCheckpointProof {
+            tip_hash: [1u8; 32],
+            tip_height: 900_000,
+            utxo_entropy: [2u8; 32],
+            stale_xor_pool: [3u8; 32],
+        };
+        // Header claims a different seed than what the proof actually hashes to.
+        let claimed_seed = [0u8; 32];
+        assert_ne!(proof.seed_hash(), claimed_seed);
+        let claim = claim_at(&miner, 1, genesis, [0u8; 32], l1_core::rewards::empty_state_root(), claimed_seed, 1_000_001);
+        let err = accept_signed_claim(&state, &ledger, claim, Some(proof), vec![]).unwrap_err();
+        assert!(err.message.contains("checkpoint proof"), "unexpected message: {}", err.message);
+    }
+
+    #[test]
+    fn checkpoint_proof_with_implausible_btc_height_is_rejected() {
+        let (state, ledger, miner, genesis) = test_env("ckpt_implausible");
+        {
+            let mut s = state.write().unwrap();
+            s.chain_height = 0;
+            s.btc_checkpoint_tip_height = 0;
+            s.last_observed_btc = BtcEntropyState::mock(); // tip_height = 0
+        }
+        // Claims a wildly different Bitcoin tip height than what this
+        // validator itself observes — must not be trusted even though the
+        // proof's own hash is internally consistent.
+        let proof = BtcCheckpointProof {
+            tip_hash: [1u8; 32],
+            tip_height: 900_000,
+            utxo_entropy: [2u8; 32],
+            stale_xor_pool: [3u8; 32],
+        };
+        let claim = claim_at(&miner, 1, genesis, [0u8; 32], l1_core::rewards::empty_state_root(), proof.seed_hash(), 1_000_001);
+        let err = accept_signed_claim(&state, &ledger, claim, Some(proof), vec![]).unwrap_err();
+        assert!(err.message.contains("not plausible"), "unexpected message: {}", err.message);
+    }
+
+    // ── timestamp integrity ──────────────────────────────────────────────
+
+    #[test]
+    fn claim_with_non_monotonic_timestamp_is_rejected() {
+        let (state, ledger, miner, genesis) = test_env("ts_non_monotonic");
+        // state's last_block_timestamp_ms is 1_000_000; a claim at or before
+        // that must be rejected regardless of everything else being valid.
+        let claim = claim_at(&miner, 2, genesis, [0u8; 32], l1_core::rewards::empty_state_root(), [9u8; 32], 1_000_000);
+        let err = accept_signed_claim(&state, &ledger, claim, None, vec![]).unwrap_err();
+        assert!(err.message.contains("timestamp"), "unexpected message: {}", err.message);
+    }
+
+    #[test]
+    fn claim_with_far_future_timestamp_is_rejected() {
+        let (state, ledger, miner, genesis) = test_env("ts_future");
+        let absurd_future = unix_ms() + MAX_FUTURE_MS + 3_600_000; // an hour past the allowed window
+        let claim = claim_at(&miner, 2, genesis, [0u8; 32], l1_core::rewards::empty_state_root(), [9u8; 32], absurd_future);
+        let err = accept_signed_claim(&state, &ledger, claim, None, vec![]).unwrap_err();
+        assert!(err.message.contains("timestamp"), "unexpected message: {}", err.message);
+    }
+}
+
+// ─── Integration tests (spawn real processes) ──────────────────────────────
+//
+// Ignored by default: these spawn real `l1-node` processes, do real (if
+// minimal) PoW mining, and use real ports and disk. Run explicitly with:
+//   cargo test -p l1-node -- --ignored
+#[cfg(test)]
+mod integration_tests {
+    use std::process::{Child, Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    /// Kills the wrapped process on drop, so a failed assertion (which
+    /// unwinds the stack) still cleans up instead of leaking a background
+    /// mining node.
+    struct ChildGuard(Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// `CARGO_BIN_EXE_<name>` is only set for integration tests (`tests/`
+    /// dir); this is a unit test inside the binary's own `main.rs`, so we
+    /// locate the sibling `l1-node` executable relative to the test
+    /// binary's own path instead (`target/debug/deps/l1_node-*.exe` ->
+    /// `target/debug/l1-node.exe`).
+    fn node_exe_path() -> std::path::PathBuf {
+        let test_exe = std::env::current_exe().expect("current_exe");
+        let target_debug = test_exe
+            .parent() // .../target/debug/deps
+            .and_then(|p| p.parent()) // .../target/debug
+            .expect("test binary must live under target/<profile>/deps");
+        target_debug.join(format!("l1-node{}", std::env::consts::EXE_SUFFIX))
+    }
+
+    fn spawn_node(port: u16, data_dir: &std::path::Path, seeds: &str) -> ChildGuard {
+        let exe = node_exe_path();
+        assert!(exe.exists(), "l1-node binary not found at {exe:?} — run `cargo build -p l1-node` first");
+        let child = Command::new(exe)
+            .env("BINA_HTTP_PORT", port.to_string())
+            .env("BINA_DATA_DIR", data_dir.to_str().unwrap())
+            .env("BINA_P2P_LISTEN_ADDR", format!("127.0.0.1:{port}"))
+            .env("BINA_SEEDS", seeds)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("failed to spawn l1-node binary");
+        ChildGuard(child)
+    }
+
+    async fn wait_for_height(client: &reqwest::Client, port: u16, min_height: u64, timeout: Duration) -> Option<u64> {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if let Ok(resp) = client.get(format!("http://127.0.0.1:{port}/chain/status")).send().await {
+                if let Ok(json) = resp.json::<serde_json::Value>().await {
+                    if let Some(h) = json.get("height").and_then(|v| v.as_u64()) {
+                        if h >= min_height {
+                            return Some(h);
+                        }
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        None
+    }
+
+    /// Full lifecycle: a node mines a few blocks, gets restarted (proving
+    /// the persistent store survives and keeps serving pre-restart
+    /// history), then a completely fresh second node with nothing but a
+    /// seed address syncs the entire chain from genesis on its own. This is
+    /// the exact scenario that exposed the original in-memory-only block
+    /// storage gap during manual testing.
+    #[tokio::test]
+    #[ignore]
+    async fn fresh_node_resyncs_from_genesis_against_a_running_peer() {
+        let base = std::env::temp_dir().join(format!("bina_integration_{}", std::process::id()));
+        let dir_a = base.join("a");
+        let dir_b = base.join("b");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&dir_a).unwrap();
+        std::fs::create_dir_all(&dir_b).unwrap();
+
+        // Deliberately non-default ports so this never collides with a
+        // manually-run node on the developer's machine.
+        let port_a: u16 = 18281;
+        let port_b: u16 = 18282;
+        let client = reqwest::Client::builder().timeout(Duration::from_secs(3)).build().unwrap();
+
+        // Node A mines from genesis.
+        let mut node_a = spawn_node(port_a, &dir_a, "");
+        let height = wait_for_height(&client, port_a, 2, Duration::from_secs(90))
+            .await
+            .expect("node A did not reach height 2 in time");
+        assert!(height >= 2);
+
+        // Restart it — the durable store must let it resume and keep
+        // serving its pre-restart history, not just its resume pointer.
+        drop(node_a);
+        node_a = spawn_node(port_a, &dir_a, "");
+        let resumed_height = wait_for_height(&client, port_a, height, Duration::from_secs(30))
+            .await
+            .expect("node A did not resume after restart");
+        assert!(resumed_height >= height, "restarted node must not have lost its height");
+
+        let early_block = client
+            .get(format!("http://127.0.0.1:{port_a}/block/1"))
+            .send()
+            .await
+            .expect("request block 1 from A")
+            .json::<serde_json::Value>()
+            .await
+            .expect("parse block 1");
+        assert_eq!(early_block["height"].as_u64(), Some(1), "restarted node must still serve pre-restart block 1");
+
+        // A completely fresh node, seeded only with A's address, must sync
+        // the entire chain from genesis on its own.
+        let node_b = spawn_node(port_b, &dir_b, &format!("127.0.0.1:{port_a}"));
+        let synced_height = wait_for_height(&client, port_b, resumed_height, Duration::from_secs(90))
+            .await
+            .expect("node B did not sync up to node A's height in time");
+        assert!(synced_height >= resumed_height);
+
+        let status_a: serde_json::Value = client
+            .get(format!("http://127.0.0.1:{port_a}/chain/status"))
+            .send().await.unwrap().json().await.unwrap();
+        let status_b: serde_json::Value = client
+            .get(format!("http://127.0.0.1:{port_b}/chain/status"))
+            .send().await.unwrap().json().await.unwrap();
+
+        assert_eq!(status_a["genesis_hash"], status_b["genesis_hash"], "must be the same chain");
+        if status_a["height"] == status_b["height"] {
+            assert_eq!(status_a["tip_hash"], status_b["tip_hash"], "agreeing on height must mean agreeing on the tip");
+        }
+
+        drop(node_a);
+        drop(node_b);
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
 

@@ -51,6 +51,17 @@ pub const STATE_ROOT_TAG: &[u8] = b"BINA-STATE-v1";
 /// ledger. Entries are sorted by address before hashing so the result is
 /// independent of iteration order — any two nodes with the same logical
 /// state produce the same root.
+///
+/// KNOWN ALPHA LIMITATION: this is a flat hash over the *entire* account
+/// set, not a Merkle trie. It is sufficient for what every node does today
+/// (full re-execution and comparison), but it cannot produce a compact
+/// membership/exclusion proof for a single account, so it doesn't support
+/// light clients — verifying this root means re-deriving it from scratch
+/// over every account. A sparse Merkle trie (or Ethereum-style Merkle
+/// Patricia trie) is the natural upgrade path if/when light-client support
+/// is needed; the header field is already named `state_root` rather than
+/// something flat-hash-specific so that swap doesn't need another header
+/// migration.
 pub fn compute_state_root<'a, I>(entries: I) -> [u8; 32]
 where
     I: IntoIterator<Item = (&'a str, u64, u64)>,
