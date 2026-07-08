@@ -93,4 +93,8 @@ l1-chain/**/wallet.json
 l1-chain/**/*.key
 l1-chain/data/chain-state.json
 l1-chain/data/ledger.csv
+l1-chain/data/blocks.sqlite3
+l1-chain/data/blocks.sqlite3-shm
+l1-chain/data/blocks.sqlite3-wal
+l1-chain/data/archive-pre-consensus-v2/
 l1-chain/logs/
